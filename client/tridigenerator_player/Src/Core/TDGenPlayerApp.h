@@ -28,7 +28,7 @@ private:
     InputSystem input;
     //AudioSystem audio;
     //SceneManager scene;
-    FrameLoader frameloader;
+    std::unique_ptr<FrameLoader> frameloader;
 
     // Collection of all placed planes
     OVRFW::GeometryBuilder planeGeometry_;

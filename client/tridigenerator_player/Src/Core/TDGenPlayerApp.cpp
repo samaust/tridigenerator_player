@@ -32,6 +32,7 @@
 #include "meta_openxr_preview/openxr_oculus_helpers.h"
 
 #include "TDGenPlayerApp.h"
+#include "Logging.h"
 
 // All physical units in OpenXR are in meters, but sometimes it's more useful
 // to think in cm, so this user defined literal converts from centimeters to meters
@@ -54,7 +55,8 @@ constexpr float operator"" _m(unsigned long long meters)
     return static_cast<float>(meters);
 }
 
-TDGenPlayerApp::TDGenPlayerApp()
+TDGenPlayerApp::TDGenPlayerApp() :
+        frameloader(std::make_unique<FrameLoader>("http://192.168.111.250:8080"))
 {
     BackgroundColor = OVR::Vector4f(0.55f, 0.35f, 0.1f, 1.0f);
 
@@ -89,8 +91,32 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     OVRFW::XrApp::AppInit(context);
 
     // Load frame data
-    frameloader = FrameLoader("http://192.168.111.250:8080");
-    frameloader.LoadManifest();
+    if (!frameloader->LoadManifest()) {
+        LOGE("Failed to load manifest");
+        return false;
+    }
+    frameloader->StartBackgroundWriter();
+
+    // Create initial plane geometry and renderer
+    auto planeDescriptor = OVRFW::BuildTesselatedQuadDescriptor(
+            frameloader->GetWidth()-1,
+            frameloader->GetHeight()-1,
+            true,
+            false);
+    OVR::Vector4f planeColor = {1.0f, 0.0f, 0.0f, 1.0f};
+    planeGeometry_.Add(
+            planeDescriptor,
+            OVRFW::GeometryBuilder::kInvalidIndex,
+            planeColor);
+
+    auto d = planeGeometry_.ToGeometryDescriptor();
+    //d.attribs.position = frame.positions;
+    //d.attribs.color = frame.colors;
+
+    planeRenderer_.Init(d);
+    //planeRenderer_.SetPose(
+    //    OVR::Posef(OVR::Quat<float>::Identity(), {0_m, 1.5_m, 0.0_m}));
+    //planeRenderer_.SetScale({1.0f, 1.0f, 1.0f});
 
     return true;
 }
@@ -123,30 +149,20 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     //OXR(xrSyncActions(Session, &syncInfo));
 
     // Application logic update here
-    if (!frameloader.spawned)
-    {
-        frameloader.spawned = true;
-        FrameData frame = frameloader.LoadFrameFromIndex(0);
 
-        auto planeDescriptor = OVRFW::BuildTesselatedQuadDescriptor(
-                frameloader.width-1,
-                frameloader.height-1,
-                true,
-                false);
-        OVR::Vector4f planeColor = {1.0f, 0.0f, 0.0f, 1.0f};
-        planeGeometry_.Add(
-            planeDescriptor,
-            OVRFW::GeometryBuilder::kInvalidIndex,
-            planeColor);
+    // Update plane geometry with latest frame data
+    using clock = std::chrono::steady_clock;
+    double now = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
 
-        auto d = planeGeometry_.ToGeometryDescriptor();
+    // Try to advance playback if needed. Very fast: few atomics + a move when successful.
+    bool consumed = frameloader->ReadFrameIfNeeded(now);
+    if (consumed) {
+        // get the most recent frame and use it for rendering
+        const FrameData& frame = frameloader->GetCurrentFrame();
+        auto d = planeGeometry_.ToGeometryDescriptor(); // TODO : Calculate once and store to improve performance
         d.attribs.position = frame.positions;
         d.attribs.color = frame.colors;
-
-        planeRenderer_.Init(d);
-        //planeRenderer_.SetPose(
-        //    OVR::Posef(OVR::Quat<float>::Identity(), {0_m, 1.5_m, 0.0_m}));
-        //planeRenderer_.SetScale({1.0f, 1.0f, 1.0f});
+        planeRenderer_.UpdateGeometry(d);
     }
     planeRenderer_.Update();
 }
@@ -174,5 +190,6 @@ void TDGenPlayerApp::SessionEnd()
 
 void TDGenPlayerApp::AppShutdown(const xrJava *context)
 {
+    frameloader->StopBackgroundWriter();
     OVRFW::XrApp::AppShutdown(context);
 }

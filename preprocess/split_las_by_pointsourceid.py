@@ -19,7 +19,7 @@ def run_pipeline(input_path):
     return pipe.arrays[0]
 
 
-def export_frames(arr, width, height, output_dir, manifest_path):
+def export_frames(arr, width, height, fps, output_dir, manifest_path):
     """Group by PointSourceId and write binary per frame."""
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
@@ -30,7 +30,8 @@ def export_frames(arr, width, height, output_dir, manifest_path):
     manifest = {
         "frames": [],
         "width": int(width),
-        "height": int(height)
+        "height": int(height),
+        "fps": int(fps),
     }
 
     for pid in point_source_ids:
@@ -111,13 +112,14 @@ def main():
     parser.add_argument("--input", required=True, help="Path to input LAS file")
     parser.add_argument("--width", required=True, type=int, help="Grid width")
     parser.add_argument("--height", required=True, type=int, help="Grid height")
+    parser.add_argument("--fps", required=True, type=int, help="Frames per second")
     parser.add_argument("--output", default="../server/frames", help="Output directory for binary frames")
     parser.add_argument("--manifest", default="../server/manifest/frames.json", help="Manifest output path")
 
     args = parser.parse_args()
 
     arr = run_pipeline(args.input)
-    export_frames(arr, args.width, args.height, args.output, args.manifest)
+    export_frames(arr, args.width, args.height, args.fps, args.output, args.manifest)
 
 
 if __name__ == "__main__":
