@@ -37,35 +37,9 @@ private:
     // gets reset from planeGeometry for any new plane
     OVRFW::UnlitGeometryRenderer planeRenderer_;
 
-    GLuint program_ = 0;
-    GLint u_modelLoc = -1;
-    GLint u_viewLoc = -1;
-    GLint u_projLoc = -1;
-    GLint u_ambientLoc = -1;
-    GLint u_colorTexLoc = -1;
-    GLint u_classTexLoc = -1;
-    GLint u_depthTexLoc = -1;
-
-    GLMesh mesh_;              // helper contains VAO/VBO/IBO and update helpers
-    // NetworkStream net_;        // background streamer, PLACEHOLDER for implementation
     // XRInputActions xrInput_;   // action set instance (init in SessionInit)
 
-    int gridWidth = 256;       // set from manifest
-    int gridHeight = 256;
-    GLuint colorTex_ = 0;
-    GLuint classTex_ = 0;
-    GLuint posTex_ = 0;        // if you prefer storing positions in a texture
-    //bool playing = true;
-    //int frameIndex = 0;
-
-    // OpenGL
-    OVRFW::GlProgram m_Program;
-    OVRFW::GlGeometry m_Geometry;
-    GLint uViewLoc = -1;
-    GLint uProjLoc = -1;
-
     virtual std::vector<const char *> GetExtensions() override;
-
     virtual bool AppInit(const xrJava *context) override;
     virtual bool SessionInit() override;
     virtual void Update(const OVRFW::ovrApplFrameIn &in) override;
@@ -74,9 +48,4 @@ private:
     virtual void Render(const OVRFW::ovrApplFrameIn &in, OVRFW::ovrRendererOutput &out) override;
     virtual void SessionEnd() override;
     virtual void AppShutdown(const xrJava *context) override;
-
-    std::string LoadShaderSource(const std::string& filename);
-    void CreateGLProgram();
-    void CreateTextures();
-    void UpdateTexturesFromFrame(const std::vector<uint8_t>& frame);
 };

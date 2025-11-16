@@ -10,9 +10,12 @@ struct FrameInfo {
 };
 
 struct FrameData {
-    std::vector<OVR::Vector3f> position;
-    std::vector<OVR::Vector4f> color;
-    //std::vector<float> classes;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t pointCount = 0;
+
+    std::vector<OVR::Vector3f> positions; // XYZ
+    std::vector<OVR::Vector4f> colors;    // RGBA
 };
 
 class FrameLoader {
@@ -24,16 +27,18 @@ public:
     int width;
     int spawned;
 
-    bool loadManifest();
-    bool loadFrame(int idx);
-    int getNumFrames() const { return (int)frames.size(); }
-    FrameData& getCurrentFrame() { return frame; }
+    bool LoadManifest();
+    FrameData LoadFrameFromIndex(int idx);
+    FrameData LoadFrameFromUrl(const std::string& url);
+    int GetNumFrames() const { return (int)frames.size(); }
+    FrameData& GetCurrentFrame() { return frame; }
 
 private:
     std::string baseUrl;
     std::vector<FrameInfo> frames;
     FrameData frame;
 
-    bool httpGet(const std::string& url, std::string& out);
-    bool httpGetBinary(const std::string& url, std::vector<uint8_t>& out);
+    bool HttpGet(const std::string& url, std::string& out);
+    bool HttpGetBinary(const std::string& url, std::vector<uint8_t>& out);
+    static FrameData ParseFrame(const std::vector<uint8_t>& blob);
 };

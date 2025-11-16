@@ -26,7 +26,7 @@ FrameLoader::FrameLoader(const std::string& baseUrl_) : baseUrl(baseUrl_) {
     spawned = false;
 }
 
-bool FrameLoader::httpGet(const std::string& url, std::string& out) {
+bool FrameLoader::HttpGet(const std::string& url, std::string& out) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
@@ -38,7 +38,7 @@ bool FrameLoader::httpGet(const std::string& url, std::string& out) {
     return (res == CURLE_OK);
 }
 
-bool FrameLoader::httpGetBinary(const std::string& url, std::vector<uint8_t>& out) {
+bool FrameLoader::HttpGetBinary(const std::string& url, std::vector<uint8_t>& out) {
     CURL* curl = curl_easy_init();
     if (!curl) return false;
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
@@ -50,10 +50,10 @@ bool FrameLoader::httpGetBinary(const std::string& url, std::vector<uint8_t>& ou
     return (res == CURLE_OK);
 }
 
-bool FrameLoader::loadManifest() {
+bool FrameLoader::LoadManifest() {
     std::string url = baseUrl + "/manifest/frames.json";
     std::string jsonStr;
-    if (!httpGet(url, jsonStr)) {
+    if (!HttpGet(url, jsonStr)) {
         LOGE("Failed GET %s", url.c_str());
         return false;
     }
@@ -90,89 +90,75 @@ bool FrameLoader::loadManifest() {
     return true;
 }
 
-bool FrameLoader::loadFrame(int idx) {
-    if (idx < 0 || idx >= (int)frames.size()) return false;
+FrameData FrameLoader::LoadFrameFromIndex(int idx) {
+    if (idx < 0 || idx >= (int)frames.size()) {
+        FrameData frame;
+
+        return frame;
+    }
 
     std::string url = baseUrl + "/frames/" + frames[idx].file;
-    std::vector<uint8_t> buf;
-    if (!httpGetBinary(url, buf)) {
-        LOGE("Failed GET %s", url.c_str());
-        return false;
+
+    return LoadFrameFromUrl(url);
+}
+
+FrameData FrameLoader::LoadFrameFromUrl(const std::string& url) {
+    std::vector<uint8_t> blob;
+    if (!HttpGetBinary(url, blob))
+    {
+        throw std::runtime_error("HttpGetBinary failed: " + url);
     }
 
-    // --- Data Structure Constants ---
-    // Header: 3 little-endian unsigned integers (width, height, n)
-    const size_t headerSize = 3 * sizeof(unsigned int); // 12 bytes
-    const int strideF = 4 * 3; // 12 bytes (for X, Y, Z floats)
-    const int strideUB = 1 * 4; // 4 bytes (for R, G, B, Class uint8_t)
-    int numVerts = width * height; // numVerts is defined by width * height
+    return ParseFrame(blob);
+}
 
-    // --- Safety Check 1: Total Buffer Size ---
-    const size_t floatDataSize = (size_t)numVerts * strideF;
-    const size_t byteDataSize = (size_t)numVerts * strideUB;
+FrameData FrameLoader::ParseFrame(const std::vector<uint8_t>& blob)
+{
+    FrameData frame;
 
-    // Total Expected Size = Header Size + Float Data Size + Byte Data Size
-    const size_t totalExpectedSize = headerSize + floatDataSize + byteDataSize;
+    const uint8_t* ptr = blob.data();
+    const uint8_t* end = blob.data() + blob.size();
 
-    if (buf.size() != totalExpectedSize) {
-        LOGE("Data size mismatch! Expected %zu bytes, got %zu bytes.", totalExpectedSize, buf.size());
-        return false;
-    }
-    // --- End Safety Check 1 ---
+    auto require = [&](size_t bytes) {
+        if (ptr + bytes > end)
+            throw std::runtime_error("Corrupt or truncated frame data");
+    };
 
-    // --- Safety Check 2: Header Minimum Size ---
-    if (buf.size() < headerSize) {
-        LOGE("Buffer is too small to even contain the header.");
-        return false;
-    }
-    // --- End Safety Check 2 ---
+    //
+    // Header (12 bytes)
+    //
+    require(12);
+    std::memcpy(&frame.width,      ptr + 0, 4);
+    std::memcpy(&frame.height,     ptr + 4, 4);
+    std::memcpy(&frame.pointCount, ptr + 8, 4);
+    ptr += 12;
 
-    frame.position.resize(numVerts);
-    frame.color.resize(numVerts);
+    if (frame.pointCount != frame.width * frame.height)
+        throw std::runtime_error("pointCount mismatch with width * height");
 
-    // The start of the float data is *after* the header.
-    const uint8_t* floatDataStart = buf.data() + headerSize;
+    //
+    // XYZ float32 (pointCount × 3)
+    //
+    const size_t xyzFloats = size_t(frame.pointCount) * 3;
+    const size_t xyzBytes  = xyzFloats * sizeof(float);
 
-    // The offset to start reading the unsigned bytes is after the header AND all float data.
-    const size_t strideUB_offset = headerSize + floatDataSize;
-    const uint8_t* bufEnd = buf.data() + buf.size();
+    require(xyzBytes);
 
+    frame.positions.resize(frame.pointCount);
+    std::memcpy(frame.positions.data(), ptr, xyzBytes);
+    ptr += xyzBytes;
 
-    for (int i = 0; i < numVerts; ++i) {
-        // Calculate pointers for the current iteration
-        const uint8_t* bf = floatDataStart + (size_t)i * strideF;
-        const uint8_t* bu = buf.data() + strideUB_offset + (size_t)i * strideUB;
+    //
+    // RGBA float32 (pointCount × 4)
+    //
+    const size_t rgbaFloats = size_t(frame.pointCount) * 4;
+    const size_t rgbaBytes  = rgbaFloats * sizeof(float);
 
-        // --- Safety Check 3: Pointer Bounds Check (inside the loop) ---
-        // Check float data bounds
-        if (bf + strideF > bufEnd || bf < buf.data()) {
-            LOGE("Read out of bounds detected for float data at index %d.", i);
-            return false;
-        }
+    require(rgbaBytes);
 
-        // Check byte data bounds
-        if (bu + strideUB > bufEnd || bu < buf.data()) {
-            LOGE("Read out of bounds detected for byte data at index %d.", i);
-            return false;
-        }
-        // --- End Safety Check 3 ---
+    frame.colors.resize(frame.pointCount);
+    std::memcpy(frame.colors.data(), ptr, rgbaBytes);
+    ptr += rgbaBytes;
 
-        // Cast and read float data (safe now)
-        const float* f = reinterpret_cast<const float*>(bf);
-        frame.position[i].x = f[0];
-        frame.position[i].y = f[1];
-        frame.position[i].z = f[2];
-
-        // Read unsigned byte data (safe now)
-        frame.color[i].x = static_cast<float>(bu[0]) / 255.0f;
-        frame.color[i].y = static_cast<float>(bu[1]) / 255.0f;
-        frame.color[i].z = static_cast<float>(bu[2]) / 255.0f;   
-        if (bu[3] == 7) {
-            // Mark classification Invisible points as transparent
-            frame.color[i].w = 0.0f;
-        } else
-            frame.color[i].w = 1.0f;
-    }
-    
-    return true;
+    return frame;
 }
