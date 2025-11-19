@@ -264,6 +264,108 @@ function(find_glm)
 
 endfunction()
 
+function(find_dav1d)
+    set(DAV1D_DIR ${CMAKE_CURRENT_LIST_DIR}/dav1d)
+
+    include(FetchContent)
+
+    FetchContent_Declare(
+            dav1d
+            GIT_REPOSITORY https://github.com/videolan/dav1d.git
+            GIT_TAG        1.5.2
+            SOURCE_DIR      ${DAV1D_DIR}
+    )
+
+    FetchContent_GetProperties(dav1d)
+    if(NOT dav1d_POPULATED)
+        FetchContent_Populate(dav1d)
+    endif()
+
+    set(DAV1D_BUILD_DIR ${dav1d_BINARY_DIR})
+
+    # Use Meson inside CMake
+    set(MESON_EXECUTABLE meson)
+    set(NINJA_EXECUTABLE ninja)
+
+    # Output directory per ABI
+    set(DAV1D_OUT ${CMAKE_CURRENT_BINARY_DIR}/dav1d/${ANDROID_ABI})
+
+    set(DAV1D_MESON_CROSS_FILE ${CMAKE_CURRENT_BINARY_DIR}/meson-android-${ANDROID_ABI}.ini)
+
+    # Detect host-tag automatically (Linux, macOS, Windows)
+    if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+        set(NDK_HOST_TAG "linux-x86_64")
+    elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+        set(NDK_HOST_TAG "darwin-x86_64")
+    elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+        set(NDK_HOST_TAG "windows-x86_64")
+    else()
+        message(FATAL_ERROR "Unsupported host: ${CMAKE_HOST_SYSTEM_NAME}")
+    endif()
+
+    set(NDK_TOOLCHAIN_BIN
+            ${CMAKE_ANDROID_NDK}/toolchains/llvm/prebuilt/${NDK_HOST_TAG}/bin
+    )
+
+    if(ANDROID_ABI STREQUAL "arm64-v8a")
+        set(ANDROID_C_COMPILER     "aarch64-linux-android21-clang")
+        set(ANDROID_CXX_COMPILER   "aarch64-linux-android21-clang++")
+    elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
+        set(ANDROID_C_COMPILER     "armv7a-linux-androideabi21-clang")
+        set(ANDROID_CXX_COMPILER   "armv7a-linux-androideabi21-clang++")
+    elseif(ANDROID_ABI STREQUAL "x86_64")
+        set(ANDROID_C_COMPILER     "x86_64-linux-android21-clang")
+        set(ANDROID_CXX_COMPILER   "x86_64-linux-android21-clang++")
+    endif()
+
+    file(WRITE ${DAV1D_MESON_CROSS_FILE} "
+[host_machine]
+system = 'android'
+cpu_family = '${CMAKE_SYSTEM_PROCESSOR}'
+cpu = '${CMAKE_SYSTEM_PROCESSOR}'
+endian = 'little'
+
+[binaries]
+c = '${NDK_TOOLCHAIN_BIN}/${ANDROID_C_COMPILER}'
+cpp = '${NDK_TOOLCHAIN_BIN}/${ANDROID_CXX_COMPILER}'
+ar = '${NDK_TOOLCHAIN_BIN}/llvm-ar'
+strip = '${NDK_TOOLCHAIN_BIN}/llvm-strip'
+nm = '${NDK_TOOLCHAIN_BIN}/llvm-nm'
+
+[properties]
+needs_exe_wrapper = true
+")
+
+    execute_process(
+            COMMAND ${MESON_EXECUTABLE}
+            setup
+            ${DAV1D_OUT}
+            ${dav1d_SOURCE_DIR}
+            --buildtype=release
+            --default-library=static
+            --cross-file=${DAV1D_MESON_CROSS_FILE}
+            RESULT_VARIABLE r
+    )
+    if(NOT r EQUAL 0)
+        message(FATAL_ERROR "Meson configure failed")
+    endif()
+
+    execute_process(
+            COMMAND ${NINJA_EXECUTABLE} -C ${DAV1D_OUT}
+            RESULT_VARIABLE r2
+    )
+    if(NOT r2 EQUAL 0)
+        message(FATAL_ERROR "ninja build failed for dav1d")
+    endif()
+
+    add_library(dav1d STATIC IMPORTED GLOBAL)
+    set_target_properties(dav1d PROPERTIES
+            IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/dav1d/${ANDROID_ABI}/src/libdav1d.a
+            INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}/dav1d/${ANDROID_ABI}/include"
+    )
+
+endfunction()
+
 find_ktx()
 find_stb()
 
@@ -276,3 +378,4 @@ find_openxr_loader()
 find_curl()
 find_jsoncpp()
 find_glm()
+find_dav1d()
