@@ -8,15 +8,17 @@
 #include <cstring>
 #include <stdexcept>
 
-static double NowMs() {
-    using namespace std::chrono;
-    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
-}
+
+
+//static double NowMs() {
+//    using namespace std::chrono;
+//    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+//}
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "FrameLoader", __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "FrameLoader", __VA_ARGS__)
 
-// ---------- You already have writeBinary / writeString helpers for curl ----------
+// ---------- writeBinary / writeString helpers for curl ----------
 static size_t writeString(void* ptr, size_t size, size_t nmemb, void* userdata) {
     std::string* str = reinterpret_cast<std::string*>(userdata);
     size_t total = size * nmemb;
@@ -38,6 +40,9 @@ FrameLoader::FrameLoader(const std::string& baseUrl_) : baseUrl(baseUrl_) {
     // initialize ring
     ring.resize(RING_SIZE);
     // writer not started yet
+
+    // Setup dav1d and decode on a worker thread 
+    //player.Init();
 }
 
 FrameLoader::~FrameLoader() {
@@ -73,6 +78,9 @@ bool FrameLoader::LoadManifest() {
         return false;
     }
 
+    if (root.isMember("file") && root["file"].isString()) {
+        file = root["file"].asString();
+    }
     if (root.isMember("width") && root["width"].isIntegral()) {
         width = root["width"].asInt();
     }
@@ -81,14 +89,6 @@ bool FrameLoader::LoadManifest() {
     }
     if (root.isMember("fps") && root["fps"].isIntegral()) {
         fps.store(root["fps"].asInt(), std::memory_order_relaxed);
-    }
-
-    frames.clear();
-    const Json::Value arr = root["frames"];
-    for (const auto& el : arr) {
-        FrameInfo fi;
-        fi.file = el["file"].asString();
-        frames.push_back(fi);
     }
 
     // reset indices
@@ -103,8 +103,8 @@ bool FrameLoader::LoadManifest() {
         nextReadTime = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
     }
 
-    LOGI("Loaded manifest: frames=%zu width=%d height=%d fps=%d",
-         frames.size(), width, height, fps.load());
+    LOGI("Loaded manifest: file=%s width=%d height=%d fps=%d",
+         file.c_str(), width, height, fps.load());
     return true;
 }
 
@@ -135,63 +135,51 @@ bool FrameLoader::HttpGetBinary(const std::string& url, std::vector<uint8_t>& ou
 }
 
 // ---------- ParseFrame (same format: header + XYZ float32 + RGBA float32) ----------
-FrameData FrameLoader::ParseFrame(const std::vector<uint8_t>& blob) {
-    FrameData frame;
-    const uint8_t* ptr = blob.data();
-    const uint8_t* end = ptr + blob.size();
+//FrameData FrameLoader::ParseFrame(const std::vector<uint8_t>& blob) {
+//    FrameData frame;
+//    const uint8_t* ptr = blob.data();
+//    const uint8_t* end = ptr + blob.size();
+//
+//    auto require = [&](size_t bytes) {
+//        if (ptr + bytes > end) throw std::runtime_error("Corrupt or truncated frame data");
+//    };
+//
+//    require(12);
+//    std::memcpy(&frame.width, ptr + 0, 4);
+//    std::memcpy(&frame.height, ptr + 4, 4);
+//    std::memcpy(&frame.pointCount, ptr + 8, 4);
+//    ptr += 12;
+//
+//    if (frame.pointCount != frame.width * frame.height) throw std::runtime_error("pointCount mismatch");
+//
+//    const size_t xyzFloats = size_t(frame.pointCount) * 3;
+//    const size_t xyzBytes = xyzFloats * sizeof(float);
+//    require(xyzBytes);
+//    frame.positions.resize(frame.pointCount);
+//    std::memcpy(frame.positions.data(), ptr, xyzBytes);
+//    ptr += xyzBytes;
+//
+//    const size_t rgbaFloats = size_t(frame.pointCount) * 4;
+//    const size_t rgbaBytes = rgbaFloats * sizeof(float);
+//    require(rgbaBytes);
+//    frame.colors.resize(frame.pointCount);
+//    std::memcpy(frame.colors.data(), ptr, rgbaBytes);
+//    ptr += rgbaBytes;
+//
+//    return frame;
+//}
 
-    auto require = [&](size_t bytes) {
-        if (ptr + bytes > end) throw std::runtime_error("Corrupt or truncated frame data");
-    };
-
-    require(12);
-    std::memcpy(&frame.width, ptr + 0, 4);
-    std::memcpy(&frame.height, ptr + 4, 4);
-    std::memcpy(&frame.pointCount, ptr + 8, 4);
-    ptr += 12;
-
-    if (frame.pointCount != frame.width * frame.height) throw std::runtime_error("pointCount mismatch");
-
-    const size_t xyzFloats = size_t(frame.pointCount) * 3;
-    const size_t xyzBytes = xyzFloats * sizeof(float);
-    require(xyzBytes);
-    frame.positions.resize(frame.pointCount);
-    std::memcpy(frame.positions.data(), ptr, xyzBytes);
-    ptr += xyzBytes;
-
-    const size_t rgbaFloats = size_t(frame.pointCount) * 4;
-    const size_t rgbaBytes = rgbaFloats * sizeof(float);
-    require(rgbaBytes);
-    frame.colors.resize(frame.pointCount);
-    std::memcpy(frame.colors.data(), ptr, rgbaBytes);
-    ptr += rgbaBytes;
-
-    return frame;
-}
-
-// ---------- LoadFrameFromIndex ----------
-FrameData FrameLoader::LoadFrameFromIndex(int idx) {
-    const double t_0 = NowMs();
-    FrameData empty;
-    if (idx < 0 || idx >= (int)frames.size()) return empty;
-
-    std::string url = baseUrl + "/frames/" + frames[idx].file;
+// ---------- LoadVideoFromIndex ----------
+std::vector<uint8_t> FrameLoader::LoadVideoFromIndex(int idx) {
     std::vector<uint8_t> blob;
+
+    std::string url = baseUrl + "/frames/" + file.c_str();
+    LOGI("Loading video frame %d from %s", idx, url.c_str());
     if (!HttpGetBinary(url, blob)) {
         LOGE("HttpGetBinary failed for %s", url.c_str());
-        return empty;
+        return blob;
     }
-    const double t_http = NowMs();
-    try {
-        FrameData f = ParseFrame(blob);
-        const double t_PARSING = NowMs();
-        LOGI( "  HTTP only:     %.3f ms", t_http - t_0 );
-        LOGI( "  PARSING only:     %.3f ms", t_PARSING - t_http );
-        return f;
-    } catch (const std::exception& e) {
-        LOGE("ParseFrame failed: %s", e.what());
-        return empty;
-    }
+    return blob;
 }
 
 // ---------- ComputeFreeSlots ----------
@@ -225,6 +213,35 @@ void FrameLoader::StopBackgroundWriter() {
 void FrameLoader::WriterLoop() {
     LOGI("Writer thread started");
     const int TARGET_FILL = RING_SIZE / 2; // keep half-filled
+    int res = 0;
+
+    // Determine manifest index to fetch
+    /*int mIdx = manifestFetchIdx.fetch_add(1, std::memory_order_acq_rel);
+    if (mIdx >= (int)frames.size()) {
+        if (looping.load(std::memory_order_acquire)) {
+            // wrap
+            manifestFetchIdx.store(0, std::memory_order_release);
+            mIdx = 0;
+        } else {
+            // no more frames to fetch
+            writerRunning.store(false, std::memory_order_release);
+            break;
+        }
+    }*/
+    int mIdx = 0;
+
+    //const double t_0 = NowMs();
+    // Fetch frame (network)
+    std::vector<uint8_t> fetched = LoadVideoFromIndex(mIdx);
+    //const double t_http = NowMs();
+
+    // Dav1d
+    res = player.InitDecoder(fetched);
+    if (res < 0) {
+        LOGE("WriterLoop: player.InitDecoder failed for index %d", mIdx);
+        writerRunning.store(false, std::memory_order_release);
+        return;
+    }
 
     while (writerRunning.load(std::memory_order_relaxed)) {
         // Wait until there is at least one free slot (or stop)
@@ -260,35 +277,37 @@ void FrameLoader::WriterLoop() {
 
             // Sanity: only write to a slot that is not ready
             if (!s.ready.load(std::memory_order_acquire)) {
-                // Determine manifest index to fetch
-                int mIdx = manifestFetchIdx.fetch_add(1, std::memory_order_acq_rel);
-                if (mIdx >= (int)frames.size()) {
-                    if (looping.load(std::memory_order_acquire)) {
-                        // wrap
-                        manifestFetchIdx.store(0, std::memory_order_release);
-                        mIdx = 0;
-                    } else {
-                        // no more frames to fetch
-                        writerRunning.store(false, std::memory_order_release);
-                        break;
-                    }
-                }
-
-                const double t_0 = NowMs();
-                // Fetch frame (network)
-                FrameData fetched = LoadFrameFromIndex(mIdx);
-                const double t_http = NowMs();
+                player.Decode(
+                    fetched,
+                    [&s](const uint8_t* data[3], const int stride[3], int w, int h) {
+                        // Move into slot
+                        FrameData decoded = {
+                            w,
+                            h,
+                            w*h,
+                            data[0],
+                            data[1],
+                            data[2],
+                            stride[0],
+                            stride[1],
+                            stride[2],
+                        };
+                        s.data = std::move(decoded); // cheap move => transfers vectors
+                        LOGI("player.Decode callback frame.width=%d height=%d", w, h);
+                    },
+                    1
+                );
 
                 // Move into slot
-                s.data = std::move(fetched); // cheap move => transfers vectors
+                // s.data = std::move(fetched); // cheap move => transfers vectors
                 // Mark ready
                 s.ready.store(true, std::memory_order_release);
 
                 // Advance write index
                 writeIdx.store((slot + 1) % RING_SIZE, std::memory_order_release);
-                const double t_store = NowMs();
-                LOGI( "  HTTP+PARSING:     %.3f ms", t_http - t_0 );
-                LOGI( "  Store:   %.3f ms", t_store - t_http );
+                //const double t_store = NowMs();
+                //LOGI( "  HTTP+PARSING:     %.3f ms", t_http - t_0 );
+                //LOGI( "  Store:   %.3f ms", t_store - t_http );
             } else {
                 // Slot unexpectedly still ready; avoid overwriting it
                 // Sleep and retry
@@ -299,7 +318,8 @@ void FrameLoader::WriterLoop() {
         // If still running, small sleep to avoid busy spin
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } // while
-    LOGI("Writer thread exiting");
+
+    player.ShutdownDecoder(mIdx);
 }
 
 // ---------- ReadFrameIfNeeded (fast for Update) ----------

@@ -114,9 +114,14 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     //d.attribs.color = frame.colors;
 
     planeRenderer_.Init(d);
-    //planeRenderer_.SetPose(
-    //    OVR::Posef(OVR::Quat<float>::Identity(), {0_m, 1.5_m, 0.0_m}));
+    planeRenderer_.SetPose(
+        OVR::Posef(OVR::Quat<float>::Identity(), {0_m, 1.5_m, -3.0_m}));
     //planeRenderer_.SetScale({1.0f, 1.0f, 1.0f});
+
+    // Init texture for video frames
+    planeRenderer_.CreateTexture(
+        frameloader->GetWidth(),
+        frameloader->GetHeight());
 
     return true;
 }
@@ -156,13 +161,27 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 
     // Try to advance playback if needed. Very fast: few atomics + a move when successful.
     bool consumed = frameloader->ReadFrameIfNeeded(now);
+
     if (consumed) {
         // get the most recent frame and use it for rendering
         const FrameData& frame = frameloader->GetCurrentFrame();
-        auto d = planeGeometry_.ToGeometryDescriptor(); // TODO : Calculate once and store to improve performance
-        d.attribs.position = frame.positions;
-        d.attribs.color = frame.colors;
-        planeRenderer_.UpdateGeometry(d);
+        LOGI("TDGenPlayerApp::Update frame.width=%d height=%d", frame.width, frame.height);
+        if (frame.width > 0 && frame.height > 0) {
+            //LOGI("New frame: %dx%d pts=%f", frame.width, frame.height, frame.pts);
+            // Update textures
+            LOGI("planeRenderer_.UpdateTexture()");
+            planeRenderer_.UpdateTexture(
+                reinterpret_cast<const uint8_t*>(frame.textureYData),
+                reinterpret_cast<const uint8_t*>(frame.textureUData),
+                reinterpret_cast<const uint8_t*>(frame.textureVData),
+                static_cast<uint32_t>(frame.width),
+                static_cast<uint32_t>(frame.height));
+        }
+
+        //auto d = planeGeometry_.ToGeometryDescriptor(); // TODO : Calculate once and store to improve performance
+        //d.attribs.position = frame.positions;
+        //d.attribs.color = frame.colors;
+        //planeRenderer_.UpdateGeometry(d);
     }
     planeRenderer_.Update();
 }

@@ -22,10 +22,11 @@ if(ANDROID)
     add_library(app_glue STATIC ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
 endif()
 
-set(OPENXR_PREVIEW_HEADER ../OpenXR)
-
 set(META_PATH ../../meta)
 set(3RDPARTY_PATH ../../3rdParty)
+
+set(OPENXR_PREVIEW_HEADER ${META_PATH}/OpenXR)
+set(DAV1D_HEADER ${3RDPARTY_PATH}/dav1d/include)
 
 file(GLOB_RECURSE CPP_SOURCES "Src/*.cpp")
 file(GLOB_RECURSE C_SOURCES "Src/*.c")
@@ -43,6 +44,7 @@ target_include_directories(
         ${3RDPARTY_PATH}/khronos/openxr/OpenXR-SDK/src/common
         # Extra vendor-provided headers
         ${OPENXR_PREVIEW_HEADER}
+        ${DAV1D_HEADER}
 )
 
 target_link_libraries(

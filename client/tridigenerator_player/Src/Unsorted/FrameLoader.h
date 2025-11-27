@@ -10,24 +10,32 @@
 #include <vector>
 
 #include "OVR_Math.h"
-
-// Simple frame info (from manifest)
-struct FrameInfo {
-    std::string file;
-};
+#include "Dav1d/Dav1dPlayer.h"
 
 struct FrameData {
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t pointCount = 0;
+    int width = 0;
+    int height = 0;
+    int pointCount = 0;
+    const uint8_t* textureYData = nullptr;
+    const uint8_t* textureUData = nullptr;
+    const uint8_t* textureVData = nullptr;
+    int strideY = 0;
+    int strideU = 0;
+    int strideV = 0;
 
-    std::vector<OVR::Vector3f> positions; // XYZ
-    std::vector<OVR::Vector4f> colors;    // RGBA
+    // constructor
+    FrameData(int w, int h, int pc, const uint8_t* dY, const uint8_t* dU, const uint8_t* dV, const int sY, const int sU, const int sV)
+            : width(w), height(h), pointCount(pc), textureYData(dY), textureUData(dU), textureVData(dV), strideY(sY), strideU(sU), strideV(sV) {}
+
+    // default constructor
+    FrameData() = default;
 };
+
 
 // Ring buffer slot
 struct FrameSlot {
     FrameData data;
+
     std::atomic<bool> ready{false};
 
     // Default constructor
@@ -82,7 +90,6 @@ public:
     const FrameData& GetCurrentFrame() const { return currentFrame; }
 
     // Simple helpers
-    int GetNumFrames() const { return (int)frames.size(); }
     int GetWidth() const { return width; }
     int GetHeight() const { return height; }
     void SetFPS(int newFps);
@@ -91,11 +98,13 @@ public:
     bool HttpGetBinary(const std::string& url, std::vector<uint8_t>& out);
 
 private:
+    Dav1dPlayer player;
+
     // Parse a downloaded blob into FrameData (throws on error)
     static FrameData ParseFrame(const std::vector<uint8_t>& blob);
 
     // Load remote frame by index (performs HttpGetBinary + ParseFrame); returns FrameData
-    FrameData LoadFrameFromIndex(int idx);
+    std::vector<uint8_t> LoadVideoFromIndex(int idx);
 
     // Compute free slots in ring
     int ComputeFreeSlots() const;
@@ -103,7 +112,8 @@ private:
 private:
     // Manifest / config
     std::string baseUrl;
-    std::vector<FrameInfo> frames;
+
+    std::string file;
     int width = 0;
     int height = 0;
     std::atomic<int> fps{16};
@@ -132,3 +142,4 @@ private:
     double nextReadTime = 0.0; // seconds (monotonic) when next frame should be consumed
     std::mutex timingMutex;    // protects nextReadTime updates
 };
+

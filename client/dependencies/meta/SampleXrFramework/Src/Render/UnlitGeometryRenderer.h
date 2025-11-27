@@ -41,11 +41,22 @@ class UnlitGeometryRenderer {
     UnlitGeometryRenderer() = default;
     virtual ~UnlitGeometryRenderer() = default;
 
+
+
     virtual void Init(const GlGeometry::Descriptor& d);
     virtual void Shutdown();
     virtual void Update();
     virtual void Render(std::vector<ovrDrawSurface>& surfaceList);
     virtual void UpdateGeometry(const GlGeometry::Descriptor& d);
+    virtual void CreateTexture(
+            uint32_t textureWidth,
+            uint32_t textureHeight);
+    virtual void UpdateTexture(
+            const uint8_t* textureYData,
+            const uint8_t* textureUData,
+            const uint8_t* textureVData,
+            uint32_t textureWidth,
+            uint32_t textureHeight);
 
     void SetPose(const OVR::Posef& pose) {
         ModelPose_ = pose;
@@ -76,6 +87,12 @@ class UnlitGeometryRenderer {
     OVR::Matrix4f ModelMatrix_ = OVR::Matrix4f::Identity();
     OVR::Vector3f ModelScale_ = {1, 1, 1};
     OVR::Posef ModelPose_ = OVR::Posef::Identity();
+    OVRFW::GlTexture TexY_;
+    OVRFW::GlTexture TexU_;
+    OVRFW::GlTexture TexV_;
+
+    virtual GlTexture CreateGlTexture(uint32_t pixelWidth, uint32_t pixelHeight);
+    virtual void UpdateGlTexture(OVRFW::GlTexture texture, const uint8_t* textureData);
 };
 
 } // namespace OVRFW

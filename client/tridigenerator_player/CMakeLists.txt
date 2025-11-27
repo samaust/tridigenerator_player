@@ -8,6 +8,7 @@ file(GLOB_RECURSE SRC_FILES
     Src/*.c
     Src/*.cpp
     Src/Core/*.cpp
+    Src/Dav1d/*.cpp
     Src/Systems/*.cpp
     Src/Unsorted/*.cpp
 )
