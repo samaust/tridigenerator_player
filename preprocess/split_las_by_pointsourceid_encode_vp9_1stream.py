@@ -73,7 +73,7 @@ def encode_multiple_frames_with_alpha_to_av1(
 
     # Prepare manifest
     manifest = {
-        "file": file_path,
+        "file": file_name,
         "width": int(2*width),
         "height": int(height),
         "fps": int(fps),
