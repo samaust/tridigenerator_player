@@ -289,6 +289,7 @@ function(find_dav1d)
 
     # Output directory per ABI
     set(DAV1D_OUT ${CMAKE_CURRENT_BINARY_DIR}/dav1d/${ANDROID_ABI})
+    set(DAV1D_INSTALL_DIR ${DAV1D_OUT}/install)
 
     set(DAV1D_MESON_CROSS_FILE ${CMAKE_CURRENT_BINARY_DIR}/meson-android-${ANDROID_ABI}.ini)
 
@@ -342,8 +343,9 @@ needs_exe_wrapper = true
             ${DAV1D_OUT}
             ${dav1d_SOURCE_DIR}
             --buildtype=release
-            --default-library=static
+            --default-library=shared
             --cross-file=${DAV1D_MESON_CROSS_FILE}
+            --prefix=${DAV1D_INSTALL_DIR}
             RESULT_VARIABLE r
     )
     if(NOT r EQUAL 0)
@@ -358,12 +360,66 @@ needs_exe_wrapper = true
         message(FATAL_ERROR "ninja build failed for dav1d")
     endif()
 
-    add_library(dav1d STATIC IMPORTED GLOBAL)
+    execute_process(
+            COMMAND ${NINJA_EXECUTABLE} -C ${DAV1D_OUT} install
+            RESULT_VARIABLE r3
+    )
+    if(NOT r3 EQUAL 0)
+        message(FATAL_ERROR "ninja build install failed for dav1d")
+    endif()
+
+    add_library(dav1d SHARED IMPORTED GLOBAL)
     set_target_properties(dav1d PROPERTIES
-            IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/dav1d/${ANDROID_ABI}/src/libdav1d.a
+            IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/dav1d/${ANDROID_ABI}/install/lib/libdav1d.so
             INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}/dav1d/${ANDROID_ABI}/include"
     )
 
+endfunction()
+
+function(find_ffmpeg)
+    set(FFMPEG_DIR ${CMAKE_CURRENT_LIST_DIR}/FFmpeg)
+    set(DAV1D_OUT ${CMAKE_CURRENT_BINARY_DIR}/dav1d/${ANDROID_ABI})
+    set(FFMPEG_OUT ${CMAKE_CURRENT_BINARY_DIR}/FFmpeg/${ANDROID_ABI})
+
+    set(ENV{ANDROID_NDK} ${CMAKE_ANDROID_NDK})
+
+    include(FetchContent)
+
+    FetchContent_Declare(
+            ffmpeg
+            GIT_REPOSITORY https://github.com/FFmpeg/FFmpeg.git
+            GIT_TAG        n8.0.1
+            SOURCE_DIR      ${FFMPEG_DIR}
+    )
+
+    FetchContent_GetProperties(dav1d)
+    if(NOT dav1d_POPULATED)
+        FetchContent_Populate(dav1d)
+    endif()
+
+    execute_process(
+            COMMAND bash ${CMAKE_CURRENT_LIST_DIR}/build_ffmpeg_android.sh ${DAV1D_OUT} ${FFMPEG_OUT}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+            RESULT_VARIABLE r
+    )
+    if (NOT r EQUAL 0)
+        message(FATAL_ERROR "FFmpeg build failed")
+    endif()
+
+    add_library(ffmpeg SHARED IMPORTED)
+    set_target_properties(ffmpeg PROPERTIES
+        IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavformat.so
+    )
+
+    include_directories(${FFMPEG_INCLUDE_DIR})
+
+    add_library(avformat SHARED IMPORTED)
+    add_library(avcodec SHARED IMPORTED)
+    add_library(avutil SHARED IMPORTED)
+
+    set_target_properties(avformat PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavformat.so)
+    set_target_properties(avcodec PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavcodec.so)
+    set_target_properties(avutil  PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavutil.so)
 endfunction()
 
 find_ktx()
@@ -379,3 +435,4 @@ find_curl()
 find_jsoncpp()
 find_glm()
 find_dav1d()
+find_ffmpeg()
