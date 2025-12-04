@@ -6,7 +6,7 @@ NDK_ROOT=$ANDROID_NDK
 
 FFMPEG_DIR=$(pwd)/FFmpeg
 BUILD_DIR=$(pwd)/FFmpeg/build
-INSTALL_DIR=$2/FFmpeg/install
+INSTALL_DIR=$2
 DAV1D_DIR=$1
 
 echo $ANDROID_API
@@ -52,7 +52,7 @@ enabled libdav1d && {\
 else
     echo "Configure already patched, skipping..."
 fi
-crcrcrcrcdfdsfac
+
 # Configure FFmpeg
 cd ${FFMPEG_DIR}
 ./configure \

@@ -369,9 +369,9 @@ needs_exe_wrapper = true
     endif()
 
     add_library(dav1d SHARED IMPORTED GLOBAL)
+    target_include_directories(dav1d INTERFACE ${CMAKE_CURRENT_BINARY_DIR}/dav1d/${ANDROID_ABI}/install/include)
     set_target_properties(dav1d PROPERTIES
             IMPORTED_LOCATION ${CMAKE_CURRENT_BINARY_DIR}/dav1d/${ANDROID_ABI}/install/lib/libdav1d.so
-            INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_BINARY_DIR}/dav1d/${ANDROID_ABI}/include"
     )
 
 endfunction()
@@ -406,20 +406,29 @@ function(find_ffmpeg)
         message(FATAL_ERROR "FFmpeg build failed")
     endif()
 
-    add_library(ffmpeg SHARED IMPORTED)
-    set_target_properties(ffmpeg PROPERTIES
-        IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavformat.so
+    set(FFMPEG_LIB_DIR ${FFMPEG_OUT}/lib)
+
+    # --- FFmpeg Interface Library (Used for Includes) ---
+    add_library(ffmpeg INTERFACE)
+    target_include_directories(ffmpeg INTERFACE ${FFMPEG_OUT}/include)
+    set_property(TARGET ffmpeg APPEND PROPERTY
+            INTERFACE_LINK_DIRECTORIES
+            "${FFMPEG_LIB_DIR}"
     )
 
-    include_directories(${FFMPEG_INCLUDE_DIR})
-
+    # --- FFmpeg Imported Shared Libraries ---
     add_library(avformat SHARED IMPORTED)
+    add_library(swresample SHARED IMPORTED)
     add_library(avcodec SHARED IMPORTED)
     add_library(avutil SHARED IMPORTED)
 
+    # Set the location of the library files
     set_target_properties(avformat PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavformat.so)
+    set_target_properties(swresample  PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libswresample.so)
     set_target_properties(avcodec PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavcodec.so)
     set_target_properties(avutil  PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavutil.so)
+
+    target_link_libraries(ffmpeg INTERFACE avformat swresample avcodec avutil)
 endfunction()
 
 find_ktx()

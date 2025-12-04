@@ -39,6 +39,7 @@ if(ANDROID)
             log
             ktx
             dav1d
+            ffmpeg
     )
     target_link_libraries(${PROJECT_NAME} PRIVATE ${ANDROID_LINK_LIBS})
     set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS "-u ANativeActivity_onCreate")
