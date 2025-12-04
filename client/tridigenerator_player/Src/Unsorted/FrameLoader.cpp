@@ -7,16 +7,19 @@
 #include <chrono>
 #include <cstring>
 #include <stdexcept>
+#include <inttypes.h>
 
+/*
 static double NowMs() {
     using namespace std::chrono;
     return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
 }
+*/
 
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "FrameLoader", __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "FrameLoader", __VA_ARGS__)
 
-// ---------- You already have writeBinary / writeString helpers for curl ----------
+// ---------- writeBinary / writeString helpers for curl ----------
 static size_t writeString(void* ptr, size_t size, size_t nmemb, void* userdata) {
     std::string* str = reinterpret_cast<std::string*>(userdata);
     size_t total = size * nmemb;
@@ -32,12 +35,12 @@ static size_t writeBinary(void* ptr, size_t size, size_t nmemb, void* userdata) 
 }
 
 // ---------- Constructor / destructor ----------
-FrameLoader::FrameLoader(const std::string& baseUrl_) : baseUrl(baseUrl_) {
+FrameLoader::FrameLoader(const std::string& baseUrl_)
+    : baseUrl(baseUrl_),
+      framePool_(RING_SIZE), // Initialize framePool_ with RING_SIZE elements
+      ring(RING_SIZE)         // Initialize ring with RING_SIZE default-initialized FrameSlots
+{
     curl_global_init(CURL_GLOBAL_ALL);
-
-    // initialize ring
-    ring.resize(RING_SIZE);
-    // writer not started yet
 }
 
 FrameLoader::~FrameLoader() {
@@ -45,7 +48,7 @@ FrameLoader::~FrameLoader() {
     curl_global_cleanup();
 }
 
-// ---------- Manifest loader (fixed fps read) ----------
+// ---------- Manifest loader ----------
 bool FrameLoader::LoadManifest() {
     std::string url = baseUrl + "/manifest/frames.json";
     std::string jsonStr;
@@ -73,6 +76,9 @@ bool FrameLoader::LoadManifest() {
         return false;
     }
 
+    if (root.isMember("file") && root["file"].isString()) {
+        file = root["file"].asString();
+    }
     if (root.isMember("width") && root["width"].isIntegral()) {
         width = root["width"].asInt();
     }
@@ -81,14 +87,6 @@ bool FrameLoader::LoadManifest() {
     }
     if (root.isMember("fps") && root["fps"].isIntegral()) {
         fps.store(root["fps"].asInt(), std::memory_order_relaxed);
-    }
-
-    frames.clear();
-    const Json::Value arr = root["frames"];
-    for (const auto& el : arr) {
-        FrameInfo fi;
-        fi.file = el["file"].asString();
-        frames.push_back(fi);
     }
 
     // reset indices
@@ -103,8 +101,8 @@ bool FrameLoader::LoadManifest() {
         nextReadTime = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
     }
 
-    LOGI("Loaded manifest: frames=%zu width=%d height=%d fps=%d",
-         frames.size(), width, height, fps.load());
+    LOGI("Loaded manifest: file=%s width=%d height=%d fps=%d",
+         file.c_str(), width, height, fps.load());
     return true;
 }
 
@@ -134,75 +132,35 @@ bool FrameLoader::HttpGetBinary(const std::string& url, std::vector<uint8_t>& ou
     return (res == CURLE_OK);
 }
 
-// ---------- ParseFrame (same format: header + XYZ float32 + RGBA float32) ----------
-FrameData FrameLoader::ParseFrame(const std::vector<uint8_t>& blob) {
-    FrameData frame;
-    const uint8_t* ptr = blob.data();
-    const uint8_t* end = ptr + blob.size();
-
-    auto require = [&](size_t bytes) {
-        if (ptr + bytes > end) throw std::runtime_error("Corrupt or truncated frame data");
-    };
-
-    require(12);
-    std::memcpy(&frame.width, ptr + 0, 4);
-    std::memcpy(&frame.height, ptr + 4, 4);
-    std::memcpy(&frame.pointCount, ptr + 8, 4);
-    ptr += 12;
-
-    if (frame.pointCount != frame.width * frame.height) throw std::runtime_error("pointCount mismatch");
-
-    const size_t xyzFloats = size_t(frame.pointCount) * 3;
-    const size_t xyzBytes = xyzFloats * sizeof(float);
-    require(xyzBytes);
-    frame.positions.resize(frame.pointCount);
-    std::memcpy(frame.positions.data(), ptr, xyzBytes);
-    ptr += xyzBytes;
-
-    const size_t rgbaFloats = size_t(frame.pointCount) * 4;
-    const size_t rgbaBytes = rgbaFloats * sizeof(float);
-    require(rgbaBytes);
-    frame.colors.resize(frame.pointCount);
-    std::memcpy(frame.colors.data(), ptr, rgbaBytes);
-    ptr += rgbaBytes;
-
-    return frame;
-}
-
-// ---------- LoadFrameFromIndex ----------
-FrameData FrameLoader::LoadFrameFromIndex(int idx) {
-    const double t_0 = NowMs();
-    FrameData empty;
-    if (idx < 0 || idx >= (int)frames.size()) return empty;
-
-    std::string url = baseUrl + "/frames/" + frames[idx].file;
+// ---------- LoadVideoFromIndex ----------
+std::vector<uint8_t> FrameLoader::LoadVideoFromIndex(int idx) {
     std::vector<uint8_t> blob;
+
+    std::string url = baseUrl + "/frames/" + file.c_str();
+    LOGI("Loading video frame %d from %s", idx, url.c_str());
     if (!HttpGetBinary(url, blob)) {
         LOGE("HttpGetBinary failed for %s", url.c_str());
-        return empty;
+        return blob;
     }
-    const double t_http = NowMs();
-    try {
-        FrameData f = ParseFrame(blob);
-        const double t_PARSING = NowMs();
-        LOGI( "  HTTP only:     %.3f ms", t_http - t_0 );
-        LOGI( "  PARSING only:     %.3f ms", t_PARSING - t_http );
-        return f;
-    } catch (const std::exception& e) {
-        LOGE("ParseFrame failed: %s", e.what());
-        return empty;
-    }
+    return blob;
 }
 
 // ---------- ComputeFreeSlots ----------
 int FrameLoader::ComputeFreeSlots() const {
     int w = writeIdx.load(std::memory_order_acquire);
     int r = readIdx.load(std::memory_order_acquire);
-    int occupied = (w - r + RING_SIZE) % RING_SIZE; // number of occupied slots
-    int freeSlots = RING_SIZE - occupied - 1; // reserve one slot to disambiguate
-    if (freeSlots < 0) freeSlots = 0;
+
+    // This is the classic algorithm for calculating used space in a circular buffer.
+    int usedSlots = (w - r + RING_SIZE) % RING_SIZE;
+
+    // The number of free slots is the total size minus what's used.
+    // We must always leave at least one slot empty to distinguish a full buffer
+    // from an empty one (where w == r).
+    int freeSlots = RING_SIZE - usedSlots - 1;
+
     return freeSlots;
 }
+
 
 // ---------- Writer control ----------
 void FrameLoader::StartBackgroundWriter() {
@@ -225,6 +183,23 @@ void FrameLoader::StopBackgroundWriter() {
 void FrameLoader::WriterLoop() {
     LOGI("Writer thread started");
     const int TARGET_FILL = RING_SIZE / 2; // keep half-filled
+    int mIdx = manifestFetchIdx.load(std::memory_order_relaxed);
+
+    // Download video
+    //const double t_0 = NowMs();
+    // Fetch frame (network)
+    std::vector<uint8_t> fetched = LoadVideoFromIndex(mIdx);
+    //const double t_http = NowMs();
+
+    // Create and init demuxer
+    WebmInMemoryDemuxer demuxer(fetched);
+    std::string error;
+    if (!demuxer.init(&error)) {
+        LOGE("Failed to init demuxer: %s", error.c_str());
+        writerRunning.store(false, std::memory_order_release);
+        return;
+    }
+    LOGI("Demuxer initialized: video %dx%d", demuxer.width(), demuxer.height());
 
     while (writerRunning.load(std::memory_order_relaxed)) {
         // Wait until there is at least one free slot (or stop)
@@ -240,15 +215,12 @@ void FrameLoader::WriterLoop() {
         int freeSlots = ComputeFreeSlots();
         if (freeSlots == 0) {
             // nothing to do
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
 
         // Optionally limit how many frames we'll prefetch per loop to avoid hogging network
         int toFetch = std::min(freeSlots, TARGET_FILL);
-
-        // But also fetch at least one if empty buffer
-        if (toFetch <= 0) toFetch = 1;
 
         for (int i = 0; i < toFetch && writerRunning.load(std::memory_order_relaxed); ++i) {
             // Before fetching, check again to avoid racing with reader
@@ -260,96 +232,48 @@ void FrameLoader::WriterLoop() {
 
             // Sanity: only write to a slot that is not ready
             if (!s.ready.load(std::memory_order_acquire)) {
-                // Determine manifest index to fetch
-                int mIdx = manifestFetchIdx.fetch_add(1, std::memory_order_acq_rel);
-                if (mIdx >= (int)frames.size()) {
-                    if (looping.load(std::memory_order_acquire)) {
-                        // wrap
-                        manifestFetchIdx.store(0, std::memory_order_release);
-                        mIdx = 0;
-                    } else {
-                        // no more frames to fetch
+                // Get a pointer to the frame we will write into.
+                s.frame = &framePool_[slot];
+
+                // Decode the next frame, passing our target buffer.
+                if (!demuxer.decode_next_frame(*(s.frame))) {
+                    // End of stream
+
+                    // Check looping
+                    if (!looping.load(std::memory_order_acquire)) {
+                        // stop writer
                         writerRunning.store(false, std::memory_order_release);
                         break;
                     }
+
+                    // seek to start
+                    if (!demuxer.seek_to_start()) {
+                        LOGI("seek_to_start() failed.");
+                        // stop writer
+                        writerRunning.store(false, std::memory_order_release);
+                        break;
+                    }
+                    continue;
                 }
 
-                const double t_0 = NowMs();
-                // Fetch frame (network)
-                FrameData fetched = LoadFrameFromIndex(mIdx);
-                const double t_http = NowMs();
+                // LOGI("Writer decoded frame ts=%" PRId64 "\n", frame.ts_us);
 
-                // Move into slot
-                s.data = std::move(fetched); // cheap move => transfers vectors
-                // Mark ready
+                // Mark ready (we don't move data anymore)
                 s.ready.store(true, std::memory_order_release);
 
                 // Advance write index
                 writeIdx.store((slot + 1) % RING_SIZE, std::memory_order_release);
-                const double t_store = NowMs();
-                LOGI( "  HTTP+PARSING:     %.3f ms", t_http - t_0 );
-                LOGI( "  Store:   %.3f ms", t_store - t_http );
             } else {
                 // Slot unexpectedly still ready; avoid overwriting it
                 // Sleep and retry
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         }
 
         // If still running, small sleep to avoid busy spin
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        //std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } // while
     LOGI("Writer thread exiting");
-}
-
-// ---------- ReadFrameIfNeeded (fast for Update) ----------
-bool FrameLoader::ReadFrameIfNeeded(double nowSeconds) {
-    // Compute frame period
-    int localFps = fps.load(std::memory_order_relaxed);
-    if (localFps <= 0) localFps = 1;
-    double period = 1.0 / double(localFps);
-
-    // Quick check without locking: if now < nextReadTime -> nothing to do
-    {
-        std::lock_guard<std::mutex> lk(timingMutex);
-        if (nowSeconds < nextReadTime) return false;
-    }
-
-    // It's time to consume a frame. Check slot at readIdx
-    int slot = readIdx.load(std::memory_order_acquire);
-    FrameSlot& s = ring[slot];
-
-    if (!s.ready.load(std::memory_order_acquire)) {
-        // No new frame to consume; advance nextReadTime to avoid spinning
-        std::lock_guard<std::mutex> lk(timingMutex);
-        nextReadTime += period; // skip this tick (keeps playback schedule)
-        return false;
-    }
-
-    // Move slot.data into currentFrame (O(1) move of vectors)
-    {
-        currentFrame = std::move(s.data);
-        // Clear s.data to allow writer to reuse memory without surprises
-        s.data = FrameData();
-        // Mark slot free
-        s.ready.store(false, std::memory_order_release);
-        // Advance read index
-        readIdx.store((slot + 1) % RING_SIZE, std::memory_order_release);
-    }
-
-    // Advance nextReadTime by one period (keep monotonic schedule)
-    {
-        std::lock_guard<std::mutex> lk(timingMutex);
-        // If nextReadTime was in the past by multiple periods, catch up to now + small slack
-        nextReadTime += period;
-        // Prevent drift: ensure nextReadTime > nowSeconds
-        if (nextReadTime <= nowSeconds) nextReadTime = nowSeconds + period;
-    }
-
-    // Notify writer that space is available
-    writerCv.notify_one();
-
-    return true;
 }
 
 void FrameLoader::SetFPS(int newFps) {
@@ -358,4 +282,45 @@ void FrameLoader::SetFPS(int newFps) {
     std::lock_guard<std::mutex> lk(timingMutex);
     using clock = std::chrono::steady_clock;
     nextReadTime = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+}
+
+bool FrameLoader::SwapNextFrame(double nowSeconds, VideoFrame** outFramePtr) {
+    // 1. Perform timing checks to see if we should advance to a new frame.
+    int localFps = fps.load(std::memory_order_relaxed);
+    if (localFps <= 0) localFps = 1;
+    double period = 1.0 / double(localFps);
+
+    {
+        std::lock_guard<std::mutex> lk(timingMutex);
+        if (nowSeconds < nextReadTime) {
+            return false; // Not time to show the next frame yet.
+        }
+        // It's time. Schedule the next frame presentation time.
+        nextReadTime += period;
+        // Prevent drift if we're lagging: ensure nextReadTime > nowSeconds
+        if (nextReadTime <= nowSeconds) {
+            nextReadTime = nowSeconds + period;
+        }
+    }
+
+    // Check if the next slot to be read has data ready from the writer.
+    int currentReadSlot = readIdx.load(std::memory_order_acquire);
+    if (!ring[currentReadSlot].ready.load(std::memory_order_acquire)) {
+        // The writer hasn't produced a new frame for us yet.
+        return false;
+    }
+
+    // The slot is ready. Give the caller a pointer to this frame's data.
+    *outFramePtr = ring[currentReadSlot].frame;
+
+    // IMPORTANT: Mark the slot as "no longer ready for reading by the main thread"
+    //            and advance the read pointer. This is the atomic "consumption" step.
+    ring[currentReadSlot].ready.store(false, std::memory_order_release);
+    readIdx.store((currentReadSlot + 1) % RING_SIZE, std::memory_order_release);
+
+    // Notify the writer thread that a slot has become free.
+    writerCv.notify_one();
+
+    // Return true to signal that a new frame has been "consumed" and *outFramePtr is valid.
+    return true;
 }

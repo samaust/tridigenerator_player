@@ -49,9 +49,9 @@ GlGeometry::Descriptor BuildTesselatedQuadDescriptor(
     attribs.color.resize(vertexCount);
 
     // generate vertex attributes
-    for (TriangleIndex y = 0; y < vertical; y++) {
+    for (TriangleIndex y = 0; y <= vertical; y++) {
         const float yf = (float)y / (float)vertical; // y in [0..1]
-        for (TriangleIndex x = 0; x < horizontal; x++) {
+        for (TriangleIndex x = 0; x <= horizontal; x++) {
             const float xf = (float)x / (float)horizontal; // x in [0..1]
             const int index = y * vertsX + x;
             attribs.position[index].x = x * 0.001f;

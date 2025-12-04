@@ -36,47 +36,86 @@ Language    :   C++
 
 namespace OVRFW {
 
-class UnlitGeometryRenderer {
-   public:
-    UnlitGeometryRenderer() = default;
-    virtual ~UnlitGeometryRenderer() = default;
+    class UnlitGeometryRenderer {
+    public:
+        UnlitGeometryRenderer() = default;
+        virtual ~UnlitGeometryRenderer() = default;
 
-    virtual void Init(const GlGeometry::Descriptor& d);
-    virtual void Shutdown();
-    virtual void Update();
-    virtual void Render(std::vector<ovrDrawSurface>& surfaceList);
-    virtual void UpdateGeometry(const GlGeometry::Descriptor& d);
+        virtual void Init(const GlGeometry::Descriptor& d);
+        virtual void Shutdown();
+        virtual void Update();
+        virtual void Render(std::vector<ovrDrawSurface>& surfaceList);
+        virtual void UpdateGeometry(const GlGeometry::Descriptor& d);
 
-    void SetPose(const OVR::Posef& pose) {
-        ModelPose_ = pose;
-    }
-    OVR::Posef GetPose() {
-        return ModelPose_;
-    }
-    void SetScale(OVR::Vector3f v) {
-        ModelScale_ = v;
-    }
-    OVR::Vector3f GetScale() {
-        return ModelScale_;
-    }
+        void CreateTextures(
+                uint32_t textureYWidth,
+                uint32_t textureYHeight,
+                uint32_t textureUWidth,
+                uint32_t textureUHeight,
+                uint32_t textureVWidth,
+                uint32_t textureVHeight);
 
-   public:
-    OVR::Vector4f ChannelControl = {1, 1, 1, 1};
-    OVR::Vector4f DiffuseColor = {0.4, 1.0, 0.2, 1.0};
-    OVR::Vector3f SpecularLightDirection = OVR::Vector3f{1, 1, 1}.Normalized();
-    OVR::Vector3f SpecularLightColor = {1, 1, 1};
-    OVR::Vector3f AmbientLightColor = {.1, .1, .1};
-    uint32_t BlendSrc = ovrGpuState::kGL_SRC_ALPHA;
-    uint32_t BlendDst = ovrGpuState::kGL_ONE_MINUS_SRC_ALPHA;
-    uint32_t BlendMode = ovrGpuState::kGL_FUNC_ADD;
+        void UpdateTextures(
+                const uint8_t* textureYData,
+                uint32_t textureYWidth,
+                uint32_t textureYHeight,
+                const uint8_t* textureUData,
+                uint32_t textureUWidth,
+                uint32_t textureUHeight,
+                const uint8_t* textureVData,
+                uint32_t textureVWidth,
+                uint32_t textureVHeight);
 
-   private:
-    ovrSurfaceDef SurfaceDef_;
-    GlProgram Program_;
-    OVR::Matrix4f ModelMatrix_ = OVR::Matrix4f::Identity();
-    OVR::Vector3f ModelScale_ = {1, 1, 1};
-    OVR::Posef ModelPose_ = OVR::Posef::Identity();
-};
+        void SetPose(const OVR::Posef& pose) {
+            ModelPose_ = pose;
+        }
+
+        OVR::Posef GetPose() {
+            return ModelPose_;
+        }
+
+        void SetScale(OVR::Vector3f v) {
+            ModelScale_ = v;
+        }
+
+        OVR::Vector3f GetScale() {
+            return ModelScale_;
+        }
+
+        bool IsValid() const {
+            return (textures_[0][0] != 0 && textures_[0][1] != 0 && textures_[0][2] != 0);
+        }
+
+        OVR::Vector4f ChannelControl = {1, 1, 1, 1};
+        OVR::Vector4f DiffuseColor = {0.4, 1.0, 0.2, 1.0};
+        OVR::Vector3f SpecularLightDirection = OVR::Vector3f{1, 1, 1}.Normalized();
+        OVR::Vector3f SpecularLightColor = {1, 1, 1};
+        OVR::Vector3f AmbientLightColor = {.1, .1, .1};
+        uint32_t BlendSrc = ovrGpuState::kGL_SRC_ALPHA;
+        uint32_t BlendDst = ovrGpuState::kGL_ONE_MINUS_SRC_ALPHA;
+        uint32_t BlendMode = ovrGpuState::kGL_FUNC_ADD;
+
+    private:
+        //ovrSurfaceDef SurfaceDef_;
+
+        // Double-buffered surface definitions
+        ovrSurfaceDef surfaceDefs_[2];
+        int currentSurfaceSet_ = 0;
+
+        GlProgram Program_;
+        OVR::Matrix4f ModelMatrix_ = OVR::Matrix4f::Identity();
+        OVR::Vector3f ModelScale_ = {1, 1, 1};
+        OVR::Posef ModelPose_ = OVR::Posef::Identity();
+        //OVRFW::GlTexture TexY_;
+        //OVRFW::GlTexture TexU_;
+        //OVRFW::GlTexture TexV_;
+
+        // Double-buffered textures
+        OVRFW::GlTexture textures_[2][3]; // [buffer_index][Y=0, U=1, V=2]
+
+        GlTexture CreateGlTexture(uint32_t pixelWidth, uint32_t pixelHeight);
+        void UpdateGlTexture(GlTexture texture, const uint8_t* textureData);
+    };
 
 } // namespace OVRFW
 

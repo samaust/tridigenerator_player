@@ -56,7 +56,7 @@ constexpr float operator"" _m(unsigned long long meters)
 }
 
 TDGenPlayerApp::TDGenPlayerApp() :
-        frameloader(std::make_unique<FrameLoader>("http://192.168.111.250:8080"))
+        frameLoader_(std::make_unique<FrameLoader>("http://192.168.111.250:8080"))
 {
     BackgroundColor = OVR::Vector4f(0.55f, 0.35f, 0.1f, 1.0f);
 
@@ -91,16 +91,16 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     OVRFW::XrApp::AppInit(context);
 
     // Load frame data
-    if (!frameloader->LoadManifest()) {
+    if (!frameLoader_->LoadManifest()) {
         LOGE("Failed to load manifest");
         return false;
     }
-    frameloader->StartBackgroundWriter();
+    frameLoader_->StartBackgroundWriter();
 
     // Create initial plane geometry and renderer
     auto planeDescriptor = OVRFW::BuildTesselatedQuadDescriptor(
-            frameloader->GetWidth()-1,
-            frameloader->GetHeight()-1,
+            frameLoader_->GetWidth()/2.0f-1,
+            frameLoader_->GetHeight()-1,
             true,
             false);
     OVR::Vector4f planeColor = {1.0f, 0.0f, 0.0f, 1.0f};
@@ -114,9 +114,9 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     //d.attribs.color = frame.colors;
 
     planeRenderer_.Init(d);
-    //planeRenderer_.SetPose(
-    //    OVR::Posef(OVR::Quat<float>::Identity(), {0_m, 1.5_m, 0.0_m}));
-    //planeRenderer_.SetScale({1.0f, 1.0f, 1.0f});
+    planeRenderer_.SetPose(
+        OVR::Posef(OVR::Quat<float>::Identity(), {-1.0_m, 1.0_m, -1.0_m}));
+    //planeRenderer_.SetScale({100.0f*1280.0f/640.0f, 100.0f, 1.0f});
 
     return true;
 }
@@ -152,17 +152,50 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 
     // Update plane geometry with latest frame data
     using clock = std::chrono::steady_clock;
-    double now = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+    double nowSeconds = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
 
-    // Try to advance playback if needed. Very fast: few atomics + a move when successful.
-    bool consumed = frameloader->ReadFrameIfNeeded(now);
-    if (consumed) {
-        // get the most recent frame and use it for rendering
-        const FrameData& frame = frameloader->GetCurrentFrame();
-        auto d = planeGeometry_.ToGeometryDescriptor(); // TODO : Calculate once and store to improve performance
-        d.attribs.position = frame.positions;
-        d.attribs.color = frame.colors;
-        planeRenderer_.UpdateGeometry(d);
+    // Attempt to swap our old frame for a new one from the loader.
+    if (frameLoader_ && frameLoader_->SwapNextFrame(nowSeconds, &currentFrame_)) {
+        // Swap was successful!
+        // currentFrame_ now contains the NEW frame data.
+        // The old, previously rendered data that was in it is now inside the
+        // FrameLoader's ring buffer, where it will be safely cleared and reused.
+
+        // check if dimensions are larger than zero
+        if (currentFrame_->textureYWidth > 0 && currentFrame_->textureYHeight > 0) {
+            // Check if the plane renderer has been created
+            if (!planeRenderer_.IsValid()) {
+                // Create textures if not done yet
+                planeRenderer_.CreateTextures(
+                        currentFrame_->textureYWidth,
+                        currentFrame_->textureYHeight,
+                        currentFrame_->textureUWidth,
+                        currentFrame_->textureUHeight,
+                        currentFrame_->textureVWidth,
+                        currentFrame_->textureVHeight);
+            }
+
+            // LOGI("Reader updating textures with frame ts=%" PRId64 "\n", frame.ts_us);
+
+            // Update the textures on the GPU with the new frame data.
+            // This call is asynchronous and might return before the GPU is done reading.
+            planeRenderer_.UpdateTextures(
+                    currentFrame_->textureYData.data(),
+                    currentFrame_->textureYWidth,
+                    currentFrame_->textureYHeight,
+                    currentFrame_->textureUData.data(),
+                    currentFrame_->textureUWidth,
+                    currentFrame_->textureUHeight,
+                    currentFrame_->textureVData.data(),
+                    currentFrame_->textureVWidth,
+                    currentFrame_->textureVHeight);
+
+            // Tell the CPU to wait until the GPU has finished all pending commands.
+            // This guarantees the GPU is done reading from `currentFrame_` before
+            // we potentially swap it again in the next loop iteration.
+            // glFinish();
+            // GL_Finish();
+        }
     }
     planeRenderer_.Update();
 }
@@ -190,6 +223,6 @@ void TDGenPlayerApp::SessionEnd()
 
 void TDGenPlayerApp::AppShutdown(const xrJava *context)
 {
-    frameloader->StopBackgroundWriter();
+    frameLoader_->StopBackgroundWriter();
     OVRFW::XrApp::AppShutdown(context);
 }

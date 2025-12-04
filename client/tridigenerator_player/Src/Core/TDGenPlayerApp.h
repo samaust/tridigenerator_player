@@ -13,6 +13,7 @@
 #include "../Systems/SceneManager.h"
 #include "../Unsorted/FrameLoader.h"
 #include "../Unsorted/gl_mesh.h"
+#include "../Unsorted/WebmInMemoryDemuxer.h"
 
 //#include "network_stream.h"
 //#include "input_actions.h"       // your XRInputActions module
@@ -23,12 +24,12 @@ public:
     virtual ~TDGenPlayerApp();
 
 private:
-    EntityManager entityManager;
-    //Renderer renderer;
-    InputSystem input;
-    //AudioSystem audio;
-    //SceneManager scene;
-    std::unique_ptr<FrameLoader> frameloader;
+    EntityManager entityManager_;
+    //Renderer renderer_;
+    InputSystem input_;
+    //AudioSystem audio_;
+    //SceneManager scene_;
+    std::unique_ptr<FrameLoader> frameLoader_;
 
     // Collection of all placed planes
     OVRFW::GeometryBuilder planeGeometry_;
@@ -38,6 +39,9 @@ private:
     OVRFW::UnlitGeometryRenderer planeRenderer_;
 
     // XRInputActions xrInput_;   // action set instance (init in SessionInit)
+    
+    // pointer to a frame inside the FrameLoader's pool.
+    VideoFrame* currentFrame_ = nullptr;
 
     virtual std::vector<const char *> GetExtensions() override;
     virtual bool AppInit(const xrJava *context) override;
