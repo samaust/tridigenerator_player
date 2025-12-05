@@ -44,7 +44,7 @@ def encode_multiple_frames_with_alpha_to_av1(
 
     MAX_8BIT = 255
 
-    # Define FFmpeg Command for Piping with 8-bit Alpha
+    # Define FFmpeg Command
     ffmpeg_command = [
         "ffmpeg",
         # --- Input Flags (MUST come before -i) ---

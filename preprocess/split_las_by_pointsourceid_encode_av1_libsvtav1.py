@@ -43,7 +43,7 @@ def encode_multiple_frames_with_alpha_to_av1(
     file_path = os.path.join(output_dir, file_name)
     MAX_8BIT = 255
 
-    # Define FFmpeg Command for Piping with 8-bit Alpha
+    # Define FFmpeg Command
     ffmpeg_command = [
         "ffmpeg",
         # --- Input Flags (MUST come before -i) ---
@@ -61,8 +61,8 @@ def encode_multiple_frames_with_alpha_to_av1(
         "libsvtav1",
         "-pix_fmt",
         "yuv420p",
-        "-crf",
-        "35",
+        "-qp",
+        "0", # 0 is lossless
         "-preset",
         "0",            
         "-g",
