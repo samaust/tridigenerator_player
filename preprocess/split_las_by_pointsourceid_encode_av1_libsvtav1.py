@@ -19,7 +19,7 @@ def run_pipeline(input_path):
     return pipe.arrays[0]
 
 
-def encode_multiple_frames_with_alpha_to_av1(
+def encode_color_and_depth_streams(
         arr,
         width,
         height,
@@ -27,10 +27,13 @@ def encode_multiple_frames_with_alpha_to_av1(
         output_dir,
         manifest_path):
     """
-    Group by PointSourceId to get a sequence of RGBAZ frames 
-    and encodes the frames as an 8-bit AV1 video file using the yuva444p format
+    Groups points by PointSourceId to create frames and encodes them into a
+    single MKV file with three video streams:
+    - Stream 0: 8-bit color (libsvtav1, yuv420p)
+    - Stream 1: 8-bit alpha (ffv1, gray)
+    - Stream 2: 16-bit depth (ffv1, gray16le)
     """
-    print("--- Starting AV1 Encoding ---")
+    print("--- Starting Triple Stream Encoding (Color + Alpha + Depth) ---")
 
     # Create directories
     os.makedirs(output_dir, exist_ok=True)
@@ -39,50 +42,71 @@ def encode_multiple_frames_with_alpha_to_av1(
     # Prepare some variables
     point_source_ids = np.unique(arr['PointSourceId'])
     expected_n = width * height
-    file_name = "RGBAZ.webm"
+    file_name = "ColorAlphaDepth.mkv"
     file_path = os.path.join(output_dir, file_name)
-    MAX_8BIT = 255
 
     # Define FFmpeg Command
     ffmpeg_command = [
         "ffmpeg",
+        "-y", # Overwrite output file if it exists
         # --- Input Flags (MUST come before -i) ---
         "-f",
         "rawvideo",
         "-pix_fmt",
-        "rgb24",
+        "rgba", # Input is 4-channel 8-bit RGBA
         "-s",
-        f"{2*width}x{height}",
+        f"{width}x{2*height}", # Combined frame (color on top, depth on bottom)
         "-framerate",
         str(fps),
         "-i",
         "pipe:0",  # Read raw data from standard input
-        "-c:v",
-        "libsvtav1",
-        "-pix_fmt",
-        "yuv420p",
-        "-qp",
-        "0", # 0 is lossless
-        "-preset",
-        "0",            
-        "-g",
-        str(fps * 4), 
-        "-row-mt",
-        "1",
-        "-tiles",
-        "2x1",
-        #"-svtav1-params",
-        #"fast-decode=2",
+
+        # --- Video Filter Complex (Splits the input frame) ---
+        "-filter_complex",
+        (
+            f"[0:v]crop={width}:{height}:0:0[rgba_in];" # Crop top half (RGBA)
+            "[rgba_in]split[rgba_for_color][rgba_for_alpha];" # Split the stream for separate processing
+            "[rgba_for_alpha]alphaextract[alpha_stream];"     # Extract alpha channel
+            "[rgba_for_color]format=yuv420p[color_stream];"   # Format RGB part for libsvtav1
+            f"[0:v]crop={width}:{height}:0:{height},format=gray16le[depth_stream]" # Crop bottom half (Depth)
+        ),
+
+        # --- Stream 0: Color (libsvtav1) ---
+        "-map", "[color_stream]",
+        "-c:v:0", "libsvtav1",
+        "-preset", "8", # Faster preset
+        "-crf", "23", # Good quality/size balance
+
+        # --- Stream 1: Alpha (ffv1) ---
+        "-map", "[alpha_stream]",
+        "-c:v:1", "ffv1", # Lossless codec for alpha
+
+        # --- Stream 2: Depth (ffv1) ---
+        "-map", "[depth_stream]",
+        "-c:v:2", "ffv1", # Lossless codec for depth
+
         # --- Output File ---
         "-c:a",
         "copy",
         file_path,
     ]
 
+    # The input to ffmpeg is a single frame of size (width, 2*height).
+    # The top half (height) contains the RGBA color data.
+    # The bottom half (height) contains the 16-bit depth data, which we
+    # pack into an RGBA-like structure (2 bytes per pixel) to match the pix_fmt.
+    #
+    # [ R G B A ] -> Color pixel
+    # [ D D D D ] -> Depth pixel (16 bits) stored across 4 bytes.
+    # We will use view(np.uint8) to send bytes.
+    # A depth pixel (uint16) will be sent as two uint8 bytes.
+    # To make it fit the rgba pix_fmt, we need 4 bytes per pixel.
+    # So we create a (height, width, 2) uint16 array and view it as (height, width, 4) uint8.
+
     # Prepare manifest
     manifest = {
         "file": file_name,
-        "width": int(2*width),
+        "width": int(width),
         "height": int(height),
         "fps": int(fps),
     }
@@ -105,20 +129,11 @@ def encode_multiple_frames_with_alpha_to_av1(
                     f"Frame {pid}: expected {expected_n} points but got {n}."
                 )
 
-            # Depth
-            # Split 16 bit variable into 2x8-bit channels (G, B) 
-            Z = np.clip(np.abs(subset['Z'].astype(np.float32) * 1000.0), 0, 65_535).astype(np.uint32)
-            
-            # 8 MSBs -> Red Channel
-            #Z_R = ((Z >> 16) & MAX_8BIT).astype(np.uint8)
+            # --- Prepare Depth Data (16-bit) ---
+            depth_m = np.abs(subset['Z'].astype(np.float32))
+            depth_16bit = np.clip(depth_m * 1000.0, 0, 65535).astype(np.uint16)
 
-            # Middle 8 bits -> Green Channel
-            Z_G = ((Z >> 8) & MAX_8BIT).astype(np.uint8)
-            
-            # 8 LSBs -> Blue Channel
-            Z_B = (Z & MAX_8BIT).astype(np.uint8)
-            
-            # Colors
+            # --- Prepare Color Data (8-bit) ---
             R = subset['Red'].astype(np.float32)
             G = subset['Green'].astype(np.float32)
             B = subset['Blue'].astype(np.float32)
@@ -130,24 +145,24 @@ def encode_multiple_frames_with_alpha_to_av1(
                 G = np.clip(np.clip(G / max_rgb, 0.0, 1.0) * 255, 0, 255).astype(np.uint8)
                 B = np.clip(np.clip(B / max_rgb, 0.0, 1.0) * 255, 0, 255).astype(np.uint8)
 
-            # Compute alpha based on classification and store in Red channel
+            # Compute alpha based on classification
             classification = subset['Classification']
-            A_R = np.clip(np.where(classification == 7, 0.0, 1.0).astype(np.float32) * 255, 0, 255).astype(np.uint8)
+            A = np.clip(np.where(classification == 7, 0.0, 1.0) * 255, 0, 255).astype(np.uint8)
 
-            # Numpy array (H, W, 3)
-            AZZ_stacked_array = np.stack([A_R, Z_G, Z_B], axis=0)
-            AZZ_transposed_array = np.transpose(AZZ_stacked_array)
-            AZZ_final_image_array = AZZ_transposed_array.reshape((height, width, 3))
+            # --- Combine into a single frame for piping ---
 
-            # Numpy array (H, W, 3)
-            RGB_stacked_array = np.stack([R, G, B], axis=0)
-            RGB_transposed_array = np.transpose(RGB_stacked_array)
-            RGB_final_image_array = RGB_transposed_array.reshape((height, width, 3))
+            # Color (H, W, 4)
+            color_array = np.stack([R, G, B, A], axis=-1).reshape((height, width, 4))
 
-            # Numpy array (H, 2*W, 3)
-            combined_array = np.concatenate((AZZ_final_image_array, RGB_final_image_array), axis=1)
+            # Depth (H, W, 1) -> (H, W, 2) -> (H, W, 4) as uint8
+            # We create a (H, W, 2) array of uint16 and view it as (H, W, 4) uint8
+            depth_array_16bit_2channel = np.zeros((height, width, 2), dtype=np.uint16)
+            depth_array_16bit_2channel[:, :, 0] = depth_16bit.reshape((height, width))
+            depth_array_8bit_4channel = depth_array_16bit_2channel.view(np.uint8)
 
-            # Convert the NumPy array (H, 2*W, 3) to raw bytes (RGB format)
+            # Combined array (2*H, W, 4)
+            combined_array = np.concatenate((color_array, depth_array_8bit_4channel), axis=0)
+
             raw_frame_bytes = combined_array.tobytes()
 
             # Write the raw frame data to FFmpeg's stdin pipe
@@ -163,11 +178,11 @@ def encode_multiple_frames_with_alpha_to_av1(
         stdout, stderr = process.communicate()
 
         if process.returncode == 0:
-            print(f"Encoding successful! Video saved as {filename}")
+            print(f"Encoding successful! Video saved as {file_path}")
         else:
             print("Encoding failed.")
             print("FFmpeg Error Output:")
-            print(stderr.decode("utf-8"))
+            print(stderr.decode("utf-8") if stderr else "No stderr output.")
 
     except FileNotFoundError:
         print(
@@ -196,7 +211,7 @@ def main():
     args = parser.parse_args()
 
     arr = run_pipeline(args.input)
-    encode_multiple_frames_with_alpha_to_av1(
+    encode_color_and_depth_streams(
         arr, args.width, args.height, args.fps, args.output, args.manifest)
 
 
