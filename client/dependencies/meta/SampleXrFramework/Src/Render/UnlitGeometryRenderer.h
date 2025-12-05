@@ -47,6 +47,8 @@ namespace OVRFW {
         virtual void Render(std::vector<ovrDrawSurface>& surfaceList);
         virtual void UpdateGeometry(const GlGeometry::Descriptor& d);
 
+        void UpdateFov(float fovx_deg);
+
         void CreateTextures(
                 uint32_t textureYWidth,
                 uint32_t textureYHeight,
@@ -96,8 +98,6 @@ namespace OVRFW {
         uint32_t BlendMode = ovrGpuState::kGL_FUNC_ADD;
 
     private:
-        //ovrSurfaceDef SurfaceDef_;
-
         // Double-buffered surface definitions
         ovrSurfaceDef surfaceDefs_[2];
         int currentSurfaceSet_ = 0;
@@ -106,12 +106,11 @@ namespace OVRFW {
         OVR::Matrix4f ModelMatrix_ = OVR::Matrix4f::Identity();
         OVR::Vector3f ModelScale_ = {1, 1, 1};
         OVR::Posef ModelPose_ = OVR::Posef::Identity();
-        //OVRFW::GlTexture TexY_;
-        //OVRFW::GlTexture TexU_;
-        //OVRFW::GlTexture TexV_;
 
         // Double-buffered textures
         OVRFW::GlTexture textures_[2][3]; // [buffer_index][Y=0, U=1, V=2]
+        float fovx_rad;
+        float fovy_rad;
 
         GlTexture CreateGlTexture(uint32_t pixelWidth, uint32_t pixelHeight);
         void UpdateGlTexture(GlTexture texture, const uint8_t* textureData);

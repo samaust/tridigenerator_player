@@ -46,27 +46,62 @@ namespace OVRFW {
 // Attributes
 attribute highp vec4 Position;
 attribute highp vec3 Normal;
-#ifdef USE_COLOR
-attribute highp vec3 Tangent;  // not used
-attribute highp vec3 Binormal; // not used
-attribute lowp vec4 VertexColor;
-#endif
-
 #ifdef USE_TEXTURE
 attribute highp vec2 TexCoord;
-attribute highp vec4 JointIndices;
-attribute highp vec4 JointWeights;
 #endif
 
+uniform sampler2D u_texY;
+uniform sampler2D u_texU;
+uniform sampler2D u_texV;
+uniform highp float u_FovX_rad; // Horizontal FOV in radians (e.g., fovx_deg * PI / 180.0)
+uniform highp float u_FovY_rad; // Vertical FOV in radians (calculated from aspect ratio)
+
+
 // Outputs to fragment shader
-varying lowp vec3 oEye;
-varying lowp vec3 oNormal;
 varying lowp vec2 oTexCoord;
 varying lowp vec4 oColor;
 
+vec3 yuv_to_rgb(float y, float u, float v) {
+    float c = y - 0.0625;
+    float d = u - 0.5;
+    float e = v - 0.5;
+    float r = 1.1643 * c + 1.5958 * e;
+    float g = 1.1643 * c - 0.39173 * d - 0.81290 * e;
+    float b = 1.1643 * c + 2.017 * d;
+    return vec3(r, g, b);
+}
+
+vec2 yuv_to_gb(float y, float u, float v) {
+    float c = y - 0.0625;
+    float d = u - 0.5;
+    float e = v - 0.5;
+    float g = 1.1643 * c - 0.39173 * d - 0.81290 * e;
+    float b = 1.1643 * c + 2.017 * d;
+    return vec2(g, b);
+}
+
 void main()
 {
-    gl_Position = TransformVertex( Position );
+    // Reconstruct Z value (depth)
+    vec2 dataTexCoord = vec2(TexCoord.x * 0.5, TexCoord.y);
+    float y_data = texture(u_texY, dataTexCoord).r;
+    float u_data = texture(u_texU, dataTexCoord).r;
+    float v_data = texture(u_texV, dataTexCoord).r;
+    vec3 data_rgb = yuv_to_rgb(y_data, u_data, v_data);
+    float highByte = data_rgb.g * 255.0;
+    float lowByte = data_rgb.b * 255.0;
+    float z = max((highByte * 256.0 + lowByte) / 1000.0, 0.01);
+
+    float ndc_x = TexCoord.x * 2.0 - 1.0;
+    float ndc_y = -(TexCoord.y * 2.0 - 1.0);
+    float angle_x = ndc_x * (u_FovX_rad);
+    float angle_y = ndc_y * (u_FovY_rad);
+    float x = z * tan(angle_x);
+    float y = z * tan(angle_y);
+
+    vec4 worldPosition = vec4(x, y, -z, 1.0);
+
+    gl_Position = TransformVertex( worldPosition );
     oTexCoord = TexCoord;
     oColor = vec4(1,1,1,1);
 }
@@ -92,12 +127,29 @@ vec3 yuv_to_rgb(float y, float u, float v) {
     return vec3(r, g, b);
 }
 
+float yv_to_r(float y, float v) {
+    float c = y - 0.0625;
+    float e = v - 0.5;
+    float r = 1.1643 * c + 1.5958 * e;
+    return r;
+}
+
 void main()
 {
-    float y = texture(u_texY, oTexCoord).r;
-    float u = texture(u_texU, oTexCoord).r;
-    float v = texture(u_texV, oTexCoord).r;
+    vec2 dataTexCoord = vec2(oTexCoord.x * 0.5, oTexCoord.y);
+    vec2 colorTexCoord = vec2(oTexCoord.x * 0.5 + 0.5, oTexCoord.y);
+
+    float y = texture(u_texY, dataTexCoord).r;
+    float v = texture(u_texV, dataTexCoord).r;
+    float alpha = yv_to_r(y, v);
+
+    y = texture(u_texY, colorTexCoord).r;
+    float u = texture(u_texU, colorTexCoord).r;
+    v = texture(u_texV, colorTexCoord).r;
     vec3 rgb = yuv_to_rgb(y, u, v);
+
+    if (alpha < 0.5) discard;
+
     gl_FragColor.xyz = rgb;
     gl_FragColor.w = 1.0;
 }
@@ -154,6 +206,8 @@ void main()
                 {"u_texY", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
                 {"u_texU", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
                 {"u_texV", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
+                {"u_FovX_rad", OVRFW::ovrProgramParmType::FLOAT},
+                {"u_FovY_rad", OVRFW::ovrProgramParmType::FLOAT},
         };
 
         std::string programDefs;
@@ -215,6 +269,25 @@ void main()
     void UnlitGeometryRenderer::UpdateGeometry(const GlGeometry::Descriptor& d) {
         surfaceDefs_[0].geo.Update(d.attribs);
         surfaceDefs_[1].geo.Update(d.attribs);
+    }
+
+    void UnlitGeometryRenderer::UpdateFov(float fovx_deg) {
+        float aspect_ratio = 1.0f;
+        if (textures_[0][0].Width != 0 && textures_[0][0].Height != 0) {
+            aspect_ratio = (float)textures_[0][0].Height / (float)textures_[0][0].Width;
+        }
+
+        fovx_rad = fovx_deg * (M_PI / 180.0f) / 2.0f;
+
+        // This is the correct formula to derive vertical FOV from horizontal FOV and aspect ratio
+        fovy_rad = atan(tan(fovx_rad) * aspect_ratio);
+
+        // Set the uniform values on the renderer's graphics command
+        for (int i = 0; i < 2; ++i) {
+            // Assuming uniform indices 3 and 4 match the list order
+            surfaceDefs_[i].graphicsCommand.UniformData[3].Data = &fovx_rad;
+            surfaceDefs_[i].graphicsCommand.UniformData[4].Data = &fovy_rad;
+        }
     }
 
     void UnlitGeometryRenderer::CreateTextures(

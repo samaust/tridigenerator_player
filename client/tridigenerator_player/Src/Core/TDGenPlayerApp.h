@@ -39,7 +39,7 @@ private:
     OVRFW::UnlitGeometryRenderer planeRenderer_;
 
     // XRInputActions xrInput_;   // action set instance (init in SessionInit)
-    
+
     // pointer to a frame inside the FrameLoader's pool.
     VideoFrame* currentFrame_ = nullptr;
 

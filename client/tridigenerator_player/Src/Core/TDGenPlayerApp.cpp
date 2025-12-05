@@ -116,7 +116,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     planeRenderer_.Init(d);
     planeRenderer_.SetPose(
         OVR::Posef(OVR::Quat<float>::Identity(), {-1.0_m, 1.0_m, -1.0_m}));
-    //planeRenderer_.SetScale({100.0f*1280.0f/640.0f, 100.0f, 1.0f});
+    //planeRenderer_.SetScale({10.0f*1280.0f/640.0f, 10.0f, 1.0f});
 
     return true;
 }
@@ -173,6 +173,7 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
                         currentFrame_->textureUHeight,
                         currentFrame_->textureVWidth,
                         currentFrame_->textureVHeight);
+                planeRenderer_.UpdateFov(74.0f);
             }
 
             // LOGI("Reader updating textures with frame ts=%" PRId64 "\n", frame.ts_us);
