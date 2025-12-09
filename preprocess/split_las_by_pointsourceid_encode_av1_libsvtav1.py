@@ -168,7 +168,7 @@ def encode_color_alpha_depth_streams(
     # FFmpeg command - 3 INPUT STREAMS
     #   0 Color rgb24 frames
     #   1 Alpha gray frames
-    #   2 Depth gray16le frames
+    #   2 Depth gray16be frames
     # ---------------------------------------------------------------
     ffmpeg_command = [
         "ffmpeg",
@@ -211,10 +211,10 @@ def encode_color_alpha_depth_streams(
         "-c:v:1", "ffv1",
         "-pix_fmt:v:1", "gray",
 
-        # ---------- Stream 2: Depth - FFV1 (GRAY16LE) ----------
+        # ---------- Stream 2: Depth - PNG (GRAY16BE) ----------
         "-map", "2:v",
-        "-c:v:2", "ffv1",
-        "-pix_fmt:v:2", "gray16le",
+        "-c:v:2", "png",
+        "-pix_fmt:v:2", "gray16be",
 
         file_path,
     ]
