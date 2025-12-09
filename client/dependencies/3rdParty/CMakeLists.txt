@@ -392,9 +392,9 @@ function(find_ffmpeg)
             SOURCE_DIR      ${FFMPEG_DIR}
     )
 
-    FetchContent_GetProperties(dav1d)
-    if(NOT dav1d_POPULATED)
-        FetchContent_Populate(dav1d)
+    FetchContent_GetProperties(ffmpeg)
+    if(NOT ffmpeg_POPULATED)
+        FetchContent_Populate(ffmpeg)
     endif()
 
     execute_process(
@@ -420,15 +420,17 @@ function(find_ffmpeg)
     add_library(avformat SHARED IMPORTED)
     add_library(swresample SHARED IMPORTED)
     add_library(avcodec SHARED IMPORTED)
+    add_library(swscale SHARED IMPORTED)
     add_library(avutil SHARED IMPORTED)
 
     # Set the location of the library files
     set_target_properties(avformat PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavformat.so)
     set_target_properties(swresample  PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libswresample.so)
     set_target_properties(avcodec PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavcodec.so)
+    set_target_properties(swscale  PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libswscale.so)
     set_target_properties(avutil  PROPERTIES IMPORTED_LOCATION ${FFMPEG_LIB_DIR}/libavutil.so)
 
-    target_link_libraries(ffmpeg INTERFACE avformat swresample avcodec avutil)
+    target_link_libraries(ffmpeg INTERFACE avformat swresample avcodec swscale avutil)
 endfunction()
 
 find_ktx()

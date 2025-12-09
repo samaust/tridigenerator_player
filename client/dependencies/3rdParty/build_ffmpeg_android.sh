@@ -75,7 +75,8 @@ cd ${FFMPEG_DIR}
     --disable-nonfree \
     --enable-libdav1d \
     --enable-demuxer=matroska,webm \
-    --enable-decoder=av1 \
+    --enable-decoder=av1,ffv1 \
+    --enable-parser=ffv1 \
     --disable-programs \
     --disable-doc \
     --enable-shared

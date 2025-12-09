@@ -88,6 +88,9 @@ bool FrameLoader::LoadManifest() {
     if (root.isMember("fps") && root["fps"].isIntegral()) {
         fps.store(root["fps"].asInt(), std::memory_order_relaxed);
     }
+    if (root.isMember("depth_scale_factor") && root["depth_scale_factor"].isNumeric()) {
+        depthScaleFactor = root["depth_scale_factor"].asFloat();
+    }
 
     // reset indices
     manifestFetchIdx.store(0);

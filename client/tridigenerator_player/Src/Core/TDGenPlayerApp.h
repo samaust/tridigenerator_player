@@ -37,6 +37,7 @@ private:
     // Renderer of all the placed planes
     // gets reset from planeGeometry for any new plane
     OVRFW::UnlitGeometryRenderer planeRenderer_;
+    bool isPlanePlaced_ = false;
 
     // XRInputActions xrInput_;   // action set instance (init in SessionInit)
 

@@ -58,6 +58,9 @@ public:
     // Simple helpers
     int GetWidth() const { return width; }
     int GetHeight() const { return height; }
+    float GetDepthScaleFactor() const { return depthScaleFactor; }
+
+    void SetDepthScaleFactor(float factor) { depthScaleFactor = factor; }
     void SetFPS(int newFps);
 
     // Network fetch helper (provided earlier by you)
@@ -70,6 +73,7 @@ private:
     int width = 0;
     int height = 0;
     std::atomic<int> fps{16};
+    float depthScaleFactor = 1.0f;
 
     // A fixed pool of frame buffers
     std::vector<VideoFrame> framePool_; // Owns all the memory

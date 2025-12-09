@@ -7,51 +7,26 @@
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libswscale/swscale.h>
+#include <libavutil/avutil.h>
 }
 
 #include <dav1d/dav1d.h>
 #include <dav1d/data.h>
 #include <dav1d/picture.h>
 
-/**
- * Struct returned for each decoded frame.
- * All planes are tightly packed (row stride == width for each plane).
- */
-struct VideoFrame {
-    std::vector<uint8_t> textureYData;
-    uint32_t textureYWidth = 0;
-    uint32_t textureYHeight = 0;
-
-    std::vector<uint8_t> textureUData;
-    uint32_t textureUWidth = 0;
-    uint32_t textureUHeight = 0;
-
-    std::vector<uint8_t> textureVData;
-    uint32_t textureVWidth = 0;
-    uint32_t textureVHeight = 0;
-
-    int64_t ts_us = 0;
-
-    // Ownership: these internal buffers belong to WebmInMemoryDemuxer
-    // and remain valid until the next call to decode_next_frame().
-};
+#include "Render/VideoFrame.h"
 
 
 /**
- * A streaming WebM → AV1 → YUV420 (8-bit) demuxer/decoder.
- * Operates on an AV1 WebM video stored entirely in memory.
+ * @class WebmInMemoryDemuxer
+ * @brief Demuxes and decodes a WebM video file held entirely in memory.
  *
- * Usage:
- *   WebmInMemoryDemuxer demux(blob);
- *   if (!demux.init()) { ...error... }
- *   while (true) {
- *       VideoFrame frame;
- *       if (!demux.decode_next_frame(frame)) {
- *           demux.seek_to_start();
- *           continue;
- *       }
- *       upload_to_gpu(frame);
- *   }
+ * This class handles demuxing a WebM container, decoding its video streams
+ * (AV1 for color, FFV1 for alpha and PNG for depth), and providing frames
+ * for rendering.
+ * It uses FFmpeg for demuxing and decoding FFV1/PNG streams, and
+ * dav1d for AV1 decoding.
  */
 class WebmInMemoryDemuxer {
 public:
@@ -116,21 +91,27 @@ private:
 
     // FFmpeg members
     AVFormatContext* fmtCtx_ = nullptr;
-    AVCodecContext* codecCtx_ = nullptr;
-    int videoStreamIndex_ = -1;
     AVRational timeBase_{1, 1000000};
 
-    // dav1d members
+    // --- STREAM INDICES ---
+    int colorStreamIndex_ = -1;
+    int alphaStreamIndex_ = -1;
+    int depthStreamIndex_ = -1;
+
+    // --- DECODER CONTEXTS ---
+    // dav1d for AV1 color stream
     Dav1dContext* dav1dCtx_ = nullptr;
-    Dav1dSequenceHeader seqHdr_{};
+    // FFmpeg AVCodec for FFV1 alpha stream
+    AVCodecContext* alphaCodecCtx_ = nullptr;
+    // FFmpeg AVCodec for PNG depth stream
+    AVCodecContext* depthCodecCtx_ = nullptr;
+    SwsContext* swsCtx_ = nullptr;
 
     // Video parameters
     int width_ = 0;
     int height_ = 0;
-    int bitDepth_ = 8;
 
     // AVIO buffer
-    std::vector<uint8_t> avioBuffer_;
     AVIOContext* avioCtx_ = nullptr;
 
     // Position inside blob_

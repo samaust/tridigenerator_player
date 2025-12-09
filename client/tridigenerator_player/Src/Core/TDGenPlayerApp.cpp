@@ -99,7 +99,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
 
     // Create initial plane geometry and renderer
     auto planeDescriptor = OVRFW::BuildTesselatedQuadDescriptor(
-            frameLoader_->GetWidth()/2.0f-1,
+            frameLoader_->GetWidth()-1,
             frameLoader_->GetHeight()-1,
             true,
             false);
@@ -114,8 +114,8 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     //d.attribs.color = frame.colors;
 
     planeRenderer_.Init(d);
-    planeRenderer_.SetPose(
-        OVR::Posef(OVR::Quat<float>::Identity(), {-1.0_m, 1.0_m, -1.0_m}));
+    //planeRenderer_.SetPose(
+    //    OVR::Posef(OVR::Quat<float>::Identity(), {0.0_m, 0.0_m, 0.0_m}));
     //planeRenderer_.SetScale({10.0f*1280.0f/640.0f, 10.0f, 1.0f});
 
     return true;
@@ -150,6 +150,26 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 
     // Application logic update here
 
+    if (!isPlanePlaced_) {
+        // Get the current head pose provided by the framework for this frame.
+        const OVR::Posef& headPose = in.HeadPose;
+
+        // Create the target pose for the plane.
+        // Start with the head's pose, which gives us the correct orientation and position.
+        OVR::Posef planePose = headPose;
+
+        // Translate the plane forward relative to the head's orientation.
+        // The head's "forward" direction is its local -Z axis.
+        planePose.Translation += headPose.Rotation * OVR::Vector3f(0.0f, 0.0f, 0.0f);
+
+        // Now set the final calculated pose on the renderer.
+        planeRenderer_.SetPose(planePose);
+
+        // Mark the plane as placed so this code doesn't run on subsequent frames.
+        isPlanePlaced_ = true;
+        LOGI("Placed plane at initial head pose.");
+    }
+
     // Update plane geometry with latest frame data
     using clock = std::chrono::steady_clock;
     double nowSeconds = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
@@ -167,29 +187,26 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
             if (!planeRenderer_.IsValid()) {
                 // Create textures if not done yet
                 planeRenderer_.CreateTextures(
-                        currentFrame_->textureYWidth,
-                        currentFrame_->textureYHeight,
-                        currentFrame_->textureUWidth,
-                        currentFrame_->textureUHeight,
-                        currentFrame_->textureVWidth,
-                        currentFrame_->textureVHeight);
+                        currentFrame_->textureYWidth, currentFrame_->textureYHeight,
+                        currentFrame_->textureUWidth, currentFrame_->textureUHeight,
+                        currentFrame_->textureVWidth, currentFrame_->textureVHeight,
+                        currentFrame_->textureAlphaWidth, currentFrame_->textureAlphaHeight,
+                        currentFrame_->textureDepthWidth, currentFrame_->textureDepthHeight);
                 planeRenderer_.UpdateFov(74.0f);
+
+                // Update depth scale factor uniform
+                float scaleFactor_ = frameLoader_->GetDepthScaleFactor();
+                //scaleFactor_ = scaleFactor_ * 1000.0;
+                planeRenderer_.UpdateDepthScaleFactor(scaleFactor_);
+
+                //planeRenderer_.SetScale({0.5f, 0.5f, 0.5f});
             }
 
             // LOGI("Reader updating textures with frame ts=%" PRId64 "\n", frame.ts_us);
 
             // Update the textures on the GPU with the new frame data.
             // This call is asynchronous and might return before the GPU is done reading.
-            planeRenderer_.UpdateTextures(
-                    currentFrame_->textureYData.data(),
-                    currentFrame_->textureYWidth,
-                    currentFrame_->textureYHeight,
-                    currentFrame_->textureUData.data(),
-                    currentFrame_->textureUWidth,
-                    currentFrame_->textureUHeight,
-                    currentFrame_->textureVData.data(),
-                    currentFrame_->textureVWidth,
-                    currentFrame_->textureVHeight);
+            planeRenderer_.UpdateTextures(currentFrame_);
 
             // Tell the CPU to wait until the GPU has finished all pending commands.
             // This guarantees the GPU is done reading from `currentFrame_` before

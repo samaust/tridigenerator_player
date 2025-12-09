@@ -48,21 +48,34 @@ GlGeometry::Descriptor BuildTesselatedQuadDescriptor(
     attribs.uv0.resize(vertexCount);
     attribs.color.resize(vertexCount);
 
+    // Define the dimensions of the quad in world space.
+    // Since we calculate the final position in the shader, we can just use a simple [-0.5, 0.5] quad.
+    const float quad_width = 1.0f;
+    const float quad_height = 1.0f;
+
     // generate vertex attributes
     for (TriangleIndex y = 0; y <= vertical; y++) {
         const float yf = (float)y / (float)vertical; // y in [0..1]
         for (TriangleIndex x = 0; x <= horizontal; x++) {
             const float xf = (float)x / (float)horizontal; // x in [0..1]
             const int index = y * vertsX + x;
-            attribs.position[index].x = x * 0.001f;
-            attribs.position[index].y = y * 0.001f;
+
+            // Set vertex position based on normalized coordinates.
+            // This creates a flat quad centered at the origin.
+            attribs.position[index].x = (xf - 0.5f) * quad_width;
+            attribs.position[index].y = (yf - 0.5f) * quad_height;
             attribs.position[index].z = 0.0f;
+
+            // UV coordinates
             attribs.uv0[index].x = xf;
-            attribs.uv0[index].y = 1.0 - yf;
+            attribs.uv0[index].y = 1.0f - yf; // Y is often flipped for textures
+
+            // Vertex color (default to white)
             for (int i = 0; i < 4; ++i) {
                 attribs.color[index][i] = 1.0f;
             }
-            // fade to transparent on the outside
+
+            // Apply fadeout to alpha channel if requested
             if (fadeout) {
                 if (x == 0 || x == horizontal || y == 0 || y == vertical) {
                     attribs.color[index][3] = 0.0f;
