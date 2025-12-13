@@ -1,9 +1,10 @@
 #pragma once
-#include "../Core/EntityManager.h"
-#include <string>
 
-class SceneManager {
+#include "../Core/EntityManager.h"
+
+class AudioSystem {
 public:
-    void LoadScene(const std::string& name);
+    bool Init(EntityManager& ecs);
+    void Shutdown(EntityManager& ecs);
     void Update(EntityManager& ecs);
 };

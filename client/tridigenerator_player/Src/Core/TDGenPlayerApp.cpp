@@ -9,6 +9,7 @@
 #include <GLES3/gl3.h>
 #include <glm/glm.hpp>
 #include <openxr/openxr.h>
+#include <curl/curl.h>
 
 // Meta/SampleXrFramework
 #include "GUI/VRMenuObject.h"
@@ -34,6 +35,23 @@
 #include "TDGenPlayerApp.h"
 #include "Logging.h"
 
+#include "../Components/InputComponent.h"
+#include "../Components/TransformComponent.h"
+#include "../Components/FrameLoaderComponent.h"
+#include "../Components/RenderComponent.h"
+#include "../Components/UnlitGeometryRenderComponent.h"
+
+#include "../States/TransformState.h"
+#include "../States/FrameLoaderState.h"
+#include "../States/UnlitGeometryRenderState.h"
+
+#include "../Systems/SceneSystem.h"
+#include "../Systems/FrameLoaderSystem.h"
+#include "../Systems/AudioSystem.h"
+#include "../Systems/InputSystem.h"
+#include "../Systems/RenderSystem.h"
+#include "../Systems/UnlitGeometryRenderSystem.h"
+
 // All physical units in OpenXR are in meters, but sometimes it's more useful
 // to think in cm, so this user defined literal converts from centimeters to meters
 constexpr float operator"" _cm(long double centimeters)
@@ -55,15 +73,15 @@ constexpr float operator"" _m(unsigned long long meters)
     return static_cast<float>(meters);
 }
 
-TDGenPlayerApp::TDGenPlayerApp() :
-        frameLoader_(std::make_unique<FrameLoader>("http://192.168.111.250:8080"))
-{
+TDGenPlayerApp::TDGenPlayerApp() {
     BackgroundColor = OVR::Vector4f(0.55f, 0.35f, 0.1f, 1.0f);
 
     // Disable framework input management, letting this sample explicitly
     // call xrSyncActions() every frame; which includes control over which
     // ActionSet to set as active
     SkipInputHandling = false;
+
+    curl_global_init(CURL_GLOBAL_ALL);
 }
 
 TDGenPlayerApp::~TDGenPlayerApp()
@@ -90,33 +108,41 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
 {
     OVRFW::XrApp::AppInit(context);
 
-    // Load frame data
-    if (!frameLoader_->LoadManifest()) {
-        LOGE("Failed to load manifest");
-        return false;
-    }
-    frameLoader_->StartBackgroundWriter();
+    // Initialize ECS and Systems
+    entityManager_ = std::make_unique<EntityManager>();
 
-    // Create initial plane geometry and renderer
-    auto planeDescriptor = OVRFW::BuildTesselatedQuadDescriptor(
-            frameLoader_->GetWidth()-1,
-            frameLoader_->GetHeight()-1,
-            true,
-            false);
-    OVR::Vector4f planeColor = {1.0f, 0.0f, 0.0f, 1.0f};
-    planeGeometry_.Add(
-            planeDescriptor,
-            OVRFW::GeometryBuilder::kInvalidIndex,
-            planeColor);
+    sceneSystem_ = std::make_unique<SceneSystem>();
+    frameLoaderSystem_ = std::make_unique<FrameLoaderSystem>();
+    audioSystem_ = std::make_unique<AudioSystem>();
+    inputSystem_ = std::make_unique<InputSystem>();
+    transformSystem_ = std::make_unique<TransformSystem>();
+    renderSystem_ = std::make_unique<RenderSystem>();
+    unlitGeometryRenderSystem_ = std::make_unique<UnlitGeometryRenderSystem>();
+    LOGI("ECS Systems Initialized");
 
-    auto d = planeGeometry_.ToGeometryDescriptor();
-    //d.attribs.position = frame.positions;
-    //d.attribs.color = frame.colors;
+    // Create entities
 
-    planeRenderer_.Init(d);
-    //planeRenderer_.SetPose(
-    //    OVR::Posef(OVR::Quat<float>::Identity(), {0.0_m, 0.0_m, 0.0_m}));
-    //planeRenderer_.SetScale({10.0f*1280.0f/640.0f, 10.0f, 1.0f});
+    // ---------- Create Object entity ----------
+    auto ObjectEntity = entityManager_->CreateEntity();
+
+    TransformComponent transform;
+    transform.modelPose = OVR::Posef(OVR::Quatf::Identity(), {0.0f, 0.0f, 0.0f});
+    transform.modelScale = {1.0f, 1.0f, 1.0f};
+    entityManager_->AddComponent<TransformComponent>(ObjectEntity, transform);
+    entityManager_->AddComponent<TransformState>(ObjectEntity, {});
+    entityManager_->AddComponent<FrameLoaderComponent>(ObjectEntity, {});
+    entityManager_->AddComponent<FrameLoaderState>(ObjectEntity, {});
+    entityManager_->AddComponent<UnlitGeometryRenderComponent>(ObjectEntity, {});
+    entityManager_->AddComponent<UnlitGeometryRenderState>(ObjectEntity, {});
+
+    // ---------- Initialize Systems ----------
+    sceneSystem_->Init(*entityManager_);
+    frameLoaderSystem_->Init(*entityManager_);
+    audioSystem_->Init(*entityManager_);
+    inputSystem_->Init(*entityManager_);
+    transformSystem_->Init(*entityManager_);
+    renderSystem_->Init(*entityManager_);
+    unlitGeometryRenderSystem_->Init(*entityManager_);
 
     return true;
 }
@@ -142,6 +168,9 @@ bool TDGenPlayerApp::SessionInit()
 //  - xrWaitFrame(...)
 void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 {
+    using clock = std::chrono::steady_clock;
+    double nowSeconds = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+
     // if SkipInputHandling is True, we need to sync action sets ourselves
     // --- xrSyncAction
     //
@@ -150,72 +179,13 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 
     // Application logic update here
 
-    if (!isPlanePlaced_) {
-        // Get the current head pose provided by the framework for this frame.
-        const OVR::Posef& headPose = in.HeadPose;
-
-        // Create the target pose for the plane.
-        // Start with the head's pose, which gives us the correct orientation and position.
-        OVR::Posef planePose = headPose;
-
-        // Translate the plane forward relative to the head's orientation.
-        // The head's "forward" direction is its local -Z axis.
-        planePose.Translation += headPose.Rotation * OVR::Vector3f(0.0f, 0.0f, 0.0f);
-
-        // Now set the final calculated pose on the renderer.
-        planeRenderer_.SetPose(planePose);
-
-        // Mark the plane as placed so this code doesn't run on subsequent frames.
-        isPlanePlaced_ = true;
-        LOGI("Placed plane at initial head pose.");
-    }
-
-    // Update plane geometry with latest frame data
-    using clock = std::chrono::steady_clock;
-    double nowSeconds = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
-
-    // Attempt to swap our old frame for a new one from the loader.
-    if (frameLoader_ && frameLoader_->SwapNextFrame(nowSeconds, &currentFrame_)) {
-        // Swap was successful!
-        // currentFrame_ now contains the NEW frame data.
-        // The old, previously rendered data that was in it is now inside the
-        // FrameLoader's ring buffer, where it will be safely cleared and reused.
-
-        // check if dimensions are larger than zero
-        if (currentFrame_->textureYWidth > 0 && currentFrame_->textureYHeight > 0) {
-            // Check if the plane renderer has been created
-            if (!planeRenderer_.IsValid()) {
-                // Create textures if not done yet
-                planeRenderer_.CreateTextures(
-                        currentFrame_->textureYWidth, currentFrame_->textureYHeight,
-                        currentFrame_->textureUWidth, currentFrame_->textureUHeight,
-                        currentFrame_->textureVWidth, currentFrame_->textureVHeight,
-                        currentFrame_->textureAlphaWidth, currentFrame_->textureAlphaHeight,
-                        currentFrame_->textureDepthWidth, currentFrame_->textureDepthHeight);
-                planeRenderer_.UpdateFov(74.0f);
-
-                // Update depth scale factor uniform
-                float scaleFactor_ = frameLoader_->GetDepthScaleFactor();
-                //scaleFactor_ = scaleFactor_ * 1000.0;
-                planeRenderer_.UpdateDepthScaleFactor(scaleFactor_);
-
-                //planeRenderer_.SetScale({0.5f, 0.5f, 0.5f});
-            }
-
-            // LOGI("Reader updating textures with frame ts=%" PRId64 "\n", frame.ts_us);
-
-            // Update the textures on the GPU with the new frame data.
-            // This call is asynchronous and might return before the GPU is done reading.
-            planeRenderer_.UpdateTextures(currentFrame_);
-
-            // Tell the CPU to wait until the GPU has finished all pending commands.
-            // This guarantees the GPU is done reading from `currentFrame_` before
-            // we potentially swap it again in the next loop iteration.
-            // glFinish();
-            // GL_Finish();
-        }
-    }
-    planeRenderer_.Update();
+    sceneSystem_->Update(*entityManager_);
+    frameLoaderSystem_->Update(*entityManager_, nowSeconds);
+    audioSystem_->Update(*entityManager_);
+    inputSystem_->Update(*entityManager_);
+    transformSystem_->Update(*entityManager_);
+    renderSystem_->Update(*entityManager_);
+    unlitGeometryRenderSystem_->Update(*entityManager_, in);
 }
 
 void TDGenPlayerApp::AppRenderFrame(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out)
@@ -231,7 +201,7 @@ void TDGenPlayerApp::AppRenderEye(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRen
 // Called by the XrApp framework after the Update function
 void TDGenPlayerApp::Render(const OVRFW::ovrApplFrameIn &in, OVRFW::ovrRendererOutput &out)
 {
-    planeRenderer_.Render(out.Surfaces);
+    unlitGeometryRenderSystem_->Render(*entityManager_, out.Surfaces);
 }
 
 void TDGenPlayerApp::SessionEnd()
@@ -241,6 +211,26 @@ void TDGenPlayerApp::SessionEnd()
 
 void TDGenPlayerApp::AppShutdown(const xrJava *context)
 {
-    frameLoader_->StopBackgroundWriter();
+    // Explicitly destroy the systems and entity manager.
+    // This is good practice to control the shutdown order.
+    unlitGeometryRenderSystem_->Shutdown(*entityManager_);
+    sceneSystem_->Shutdown(*entityManager_);
+    frameLoaderSystem_->Shutdown(*entityManager_);
+    renderSystem_->Shutdown(*entityManager_);
+    inputSystem_->Shutdown(*entityManager_);
+    audioSystem_->Shutdown(*entityManager_);
+
+    unlitGeometryRenderSystem_.reset();
+    sceneSystem_.reset();
+    frameLoaderSystem_.reset();
+    renderSystem_.reset();
+    inputSystem_.reset();
+    audioSystem_.reset();
+
+    entityManager_.reset(); // Calls delete and empties the unique_ptr.
+    LOGI("ECS Systems Shutdown");
+
+    curl_global_cleanup();
+
     OVRFW::XrApp::AppShutdown(context);
 }

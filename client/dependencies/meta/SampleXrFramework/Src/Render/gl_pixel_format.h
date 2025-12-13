@@ -69,8 +69,8 @@ constexpr uint8_t bytesPerPixel(GLenum fmt) {
 /// This function is designed to be used at compile time.
 constexpr GLint computeUnpackAlignment(uint32_t rowStrideBytes)
 {
-if (rowStrideBytes % 8 == 0) return 8;
-if (rowStrideBytes % 4 == 0) return 4;
-if (rowStrideBytes % 2 == 0) return 2;
-return 1;
+    if (rowStrideBytes % 8 == 0) return 8;
+    if (rowStrideBytes % 4 == 0) return 4;
+    if (rowStrideBytes % 2 == 0) return 2;
+    return 1;
 }

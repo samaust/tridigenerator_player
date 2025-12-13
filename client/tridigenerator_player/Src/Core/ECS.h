@@ -21,20 +21,25 @@ public:
     }
 
     template<typename T>
-    void AddComponent(EntityID e, const T& component) {
-        GetOrCreateStorage<T>().Add(e, component);
+    void AddComponent(EntityID e, T component) {
+        GetOrCreateStorage<T>().Add(e, std::move(component));
     }
 
     template<typename T>
     bool HasComponent(EntityID e) const {
         auto it = storages.find(std::type_index(typeid(T)));
         if (it == storages.end()) return false;
-        return static_cast<SparseSet<T>*>(it->second.get())->Has(e);
+        return dynamic_cast<SparseSet<T>*>(it->second.get())->Has(e);
     }
 
     template<typename T>
     T& GetComponent(EntityID e) {
         return GetOrCreateStorage<T>().Get(e);
+    }
+
+    template<typename T>
+    T* TryGetComponent(EntityID e) {
+        return HasComponent<T>(e) ? &GetComponent<T>(e) : nullptr;
     }
 
     // Single-component iteration
@@ -49,15 +54,15 @@ public:
 
     // Multi-component iteration
     template<typename... Components, typename Func>
-    void ForEach(Func func) {
+    void ForEachMulti(Func func) {
+        // Create a tuple of pointers to the component storages.
         auto storagesTuple = std::make_tuple(&GetOrCreateStorage<Components>()...);
-        auto& smallest = *std::min_element(
-                { static_cast<const void*>(std::get<SparseSet<Components>*>(storagesTuple)->Entities().data())... },
-                { static_cast<const void*>(std::get<SparseSet<Components>*>(storagesTuple)->Entities().data())... }
-        ); // placeholder: compile safe but not meaningful; we’ll refine below
 
-        // Find the smallest storage by entity count
+        // Find the index of the storage with the fewest entities. This is the correct way
+        // to find the smallest set to optimize the iteration.
         auto smallestIndex = FindSmallestStorageIndex<Components...>(storagesTuple);
+
+        // Invoke the implementation function with the smallest storage index.
         ForEachMultiImpl<0, Components...>(func, storagesTuple, smallestIndex);
     }
 
@@ -81,7 +86,17 @@ private:
             const_cast<ECS*>(this)->storages.emplace(std::type_index(typeid(T)), std::move(storage));
             return *ptr;
         }
-        return *static_cast<SparseSet<T>*>(it->second.get());
+
+        // Use dynamic_cast because IStorage and SparseSet<T> are sibling base classes.
+        auto* ptr = dynamic_cast<SparseSet<T>*>(it->second.get());
+        // It's good practice to check if the cast succeeded.
+        // In this logic, it should never fail, but this prevents crashes.
+        if (!ptr) {
+            // This would indicate a serious logic error in the ECS.
+            // For now, we'll throw an exception.
+            throw std::runtime_error("dynamic_cast failed in GetOrCreateStorage");
+        }
+        return *ptr;
     }
 
     // --- Multi-component helpers ---

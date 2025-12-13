@@ -1,21 +1,18 @@
 #pragma once
-#include "XrApp.h"
-#include "Render/GeometryBuilder.h"
-//#include "Render/GeometryRenderer.h"
-#include "Render/UnlitGeometryRenderer.h"
-
 #include <GLES3/gl3.h>
 
-#include "EntityManager.h"
-#include "../Systems/Renderer.h"
-#include "../Systems/Input.h"
-#include "../Systems/Audio.h"
-#include "../Systems/SceneManager.h"
-#include "../Unsorted/FrameLoader.h"
-#include "../Unsorted/gl_mesh.h"
-#include "../Unsorted/WebmInMemoryDemuxer.h"
+#include "XrApp.h"
 
-//#include "network_stream.h"
+#include "EntityManager.h"
+
+#include "../Systems/SceneSystem.h"
+#include "../Systems/FrameLoaderSystem.h"
+#include "../Systems/AudioSystem.h"
+#include "../Systems/InputSystem.h"
+#include "../Systems/TransformSystem.h"
+#include "../Systems/RenderSystem.h"
+#include "../Systems/UnlitGeometryRenderSystem.h"
+
 //#include "input_actions.h"       // your XRInputActions module
 
 class TDGenPlayerApp : public OVRFW::XrApp {
@@ -24,25 +21,17 @@ public:
     virtual ~TDGenPlayerApp();
 
 private:
-    EntityManager entityManager_;
-    //Renderer renderer_;
-    InputSystem input_;
-    //AudioSystem audio_;
-    //SceneManager scene_;
-    std::unique_ptr<FrameLoader> frameLoader_;
+    std::unique_ptr<EntityManager> entityManager_;
 
-    // Collection of all placed planes
-    OVRFW::GeometryBuilder planeGeometry_;
-
-    // Renderer of all the placed planes
-    // gets reset from planeGeometry for any new plane
-    OVRFW::UnlitGeometryRenderer planeRenderer_;
-    bool isPlanePlaced_ = false;
+    std::unique_ptr<SceneSystem> sceneSystem_;
+    std::unique_ptr<FrameLoaderSystem> frameLoaderSystem_;
+    std::unique_ptr<AudioSystem> audioSystem_;
+    std::unique_ptr<InputSystem> inputSystem_;
+    std::unique_ptr<TransformSystem> transformSystem_;
+    std::unique_ptr<RenderSystem> renderSystem_;
+    std::unique_ptr<UnlitGeometryRenderSystem> unlitGeometryRenderSystem_;
 
     // XRInputActions xrInput_;   // action set instance (init in SessionInit)
-
-    // pointer to a frame inside the FrameLoader's pool.
-    VideoFrame* currentFrame_ = nullptr;
 
     virtual std::vector<const char *> GetExtensions() override;
     virtual bool AppInit(const xrJava *context) override;

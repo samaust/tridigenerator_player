@@ -7,9 +7,11 @@ endif()
 file(GLOB_RECURSE SRC_FILES
     Src/*.c
     Src/*.cpp
+    Src/Components/*.cpp
     Src/Core/*.cpp
+    Src/States/*.cpp
     Src/Systems/*.cpp
-    Src/Unsorted/*.cpp
+    Src/Videos/*.cpp
 )
 
 if(ANDROID)
