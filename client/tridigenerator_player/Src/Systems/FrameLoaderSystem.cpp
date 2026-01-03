@@ -19,13 +19,13 @@
 
 #include "Videos/WebmInMemoryDemuxer.h"
 
+#define LOG_TAG "FrameLoaderSystem"
+#include "../Core/Logging.h"
+
 #include "FrameLoaderSystem.h"
 
 #include "../Components/FrameLoaderComponent.h"
 #include "../States/FrameLoaderState.h"
-
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "FrameLoader", __VA_ARGS__)
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "FrameLoader", __VA_ARGS__)
 
 static constexpr int RING_SIZE = 8;
 

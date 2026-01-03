@@ -1,5 +1,5 @@
 #pragma once
 
-struct FrameLoaderComponent {
+struct SceneComponent {
     std::string scene = "VR";
 };

@@ -32,8 +32,10 @@
 // Meta/meta_openxr_preview
 #include "meta_openxr_preview/openxr_oculus_helpers.h"
 
+#define LOG_TAG "TDGenPlayerApp"
+#include "../Core/Logging.h"
+
 #include "TDGenPlayerApp.h"
-#include "Logging.h"
 
 #include "../Components/InputComponent.h"
 #include "../Components/TransformComponent.h"
@@ -45,6 +47,7 @@
 #include "../States/FrameLoaderState.h"
 #include "../States/UnlitGeometryRenderState.h"
 
+#include "../Systems/CoreSystem.h"
 #include "../Systems/SceneSystem.h"
 #include "../Systems/FrameLoaderSystem.h"
 #include "../Systems/AudioSystem.h"
@@ -74,7 +77,7 @@ constexpr float operator"" _m(unsigned long long meters)
 }
 
 TDGenPlayerApp::TDGenPlayerApp() {
-    BackgroundColor = OVR::Vector4f(0.55f, 0.35f, 0.1f, 1.0f);
+    BackgroundColor = OVR::Vector4f(0.0f, 0.0f, 0.0f, 0.0f);
 
     // Disable framework input management, letting this sample explicitly
     // call xrSyncActions() every frame; which includes control over which
@@ -93,9 +96,17 @@ TDGenPlayerApp::~TDGenPlayerApp()
 // that is not listed as supported.
 std::vector<const char *> TDGenPlayerApp::GetExtensions()
 {
+    // Add extensions from XrApp
     std::vector<const char *> extensions = XrApp::GetExtensions();
+
+    // Add hand tracking and controller extensions
     extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
     extensions.push_back(XR_FB_TOUCH_CONTROLLER_PRO_EXTENSION_NAME);
+
+    // Add extensions from coreSystem_
+    std::vector<const char*> coreSystemExtensions = coreSystem_->GetExtensions();
+    extensions.insert(extensions.end(), coreSystemExtensions.begin(), coreSystemExtensions.end());
+
     return extensions;
 }
 
@@ -111,6 +122,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     // Initialize ECS and Systems
     entityManager_ = std::make_unique<EntityManager>();
 
+    coreSystem_ = std::make_unique<CoreSystem>(GetInstance(), GetSystemId());
     sceneSystem_ = std::make_unique<SceneSystem>();
     frameLoaderSystem_ = std::make_unique<FrameLoaderSystem>();
     audioSystem_ = std::make_unique<AudioSystem>();
@@ -122,9 +134,13 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
 
     // Create entities
 
+    // ---------- Create Core entity ----------
+    auto CoreEntity = entityManager_->CreateEntity();
+    entityManager_->AddComponent<CoreComponent>(CoreEntity, {});
+    entityManager_->AddComponent<CoreState>(CoreEntity, {});
+
     // ---------- Create Object entity ----------
     auto ObjectEntity = entityManager_->CreateEntity();
-
     TransformComponent transform;
     transform.modelPose = OVR::Posef(OVR::Quatf::Identity(), {0.0f, 0.0f, 0.0f});
     transform.modelScale = {1.0f, 1.0f, 1.0f};
@@ -136,6 +152,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     entityManager_->AddComponent<UnlitGeometryRenderState>(ObjectEntity, {});
 
     // ---------- Initialize Systems ----------
+    coreSystem_->Init(*entityManager_);
     sceneSystem_->Init(*entityManager_);
     frameLoaderSystem_->Init(*entityManager_);
     audioSystem_->Init(*entityManager_);
@@ -159,6 +176,9 @@ bool TDGenPlayerApp::SessionInit()
     //xrInput_.Init(GetInstance(), GetSession());
     //xrInput_.CreateActionSpaces(GetLocalSpace());
 
+    XrSession session = GetSession();
+    coreSystem_->SessionInit(*entityManager_, session);
+
     return true;
 }
 
@@ -179,6 +199,7 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 
     // Application logic update here
 
+    coreSystem_->Update(*entityManager_);
     sceneSystem_->Update(*entityManager_);
     frameLoaderSystem_->Update(*entityManager_, nowSeconds);
     audioSystem_->Update(*entityManager_);
@@ -207,6 +228,7 @@ void TDGenPlayerApp::Render(const OVRFW::ovrApplFrameIn &in, OVRFW::ovrRendererO
 void TDGenPlayerApp::SessionEnd()
 {
     //xrInput_.Destroy();
+    coreSystem_->SessionEnd(*entityManager_);
 }
 
 void TDGenPlayerApp::AppShutdown(const xrJava *context)
@@ -214,18 +236,22 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
     // Explicitly destroy the systems and entity manager.
     // This is good practice to control the shutdown order.
     unlitGeometryRenderSystem_->Shutdown(*entityManager_);
-    sceneSystem_->Shutdown(*entityManager_);
-    frameLoaderSystem_->Shutdown(*entityManager_);
     renderSystem_->Shutdown(*entityManager_);
+    transformSystem_->Shutdown(*entityManager_);
     inputSystem_->Shutdown(*entityManager_);
     audioSystem_->Shutdown(*entityManager_);
+    frameLoaderSystem_->Shutdown(*entityManager_);
+    sceneSystem_->Shutdown(*entityManager_);
+    coreSystem_->Shutdown(*entityManager_);
 
     unlitGeometryRenderSystem_.reset();
-    sceneSystem_.reset();
-    frameLoaderSystem_.reset();
     renderSystem_.reset();
+    transformSystem_.reset();
     inputSystem_.reset();
     audioSystem_.reset();
+    frameLoaderSystem_.reset();
+    sceneSystem_.reset();
+    coreSystem_.reset();
 
     entityManager_.reset(); // Calls delete and empties the unique_ptr.
     LOGI("ECS Systems Shutdown");
@@ -233,4 +259,11 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
     curl_global_cleanup();
 
     OVRFW::XrApp::AppShutdown(context);
+}
+// Insert passthrough layer before projection layers when available
+void TDGenPlayerApp::PreProjectionAddLayer(xrCompositorLayerUnion* layers, int& layerCount) {
+    XrCompositionLayerPassthroughFB passthroughLayer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
+    if (coreSystem_->BuildPassthroughLayer(*entityManager_, passthroughLayer, XR_NULL_HANDLE)) {
+        layers[layerCount++].Passthrough = passthroughLayer;
+    }
 }

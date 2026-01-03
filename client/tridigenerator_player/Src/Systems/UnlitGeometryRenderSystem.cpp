@@ -30,6 +30,9 @@
  * - u_FovX_rad, u_FovY_rad: Field of view in radians
  * - u_depthScaleFactor: Scale factor for depth value conversion
  */
+#define LOG_TAG "UnlitGeometryRenderSystem"
+#include "../Core/Logging.h"
+
 #include "UnlitGeometryRenderSystem.h"
 
 #include "Render/GeometryBuilder.h"

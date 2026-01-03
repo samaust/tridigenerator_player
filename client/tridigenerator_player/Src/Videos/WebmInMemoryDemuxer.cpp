@@ -6,10 +6,8 @@
 #include <algorithm>
 #include <iostream>
 
-#include <android/log.h>
 #define LOG_TAG "WebmInMemoryDemuxer"
-#define ALOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#define ALOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#include "../Core/Logging.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -157,13 +155,13 @@ bool WebmInMemoryDemuxer::init(std::string* error) {
             if (cp->codec_type == AVMEDIA_TYPE_VIDEO) {
                 if (cp->codec_id == AV_CODEC_ID_AV1 && colorStreamIndex_ == -1) {
                     colorStreamIndex_ = (int)i;
-                    ALOGI("Found AV1 color stream at index %d", i);
+                    LOGI("Found AV1 color stream at index %d", i);
                 } else if (cp->codec_id == AV_CODEC_ID_FFV1 && cp->format == AV_PIX_FMT_GRAY8 && alphaStreamIndex_ == -1) {
                     alphaStreamIndex_ = (int)i;
-                    ALOGI("Found FFV1 alpha stream (gray8) at index %d", i);
+                    LOGI("Found FFV1 alpha stream (gray8) at index %d", i);
                 } else if (cp->codec_id == AV_CODEC_ID_PNG && cp->format == AV_PIX_FMT_GRAY16BE && depthStreamIndex_ == -1) {
                     depthStreamIndex_ = (int)i;
-                    ALOGI("Found FFV1 depth stream (gray16be) at index %d", i);
+                    LOGI("Found FFV1 depth stream (gray16be) at index %d", i);
                 }
             }
         }

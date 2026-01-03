@@ -5,6 +5,7 @@
 
 #include "EntityManager.h"
 
+#include "../Systems/CoreSystem.h"
 #include "../Systems/SceneSystem.h"
 #include "../Systems/FrameLoaderSystem.h"
 #include "../Systems/AudioSystem.h"
@@ -23,6 +24,7 @@ public:
 private:
     std::unique_ptr<EntityManager> entityManager_;
 
+    std::unique_ptr<CoreSystem> coreSystem_;
     std::unique_ptr<SceneSystem> sceneSystem_;
     std::unique_ptr<FrameLoaderSystem> frameLoaderSystem_;
     std::unique_ptr<AudioSystem> audioSystem_;
@@ -42,4 +44,5 @@ private:
     virtual void Render(const OVRFW::ovrApplFrameIn &in, OVRFW::ovrRendererOutput &out) override;
     virtual void SessionEnd() override;
     virtual void AppShutdown(const xrJava *context) override;
+    virtual void PreProjectionAddLayer(xrCompositorLayerUnion* layers, int& layerCount) override;
 };

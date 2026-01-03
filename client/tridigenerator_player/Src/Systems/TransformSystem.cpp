@@ -1,3 +1,6 @@
+#define LOG_TAG "TransformSystem"
+#include "../Core/Logging.h"
+
 #include "TransformSystem.h"
 
 bool operator!=(const OVR::Posef& a, const OVR::Posef& b) {

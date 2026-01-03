@@ -1,6 +1,9 @@
 #include "RenderSystem.h"
 #include <iostream>
 
+#define LOG_TAG "RenderSystem"
+#include "../Core/Logging.h"
+
 bool RenderSystem::Init(EntityManager& ecs) {
     return true;
 }

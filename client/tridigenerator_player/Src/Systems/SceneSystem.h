@@ -1,6 +1,9 @@
 #pragma once
-#include "../Core/EntityManager.h"
 #include <string>
+
+#include "../Core/EntityManager.h"
+
+#include "../Components/SceneComponent.h"
 
 class SceneSystem {
 public:

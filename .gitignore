@@ -4,6 +4,7 @@ client/.gradle
 client/local.properties
 client/dependencies/3rdParty/dav1d
 client/dependencies/3rdParty/FFmpeg
+client/dependencies/3rdParty/khronos/openxr/OpenXR-SDK
 client/dependencies/meta/SampleXrFramework/.idea
 client/tridigenerator_player/Projects/Android/build
 client/tridigenerator_player/Projects/Android/.cxx
