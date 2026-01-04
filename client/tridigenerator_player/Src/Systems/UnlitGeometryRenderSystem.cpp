@@ -102,6 +102,10 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
                 {"u_depthViewMatrix", OVRFW::ovrProgramParmType::FLOAT_MATRIX4},
                 {"u_depthProjectionMatrix", OVRFW::ovrProgramParmType::FLOAT_MATRIX4},
                 {"u_hasEnvironmentDepth", OVRFW::ovrProgramParmType::INT},
+                {"u_softOcclusion", OVRFW::ovrProgramParmType::INT},
+                {"u_environmentDepthTexelSize", OVRFW::ovrProgramParmType::FLOAT_VECTOR2},
+                {"u_occlusionSoftness", OVRFW::ovrProgramParmType::FLOAT},
+                {"u_occlusionDepthBias", OVRFW::ovrProgramParmType::FLOAT},
         };
 
         std::string programDefs;
@@ -221,7 +225,7 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
         tC.modelPose.Rotation.Normalize();
         tS.modelMatrix = OVR::Matrix4f(tC.modelPose) * OVR::Matrix4f::Scaling(tC.modelScale);
 
-        UpdateEnvironmentDepthUniforms(ugrS, environmentDepthState);
+        UpdateEnvironmentDepthUniforms(ugrC, ugrS, environmentDepthState);
 
         // Create color, alpha, depth textures if not already created
         if (!TexturesCreated(ugrS) && flS.framePtr != nullptr) {
@@ -587,6 +591,7 @@ void UnlitGeometryRenderSystem::UpdateGlTexture(
 }
 
 void UnlitGeometryRenderSystem::UpdateEnvironmentDepthUniforms(
+        UnlitGeometryRenderComponent& ugrC,
         UnlitGeometryRenderState& ugrS,
         EnvironmentDepthState* environmentDepthState) {
     const bool hasDepth = environmentDepthState != nullptr &&
@@ -599,6 +604,10 @@ void UnlitGeometryRenderSystem::UpdateEnvironmentDepthUniforms(
     for (int i = 0; i < 2; ++i) {
         OVRFW::ovrGraphicsCommand& gc = ugrS.surfaceDefs_[i].graphicsCommand;
         gc.UniformData[11].Data = &ugrS.hasEnvironmentDepth_;
+        gc.UniformData[12].Data = &ugrC.softOcclusion_;
+        gc.UniformData[13].Data = &ugrS.environmentDepthTexelSize_;
+        gc.UniformData[14].Data = &ugrC.occlusionSoftness_;
+        gc.UniformData[15].Data = &ugrC.occlusionDepthBias_;
 
         if (hasDepth) {
             gc.UniformData[9].Data = environmentDepthState->DepthViewMatrices;
@@ -607,10 +616,19 @@ void UnlitGeometryRenderSystem::UpdateEnvironmentDepthUniforms(
             gc.UniformData[10].Count = EnvironmentDepthState::kNumEyes;
             gc.Textures[TEX_ENV_DEPTH] =
                     environmentDepthState->SwapchainTextures[environmentDepthState->Image.swapchainIndex];
+            if (environmentDepthState->Width > 0 && environmentDepthState->Height > 0) {
+                ugrS.environmentDepthTexelSize_.x =
+                    1.0f / static_cast<float>(environmentDepthState->Width);
+                ugrS.environmentDepthTexelSize_.y =
+                    1.0f / static_cast<float>(environmentDepthState->Height);
+            } else {
+                ugrS.environmentDepthTexelSize_ = OVR::Vector2f(0.0f, 0.0f);
+            }
         } else {
             gc.UniformData[9].Data = nullptr;
             gc.UniformData[10].Data = nullptr;
             gc.Textures[TEX_ENV_DEPTH] = {};
+            ugrS.environmentDepthTexelSize_ = OVR::Vector2f(0.0f, 0.0f);
         }
     }
 }

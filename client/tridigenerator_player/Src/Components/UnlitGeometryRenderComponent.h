@@ -35,4 +35,9 @@ struct UnlitGeometryRenderComponent {
     bool poseInitialized = false;
     std::string poseParent = "HeadPose";
     OVR::Vector3f poseTranslationOffset = OVR::Vector3f(0.0f, 0.0f, 0.0f);
+
+    // Occlusion tuning (user-configurable)
+    int softOcclusion_ = 1;
+    float occlusionSoftness_ = 0.01f;
+    float occlusionDepthBias_ = 0.0025f;
 };

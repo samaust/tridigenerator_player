@@ -45,6 +45,9 @@ public:
             const uint16_t* textureData,
             int unpack_alignment,
             int stride);
-    void UpdateEnvironmentDepthUniforms(UnlitGeometryRenderState& ugrS, EnvironmentDepthState* environmentDepthState);
+    void UpdateEnvironmentDepthUniforms(
+        UnlitGeometryRenderComponent& ugrC,
+        UnlitGeometryRenderState& ugrS,
+        EnvironmentDepthState* environmentDepthState);
     void Render(EntityManager& ecs, std::vector<OVRFW::ovrDrawSurface>& surfaceList);
 };

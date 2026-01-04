@@ -67,11 +67,15 @@ static const char* UnlitGeometryFragmentShaderSrc = R"glsl(
 uniform sampler2D u_texY;
 uniform sampler2D u_texU;
 uniform sampler2D u_texV;
-uniform sampler2D u_texAlpha;
-uniform lowp int u_hasEnvironmentDepth;
-uniform highp mat4 u_depthViewMatrix[NUM_VIEWS];
-uniform highp mat4 u_depthProjectionMatrix[NUM_VIEWS];
-uniform highp sampler2DArray u_environmentDepthTexture;
+	uniform sampler2D u_texAlpha;
+	uniform lowp int u_hasEnvironmentDepth;
+	uniform lowp int u_softOcclusion;
+	uniform highp mat4 u_depthViewMatrix[NUM_VIEWS];
+	uniform highp mat4 u_depthProjectionMatrix[NUM_VIEWS];
+	uniform highp sampler2DArray u_environmentDepthTexture;
+	uniform highp vec2 u_environmentDepthTexelSize;
+	uniform highp float u_occlusionSoftness;
+	uniform highp float u_occlusionDepthBias;
 
 varying lowp vec2 oTexCoord;
 varying lowp vec4 oColor;
@@ -138,22 +142,42 @@ void main()
 
     // Reject invalid depth samples (commonly 0 or 1) to avoid false occlusion blocks.
     if (depthViewEyeZ <= 0.0 || depthViewEyeZ >= 1.0 ||
-          objectDepth <= 0.0 || objectDepth >= 1.0) {
-        gl_FragColor = vec4(rgb, 1.0);
-        gl_FragDepth = objectDepth;
-        return;
+        objectDepth <= 0.0 || objectDepth >= 1.0) {
+      gl_FragColor = vec4(rgb, 1.0);
+      gl_FragDepth = objectDepth;
+      return;
     }
 
     // Test virtual object depth with environment depth.
     // If the virtual object is further away (occluded) output a transparent color so real scene content from PT layer is displayed.
 
+    highp float occlusionFactor = 0.0;
+    if (u_softOcclusion == 0 || u_occlusionSoftness <= 0.0) {
+      occlusionFactor = step(depthViewEyeZ - u_occlusionDepthBias, objectDepth);
+    } else {
+      highp float occlusionSum = 0.0;
+      highp float validCount = 0.0;
+      highp vec2 baseUv = objectDepthCameraPositionHC;
+      highp vec2 offsets[4];
+      offsets[0] = vec2(-0.5, -0.5);
+      offsets[1] = vec2(0.5, -0.5);
+      offsets[2] = vec2(-0.5, 0.5);
+      offsets[3] = vec2(0.5, 0.5);
+      for (int i = 0; i < 4; ++i) {
+        highp vec2 uv = baseUv + offsets[i] * u_environmentDepthTexelSize;
+        highp float sampleDepth = texture(u_environmentDepthTexture, vec3(uv, VIEW_ID)).r;
+        if (sampleDepth > 0.0 && sampleDepth < 1.0) {
+          highp float edge0 = sampleDepth - u_occlusionDepthBias;
+          highp float edge1 = edge0 + u_occlusionSoftness;
+          occlusionSum += smoothstep(edge0, edge1, objectDepth);
+          validCount += 1.0;
+        }
+      }
+      occlusionFactor = (validCount > 0.0) ? (occlusionSum / validCount) : 0.0;
+    }
+
     gl_FragColor.rgb = rgb;
-    if (objectDepth < depthViewEyeZ) {
-        gl_FragColor.a = 1.0; // fully opaque
-    }
-    else {
-        gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); // invisible
-    }
+    gl_FragColor.a = 1.0 - occlusionFactor;
 
     gl_FragDepth = objectDepth;
 }

@@ -26,4 +26,5 @@ struct UnlitGeometryRenderState {
     float fovX_rad;
     float fovY_rad;
     int hasEnvironmentDepth_ = 0;
+    OVR::Vector2f environmentDepthTexelSize_ = OVR::Vector2f(0.0f, 0.0f);
 };
