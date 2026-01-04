@@ -12,9 +12,10 @@ uniform highp float u_FovY_rad; // Vertical FOV in radians (calculated from aspe
 uniform highp float u_depthScaleFactor;
 
 
-// Outputs to fragment shader
-varying lowp vec2 oTexCoord;
-varying lowp vec4 oColor;
+	// Outputs to fragment shader
+	varying highp vec4 worldPosition;
+	varying lowp vec2 oTexCoord;
+	varying lowp vec4 oColor;
 
 void main()
 {
@@ -39,24 +40,42 @@ void main()
     //float x = ndc_x;
     //float y = ndc_y;
 
-    // The Z coordinate in view space is negative.
-    vec4 worldPosition = vec4(x, y, -z, 1.0);
+	    // The Z coordinate in view space is negative.
+	    highp vec4 localPosition = vec4(x, y, -z, 1.0);
+	    worldPosition = ModelMatrix * localPosition;
 
-    // Transform from local model space to world/view/clip space
-    gl_Position = TransformVertex( worldPosition );
-    oTexCoord = TexCoord;
-    oColor = vec4(1,1,1,1);
-}
-)glsl";
+	    // Transform from local model space to world/view/clip space
+	    gl_Position = TransformVertex( localPosition );
+	    oTexCoord = TexCoord;
+	    oColor = vec4(1,1,1,1);
+	}
+	)glsl";
 
-static const char* UnlitGeometryFragmentShaderSrc = R"glsl(
-uniform sampler2D u_texY;
-uniform sampler2D u_texU;
-uniform sampler2D u_texV;
-uniform sampler2D u_texAlpha;
+	static const char* UnlitGeometryFragmentShaderSrc = R"glsl(
+	#ifndef DISABLE_MULTIVIEW
+	 #define DISABLE_MULTIVIEW 0
+	#endif
+	#define NUM_VIEWS 2
+	#if defined( GL_OVR_multiview2 ) && ! DISABLE_MULTIVIEW
+	  #extension GL_OVR_multiview2 : require
+	  #define VIEW_ID gl_ViewID_OVR
+	#else
+	  uniform lowp int ViewID;
+	  #define VIEW_ID ViewID
+	#endif
 
-varying lowp vec2 oTexCoord;
-varying lowp vec4 oColor;
+	uniform sampler2D u_texY;
+	uniform sampler2D u_texU;
+	uniform sampler2D u_texV;
+	uniform sampler2D u_texAlpha;
+	uniform lowp int u_hasEnvironmentDepth;
+	uniform highp mat4 u_depthViewMatrix[NUM_VIEWS];
+	uniform highp mat4 u_depthProjectionMatrix[NUM_VIEWS];
+	uniform highp sampler2DArray u_environmentDepthTexture;
+
+	varying lowp vec2 oTexCoord;
+	varying lowp vec4 oColor;
+	varying highp vec4 worldPosition;
 
 vec3 yuv_to_rgb(float y, float u, float v) {
     float c = y - 0.0625;
@@ -68,6 +87,8 @@ vec3 yuv_to_rgb(float y, float u, float v) {
     return vec3(r, g, b);
 }
 
+#define TransformDepthVertex(localPos) (u_depthProjectionMatrix[VIEW_ID] * ( u_depthViewMatrix[VIEW_ID] * localPos ))
+
 void main()
 {
     // Get alpha value from its own texture
@@ -76,13 +97,44 @@ void main()
     // Discard fragment if alpha is below a threshold
     if (alpha < 0.5) discard;
 
-    // Get color value from YUV textures
-    float y = texture(u_texY, oTexCoord).r;
-    float u = texture(u_texU, oTexCoord).r;
-    float v = texture(u_texV, oTexCoord).r;
-    vec3 rgb = yuv_to_rgb(y, u, v);
+	    // Get color value from YUV textures
+	    float y = texture(u_texY, oTexCoord).r;
+	    float u = texture(u_texU, oTexCoord).r;
+	    float v = texture(u_texV, oTexCoord).r;
+	    vec3 rgb = yuv_to_rgb(y, u, v);
 
-    gl_FragColor.xyz = rgb;
-    gl_FragColor.w = 1.0;
+	    // Environment Depth
+	    if (u_hasEnvironmentDepth == 0) {
+	      gl_FragColor = vec4(rgb, 1.0);
+	      return;
+	    }
+
+	    // Transform from world space to depth camera space using 6-DOF matrix
+	    highp vec4 objectDepthCameraPosition = TransformDepthVertex(worldPosition);
+
+    // 3D point --> Homogeneous Coordinates --> Normalized Coordinates in [0,1]
+    highp vec2 objectDepthCameraPositionHC = objectDepthCameraPosition.xy / objectDepthCameraPosition.w;
+    objectDepthCameraPositionHC = objectDepthCameraPositionHC * 0.5f + 0.5f;
+
+    // Sample from Environment Depth API texture
+    highp vec3 depthViewCoord = vec3(objectDepthCameraPositionHC, VIEW_ID);
+    highp float depthViewEyeZ = texture(u_environmentDepthTexture, depthViewCoord).r;
+
+    // Get virtual object depth
+    highp float objectDepth = objectDepthCameraPosition.z / objectDepthCameraPosition.w;
+    objectDepth = objectDepth * 0.5f + 0.5f;
+
+    // Test virtual object depth with environment depth.
+    // If the virtual object is further away (occluded) output a transparent color so real scene content from PT layer is displayed.
+
+    gl_FragColor.rgb = rgb;
+    if (objectDepth < depthViewEyeZ) {
+      gl_FragColor.a = 1.0; // fully opaque
+    }
+    else {
+      gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); // invisible
+    }
+
+    gl_FragDepth = objectDepth;
 }
 )glsl";

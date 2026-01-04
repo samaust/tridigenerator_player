@@ -33,8 +33,8 @@ XrResult CheckErrors(XrInstance instance, XrResult result, const char* function,
 #define OXR(func) CheckErrors(instance_, func, #func, false);
 #endif
 
-CoreSystem::CoreSystem(XrInstance instance, XrSystemId systemId)
-    : instance_{instance}, systemId_{systemId} {
+CoreSystem::CoreSystem(XrInstance instance, XrSystemId systemId, XrSpace localSpace)
+    : instance_{instance}, systemId_{systemId}, localSpace_{localSpace} {
 }
 
 bool CoreSystem::Init(EntityManager& ecs) {
@@ -42,14 +42,18 @@ bool CoreSystem::Init(EntityManager& ecs) {
             [&](EntityID e,
                 CoreComponent &cC,
                 CoreState &cS) {
+        cS.localSpace = localSpace_;
         InitHandtracking(cC, cS);
         InitPassthrough(cC, cS);
+
     });
     return true;
 }
 
 std::vector<const char*> CoreSystem::GetExtensions() {
     std::vector<const char*> extensions = PassthroughRequiredExtensionNames();
+    std::vector<const char*> depthExtensions = DepthRequiredExtensionNames();
+    extensions.insert(extensions.end(), depthExtensions.begin(), depthExtensions.end());
     return extensions;
 }
 
@@ -96,8 +100,13 @@ std::vector<const char*> CoreSystem::PassthroughRequiredExtensionNames() {
     return {XR_FB_PASSTHROUGH_EXTENSION_NAME, XR_FB_TRIANGLE_MESH_EXTENSION_NAME};
 }
 
+std::vector<const char*> CoreSystem::DepthRequiredExtensionNames() {
+    return {XR_META_ENVIRONMENT_DEPTH_EXTENSION_NAME};
+}
+
 void CoreSystem::InitPassthrough(CoreComponent& cC, CoreState& cS) {
     cC.supportsPassthrough = ExtensionsArePresent(PassthroughRequiredExtensionNames());
+    cC.supportsDepth = ExtensionsArePresent(DepthRequiredExtensionNames());
 
     // Passthrough
     if (cC.supportsPassthrough) {
@@ -179,6 +188,74 @@ void CoreSystem::InitPassthrough(CoreComponent& cC, CoreState& cS) {
         assert(cS.XrDestroyTriangleMeshFB);
     } else {
         LOGW("Passthrough: Required extensions not present; passthrough disabled");
+    }
+
+    // Environment Depth
+    if (cC.supportsDepth) {
+        LOGI("Depth: Required extensions present; initializing depth");
+
+        // Hook up extensions for depth
+        OXR(xrGetInstanceProcAddr(
+                instance_,
+                "xrCreateEnvironmentDepthProviderMETA",
+                reinterpret_cast<PFN_xrVoidFunction*>(&cS.XrCreateEnvironmentDepthProviderMETA)));
+        assert(cS.XrCreateEnvironmentDepthProviderMETA);
+
+        OXR(xrGetInstanceProcAddr(
+                instance_,
+                "xrDestroyEnvironmentDepthProviderMETA",
+                reinterpret_cast<PFN_xrVoidFunction*>(&cS.XrDestroyEnvironmentDepthProviderMETA)));
+        assert(cS.XrDestroyEnvironmentDepthProviderMETA);
+
+        OXR(xrGetInstanceProcAddr(
+                instance_,
+                "xrStartEnvironmentDepthProviderMETA",
+                reinterpret_cast<PFN_xrVoidFunction*>(&cS.XrStartEnvironmentDepthProviderMETA)));
+        assert(cS.XrStartEnvironmentDepthProviderMETA);
+
+        OXR(xrGetInstanceProcAddr(
+                instance_,
+                "xrStopEnvironmentDepthProviderMETA",
+                reinterpret_cast<PFN_xrVoidFunction*>(&cS.XrStopEnvironmentDepthProviderMETA)));
+        assert(cS.XrStopEnvironmentDepthProviderMETA);
+
+        OXR(xrGetInstanceProcAddr(
+                instance_,
+                "xrCreateEnvironmentDepthSwapchainMETA",
+                reinterpret_cast<PFN_xrVoidFunction*>(&cS.XrCreateEnvironmentDepthSwapchainMETA)));
+        assert(cS.XrCreateEnvironmentDepthSwapchainMETA);
+
+        OXR(xrGetInstanceProcAddr(
+                instance_,
+                "xrDestroyEnvironmentDepthSwapchainMETA",
+                reinterpret_cast<PFN_xrVoidFunction*>(&cS.XrDestroyEnvironmentDepthSwapchainMETA)));
+        assert(cS.XrDestroyEnvironmentDepthSwapchainMETA);
+
+        OXR(xrGetInstanceProcAddr(
+                instance_,
+                "xrEnumerateEnvironmentDepthSwapchainImagesMETA",
+                reinterpret_cast<PFN_xrVoidFunction*>(&cS.XrEnumerateEnvironmentDepthSwapchainImagesMETA)));
+        assert(cS.XrEnumerateEnvironmentDepthSwapchainImagesMETA);
+
+        OXR(xrGetInstanceProcAddr(
+                instance_,
+                "xrGetEnvironmentDepthSwapchainStateMETA",
+                reinterpret_cast<PFN_xrVoidFunction*>(&cS.XrGetEnvironmentDepthSwapchainStateMETA)));
+        assert(cS.XrGetEnvironmentDepthSwapchainStateMETA);
+
+        OXR(xrGetInstanceProcAddr(
+                instance_,
+                "xrAcquireEnvironmentDepthImageMETA",
+                reinterpret_cast<PFN_xrVoidFunction*>(&cS.XrAcquireEnvironmentDepthImageMETA)));
+        assert(cS.XrAcquireEnvironmentDepthImageMETA);
+
+        OXR(xrGetInstanceProcAddr(
+                instance_,
+                "xrSetEnvironmentDepthHandRemovalMETA",
+                reinterpret_cast<PFN_xrVoidFunction*>(&cS.XrSetEnvironmentDepthHandRemovalMETA)));
+        assert(cS.XrSetEnvironmentDepthHandRemovalMETA);
+    } else {
+        LOGW("Depth: Required extensions not present; depth disabled");
     }
 }
 
@@ -329,6 +406,7 @@ void CoreSystem::DestroyLayer(CoreState& cS) const {
 }
 
 void CoreSystem::PassthroughStart(CoreState& cS) const {
+    // Passthrough
     OXR(cS.XrPassthroughStartFB(cS.Passthrough));
 }
 

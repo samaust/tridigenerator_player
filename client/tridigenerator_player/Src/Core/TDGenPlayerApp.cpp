@@ -46,6 +46,7 @@
 #include "../States/TransformState.h"
 #include "../States/FrameLoaderState.h"
 #include "../States/UnlitGeometryRenderState.h"
+#include "../States/EnvironmentDepthState.h"
 
 #include "../Systems/CoreSystem.h"
 #include "../Systems/SceneSystem.h"
@@ -53,6 +54,7 @@
 #include "../Systems/AudioSystem.h"
 #include "../Systems/InputSystem.h"
 #include "../Systems/RenderSystem.h"
+#include "../Systems/EnvironmentDepthSystem.h"
 #include "../Systems/UnlitGeometryRenderSystem.h"
 
 // All physical units in OpenXR are in meters, but sometimes it's more useful
@@ -122,13 +124,14 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     // Initialize ECS and Systems
     entityManager_ = std::make_unique<EntityManager>();
 
-    coreSystem_ = std::make_unique<CoreSystem>(GetInstance(), GetSystemId());
+    coreSystem_ = std::make_unique<CoreSystem>(GetInstance(), GetSystemId(), GetLocalSpace());
     sceneSystem_ = std::make_unique<SceneSystem>();
     frameLoaderSystem_ = std::make_unique<FrameLoaderSystem>();
     audioSystem_ = std::make_unique<AudioSystem>();
     inputSystem_ = std::make_unique<InputSystem>();
     transformSystem_ = std::make_unique<TransformSystem>();
     renderSystem_ = std::make_unique<RenderSystem>();
+    environmentDepthSystem_ = std::make_unique<EnvironmentDepthSystem>(GetInstance());
     unlitGeometryRenderSystem_ = std::make_unique<UnlitGeometryRenderSystem>();
     LOGI("ECS Systems Initialized");
 
@@ -138,6 +141,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     auto CoreEntity = entityManager_->CreateEntity();
     entityManager_->AddComponent<CoreComponent>(CoreEntity, {});
     entityManager_->AddComponent<CoreState>(CoreEntity, {});
+    entityManager_->AddComponent<EnvironmentDepthState>(CoreEntity, {});
 
     // ---------- Create Object entity ----------
     auto ObjectEntity = entityManager_->CreateEntity();
@@ -159,6 +163,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     inputSystem_->Init(*entityManager_);
     transformSystem_->Init(*entityManager_);
     renderSystem_->Init(*entityManager_);
+    environmentDepthSystem_->Init(*entityManager_);
     unlitGeometryRenderSystem_->Init(*entityManager_);
 
     return true;
@@ -178,6 +183,7 @@ bool TDGenPlayerApp::SessionInit()
 
     XrSession session = GetSession();
     coreSystem_->SessionInit(*entityManager_, session);
+    environmentDepthSystem_->SessionInit(*entityManager_, session);
 
     return true;
 }
@@ -206,6 +212,7 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     inputSystem_->Update(*entityManager_);
     transformSystem_->Update(*entityManager_);
     renderSystem_->Update(*entityManager_);
+    environmentDepthSystem_->Update(*entityManager_, in);
     unlitGeometryRenderSystem_->Update(*entityManager_, in);
 }
 
@@ -228,6 +235,7 @@ void TDGenPlayerApp::Render(const OVRFW::ovrApplFrameIn &in, OVRFW::ovrRendererO
 void TDGenPlayerApp::SessionEnd()
 {
     //xrInput_.Destroy();
+    environmentDepthSystem_->SessionEnd(*entityManager_);
     coreSystem_->SessionEnd(*entityManager_);
 }
 
@@ -243,8 +251,10 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
     frameLoaderSystem_->Shutdown(*entityManager_);
     sceneSystem_->Shutdown(*entityManager_);
     coreSystem_->Shutdown(*entityManager_);
+    environmentDepthSystem_->Shutdown(*entityManager_);
 
     unlitGeometryRenderSystem_.reset();
+    environmentDepthSystem_.reset();
     renderSystem_.reset();
     transformSystem_.reset();
     inputSystem_.reset();

@@ -16,6 +16,8 @@
 
 #include "../States/UnlitGeometryRenderState.h"
 
+struct EnvironmentDepthState;
+
 class UnlitGeometryRenderSystem {
 public:
     bool Init(EntityManager& ecs);
@@ -43,5 +45,6 @@ public:
             const uint16_t* textureData,
             int unpack_alignment,
             int stride);
+    void UpdateEnvironmentDepthUniforms(UnlitGeometryRenderState& ugrS, EnvironmentDepthState* environmentDepthState);
     void Render(EntityManager& ecs, std::vector<OVRFW::ovrDrawSurface>& surfaceList);
 };

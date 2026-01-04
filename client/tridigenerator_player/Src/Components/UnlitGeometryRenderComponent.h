@@ -12,7 +12,8 @@ enum TextureSlot {
     TEX_V = 2,
     TEX_ALPHA = 3,
     TEX_DEPTH = 4,
-    TEXTURE_SLOT_MAX = 5
+    TEX_ENV_DEPTH = 5,
+    TEXTURE_SLOT_MAX = 6
 };
 
 struct UnlitGeometryRenderComponent {
@@ -22,9 +23,10 @@ struct UnlitGeometryRenderComponent {
             GL_R8,      // For TEX_U
             GL_R8,      // For TEX_V
             GL_R8,      // For TEX_ALPHA
-            GL_R16UI    // For TEX_DEPTH
+            GL_R16UI,   // For TEX_DEPTH
+            0           // For TEX_ENV_DEPTH (external)
     };
-    int texture_unpack_alignments_[TEXTURE_SLOT_MAX] = {1, 1, 1, 1, 1};
+    int texture_unpack_alignments_[TEXTURE_SLOT_MAX] = {1, 1, 1, 1, 1, 1};
     uint32_t BlendSrc = OVRFW::ovrGpuState::kGL_SRC_ALPHA;
     uint32_t BlendDst = OVRFW::ovrGpuState::kGL_ONE_MINUS_SRC_ALPHA;
     uint32_t BlendMode = OVRFW::ovrGpuState::kGL_FUNC_ADD;

@@ -10,7 +10,7 @@
 
 class CoreSystem {
 public:
-    CoreSystem(XrInstance instance, XrSystemId systemId);
+    CoreSystem(XrInstance instance, XrSystemId systemId, XrSpace localSpace);
     bool Init(EntityManager& ecs);
     std::vector<const char*> GetExtensions();
     void Shutdown(EntityManager& ecs);
@@ -28,6 +28,7 @@ private:
     bool ExtensionsArePresent(const std::vector<const char*>& extensionList) const;
     std::vector<XrExtensionProperties> GetXrExtensionProperties() const;
     std::vector<const char*> PassthroughRequiredExtensionNames();
+    std::vector<const char*> DepthRequiredExtensionNames();
     XrPassthroughLayerFB CreateProjectedLayer(CoreState& cS) const;
     void DestroyLayer(CoreState& cS) const;
     void PassthroughStart(CoreState& cS) const;
@@ -35,4 +36,5 @@ private:
 
     XrInstance instance_;
     XrSystemId systemId_;
+    XrSpace localSpace_;
 };

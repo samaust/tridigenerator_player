@@ -4,7 +4,7 @@ if(NOT TARGET OpenXR::openxr_loader)
     find_package(OpenXR REQUIRED)
 endif()
 
-file(GLOB_RECURSE SRC_FILES
+file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
     Src/*.c
     Src/*.cpp
     Src/Components/*.cpp

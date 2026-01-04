@@ -44,6 +44,7 @@
 
 #include "../Components/TransformComponent.h"
 
+#include "../States/EnvironmentDepthState.h"
 #include "../States/TransformState.h"
 #include "../States/FrameLoaderState.h"
 
@@ -53,9 +54,6 @@ using OVR::Quatf;
 using OVR::Vector2f;
 using OVR::Vector3f;
 using OVR::Vector4f;
-
-#include "../Core/Logging.h"
-
 
 /**
  * @brief Initialize the unlit geometry render system for entities that include
@@ -97,9 +95,13 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
                 {"u_texV", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
                 {"u_texAlpha", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
                 {"u_texDepth", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
+                {"u_environmentDepthTexture", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
                 {"u_FovX_rad", OVRFW::ovrProgramParmType::FLOAT},
                 {"u_FovY_rad", OVRFW::ovrProgramParmType::FLOAT},
                 {"u_depthScaleFactor", OVRFW::ovrProgramParmType::FLOAT},
+                {"u_depthViewMatrix", OVRFW::ovrProgramParmType::FLOAT_MATRIX4},
+                {"u_depthProjectionMatrix", OVRFW::ovrProgramParmType::FLOAT_MATRIX4},
+                {"u_hasEnvironmentDepth", OVRFW::ovrProgramParmType::INT},
         };
 
         std::string programDefs;
@@ -119,6 +121,7 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
             /// Hook the graphics command
             OVRFW::ovrGraphicsCommand &gc = ugrS.surfaceDefs_[i].graphicsCommand;
             gc.Program = ugrS.Program_;
+            gc.BindUniformTextures();
 
             /// gpu state needs alpha blending
             gc.GpuState.depthEnable = gc.GpuState.depthMaskEnable = true;
@@ -162,6 +165,13 @@ void UnlitGeometryRenderSystem::Shutdown(EntityManager& ecs) {
  * @param in The per-frame input data (head pose, timing, etc.).
  */
 void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplFrameIn &in) {
+    EnvironmentDepthState* environmentDepthState = nullptr;
+    ecs.ForEach<EnvironmentDepthState>([&](EntityID, EnvironmentDepthState& edS) {
+        if (environmentDepthState == nullptr) {
+            environmentDepthState = &edS;
+        }
+    });
+
     ecs.ForEachMulti<TransformComponent,
                      TransformState,
                      FrameLoaderComponent,
@@ -211,20 +221,22 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
         tC.modelPose.Rotation.Normalize();
         tS.modelMatrix = OVR::Matrix4f(tC.modelPose) * OVR::Matrix4f::Scaling(tC.modelScale);
 
-        // Create textures if not already created
+        UpdateEnvironmentDepthUniforms(ugrS, environmentDepthState);
+
+        // Create color, alpha, depth textures if not already created
         if (!TexturesCreated(ugrS) && flS.framePtr != nullptr) {
             LOGI("Creating textures");
             CreateTextures(
-                    flS.framePtr,
-                    ugrC,
-                    ugrS);
+                flS.framePtr,
+                ugrC,
+                ugrS);
             UpdateFov(flC.fovX_deg, ugrS);
             UpdateDepthScaleFactor(flC, ugrS);
         }
 
         if (flS.frameReady.load(std::memory_order_acquire)) {
             //LOGI("Update textures with new frame");
-            // A new frame is available, so update textures.
+            // A new frame is available, so update textures and matrices.
             UpdateTextures(ugrC, flS.framePtr, ugrS);
 
             // Consume the flag by setting it back to false.
@@ -398,9 +410,9 @@ void UnlitGeometryRenderSystem::UpdateFov(float fovX_deg, UnlitGeometryRenderSta
     // Set the uniform values on the renderer's graphics command
     for (int i = 0; i < 2; ++i) {
         // u_FovX_rad
-        ugrS.surfaceDefs_[i].graphicsCommand.UniformData[5].Data = &ugrS.fovX_rad;
+        ugrS.surfaceDefs_[i].graphicsCommand.UniformData[6].Data = &ugrS.fovX_rad;
         // u_FovY_rad
-        ugrS.surfaceDefs_[i].graphicsCommand.UniformData[6].Data = &ugrS.fovY_rad;
+        ugrS.surfaceDefs_[i].graphicsCommand.UniformData[7].Data = &ugrS.fovY_rad;
     }
     LOGI("Updated FOV: fovX_rad=%f, fovY_rad=%f", ugrS.fovX_rad, ugrS.fovY_rad);
 }
@@ -421,7 +433,7 @@ void UnlitGeometryRenderSystem::UpdateDepthScaleFactor(
     // Update the uniform data in both surface definitions
     for (int i = 0; i < 2; ++i) {
         // u_depthScaleFactor
-        ugrS.surfaceDefs_[i].graphicsCommand.UniformData[7].Data = &flC.depthScaleFactor;
+        ugrS.surfaceDefs_[i].graphicsCommand.UniformData[8].Data = &flC.depthScaleFactor;
     }
     LOGI("Updated depth scale factor: %f", flC.depthScaleFactor);
 }
@@ -572,6 +584,35 @@ void UnlitGeometryRenderSystem::UpdateGlTexture(
     //if (stride > 0 && stride != (texture.Width * 2)) {
     //    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
     //}
+}
+
+void UnlitGeometryRenderSystem::UpdateEnvironmentDepthUniforms(
+        UnlitGeometryRenderState& ugrS,
+        EnvironmentDepthState* environmentDepthState) {
+    const bool hasDepth = environmentDepthState != nullptr &&
+            environmentDepthState->IsInitialized &&
+            environmentDepthState->HasDepth &&
+            environmentDepthState->Image.swapchainIndex < environmentDepthState->SwapchainTextures.size();
+
+    ugrS.hasEnvironmentDepth_ = hasDepth ? 1 : 0;
+
+    for (int i = 0; i < 2; ++i) {
+        OVRFW::ovrGraphicsCommand& gc = ugrS.surfaceDefs_[i].graphicsCommand;
+        gc.UniformData[11].Data = &ugrS.hasEnvironmentDepth_;
+
+        if (hasDepth) {
+            gc.UniformData[9].Data = environmentDepthState->DepthViewMatrices;
+            gc.UniformData[9].Count = EnvironmentDepthState::kNumEyes;
+            gc.UniformData[10].Data = environmentDepthState->DepthProjectionMatrices;
+            gc.UniformData[10].Count = EnvironmentDepthState::kNumEyes;
+            gc.Textures[TEX_ENV_DEPTH] =
+                    environmentDepthState->SwapchainTextures[environmentDepthState->Image.swapchainIndex];
+        } else {
+            gc.UniformData[9].Data = nullptr;
+            gc.UniformData[10].Data = nullptr;
+            gc.Textures[TEX_ENV_DEPTH] = {};
+        }
+    }
 }
 
 /**

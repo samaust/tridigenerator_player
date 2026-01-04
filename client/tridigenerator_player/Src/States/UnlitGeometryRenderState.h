@@ -1,10 +1,14 @@
 #pragma once
 
-#import "Render/GlTexture.h"
-#import "Render/SurfaceRender.h"
-#import "Render/GlProgram.h"
+#include <vector>
 
-#import "../Components/UnlitGeometryRenderComponent.h"
+#include "OVR_Math.h"
+
+#include "Render/GlTexture.h"
+#include "Render/SurfaceRender.h"
+#include "Render/GlProgram.h"
+
+#include "../Components/UnlitGeometryRenderComponent.h"
 
 struct UnlitGeometryRenderState {
     // Double-buffered textures
@@ -21,4 +25,5 @@ struct UnlitGeometryRenderState {
 
     float fovX_rad;
     float fovY_rad;
+    int hasEnvironmentDepth_ = 0;
 };

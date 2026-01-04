@@ -12,6 +12,7 @@
 #include "../Systems/InputSystem.h"
 #include "../Systems/TransformSystem.h"
 #include "../Systems/RenderSystem.h"
+#include "../Systems/EnvironmentDepthSystem.h"
 #include "../Systems/UnlitGeometryRenderSystem.h"
 
 //#include "input_actions.h"       // your XRInputActions module
@@ -31,6 +32,7 @@ private:
     std::unique_ptr<InputSystem> inputSystem_;
     std::unique_ptr<TransformSystem> transformSystem_;
     std::unique_ptr<RenderSystem> renderSystem_;
+    std::unique_ptr<EnvironmentDepthSystem> environmentDepthSystem_;
     std::unique_ptr<UnlitGeometryRenderSystem> unlitGeometryRenderSystem_;
 
     // XRInputActions xrInput_;   // action set instance (init in SessionInit)
