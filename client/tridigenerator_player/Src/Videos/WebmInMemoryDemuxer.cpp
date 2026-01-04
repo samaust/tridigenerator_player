@@ -415,7 +415,7 @@ static bool receive_ffmpeg_depth_frame(AVCodecContext* ctx, SwsContext* swsCtx, 
         sws_scale(swsCtx,
                   (const uint8_t *const *)frameBE->data, frameBE->linesize,
                   0, frameBE->height,
-                  frameLE->data, frameBE->linesize);
+                  frameLE->data, frameLE->linesize);
 
         // Calculate required size and resize the vector
         // The size is (width * height) uint16_t elements.
@@ -487,7 +487,7 @@ bool WebmInMemoryDemuxer::decode_next_frame(VideoFrame& outFrame) {
     }
 
     depth_frameLE->width = depthCodecCtx_->width;
-    depth_frameLE->height = depthCodecCtx_->width;
+    depth_frameLE->height = depthCodecCtx_->height;
     depth_frameLE->format = AV_PIX_FMT_GRAY16LE; // Set the target format
     if (av_frame_get_buffer(depth_frameLE, 0) < 0) {
         av_frame_free(&alpha_frame);

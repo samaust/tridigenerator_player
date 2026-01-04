@@ -23,7 +23,8 @@
  * Texture Management:
  * - CreateTextures(): Allocates immutable OpenGL texture storage
  * - UpdateTextures(): Uploads new frame data to GPU using double-buffering
- * - UpdateGlTexture(): Handles texture data upload with stride and alignment support
+ * - UpdateGl8Texture(): Handles texture 8bit data upload with stride and alignment support
+ * - UpdateGl16Texture(): Handles texture 16bit data upload with stride and alignment support
  * 
  * Shader Uniforms:
  * - u_texY, u_texU, u_texV, u_texAlpha, u_texDepth: Sampler uniforms
@@ -32,6 +33,8 @@
  */
 #define LOG_TAG "UnlitGeometryRenderSystem"
 #include "../Core/Logging.h"
+
+#include <algorithm>
 
 #include "UnlitGeometryRenderSystem.h"
 
@@ -72,9 +75,14 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
                      UnlitGeometryRenderState& ugrS,
                      FrameLoaderComponent& flC) {
         // Create initial plane geometry and renderer
+        const int tessX = std::max(1, flC.width - 1);
+        const int tessY = std::max(1, flC.height - 1);
+        if (flC.width <= 1 || flC.height <= 1) {
+            LOGW("Using fallback quad subdivisions (width=%d height=%d)", flC.width, flC.height);
+        }
         auto planeDescriptor = OVRFW::BuildTesselatedQuadDescriptor(
-                flC.width-1,
-                flC.height-1,
+                static_cast<OVRFW::TriangleIndex>(tessX),
+                static_cast<OVRFW::TriangleIndex>(tessY),
                 true,
                 false);
         OVR::Vector4f planeColor = {1.0f, 0.0f, 0.0f, 1.0f};
@@ -461,23 +469,23 @@ void UnlitGeometryRenderSystem::UpdateTextures(
     ugrS.currentSurfaceSet_ = (ugrS.currentSurfaceSet_ + 1) % 2;
 
     // UPLOAD ALL TEXTURES
-    UpdateGlTexture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_Y], GL_RED,
+    UpdateGl8Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_Y], GL_RED,
                     (*framePtr)->textureYData.data(),
                     ugrC.texture_unpack_alignments_[TEX_Y],
                     (*framePtr)->textureYStride);
-    UpdateGlTexture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_U], GL_RED,
+    UpdateGl8Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_U], GL_RED,
                     (*framePtr)->textureUData.data(),
                     ugrC.texture_unpack_alignments_[TEX_U],
                     (*framePtr)->textureUStride);
-    UpdateGlTexture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_V], GL_RED,
+    UpdateGl8Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_V], GL_RED,
                     (*framePtr)->textureVData.data(),
                     ugrC.texture_unpack_alignments_[TEX_V],
                     (*framePtr)->textureVStride);
-    UpdateGlTexture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_ALPHA], GL_RED,
+    UpdateGl8Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_ALPHA], GL_RED,
                     (*framePtr)->textureAlphaData.data(),
                     ugrC.texture_unpack_alignments_[TEX_ALPHA],
                     (*framePtr)->textureAlphaStride);
-    UpdateGlTexture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_DEPTH], GL_RED_INTEGER,
+    UpdateGl16Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_DEPTH], GL_RED_INTEGER,
                     (*framePtr)->textureDepthData.data(),
                     ugrC.texture_unpack_alignments_[TEX_DEPTH],
                     (*framePtr)->textureDepthStride);
@@ -497,7 +505,7 @@ void UnlitGeometryRenderSystem::UpdateTextures(
  * @param stride The stride (row length in bytes) of the source textureData buffer.
  *               If 0, a packed buffer is assumed.
  */
-void UnlitGeometryRenderSystem::UpdateGlTexture(
+void UnlitGeometryRenderSystem::UpdateGl8Texture(
        OVRFW::GlTexture texture, GLenum format,
        const uint8_t* textureData, int unpack_alignment, int stride = 0) {
     if (unpack_alignment != 4)
@@ -547,7 +555,7 @@ void UnlitGeometryRenderSystem::UpdateGlTexture(
  * @param stride The stride (row length in bytes) of the source textureData buffer.
  *               If 0, a packed buffer is assumed.
  */
-void UnlitGeometryRenderSystem::UpdateGlTexture(
+void UnlitGeometryRenderSystem::UpdateGl16Texture(
        OVRFW::GlTexture texture, GLenum format,
        const uint16_t* textureData, int unpack_alignment, int stride = 0) {
     if (unpack_alignment != 4)
@@ -563,10 +571,11 @@ void UnlitGeometryRenderSystem::UpdateGlTexture(
 
     glBindTexture(GL_TEXTURE_2D, texture.texture);
 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    // Unnecessary, done at texture creation time
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     glTexSubImage2D(
             GL_TEXTURE_2D,

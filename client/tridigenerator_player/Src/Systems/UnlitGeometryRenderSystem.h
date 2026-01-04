@@ -35,12 +35,12 @@ public:
             UnlitGeometryRenderComponent &ugrC,
             VideoFrame** framePtr,
             UnlitGeometryRenderState &ugrS);
-    void UpdateGlTexture(
+    void UpdateGl8Texture(
             OVRFW::GlTexture texture, GLenum format,
             const uint8_t* textureData,
             int unpack_alignment,
             int stride);
-    void UpdateGlTexture(
+    void UpdateGl16Texture(
             OVRFW::GlTexture texture, GLenum format,
             const uint16_t* textureData,
             int unpack_alignment,
