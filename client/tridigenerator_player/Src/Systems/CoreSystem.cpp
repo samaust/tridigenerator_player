@@ -33,8 +33,8 @@ XrResult CheckErrors(XrInstance instance, XrResult result, const char* function,
 #define OXR(func) CheckErrors(instance_, func, #func, false);
 #endif
 
-CoreSystem::CoreSystem(XrInstance instance, XrSystemId systemId, XrSpace localSpace)
-    : instance_{instance}, systemId_{systemId}, localSpace_{localSpace} {
+CoreSystem::CoreSystem(XrInstance instance, XrSystemId systemId)
+    : instance_{instance}, systemId_{systemId} {
 }
 
 bool CoreSystem::Init(EntityManager& ecs) {
@@ -42,7 +42,6 @@ bool CoreSystem::Init(EntityManager& ecs) {
             [&](EntityID e,
                 CoreComponent &cC,
                 CoreState &cS) {
-        cS.localSpace = localSpace_;
         InitHandtracking(cC, cS);
         InitPassthrough(cC, cS);
 
@@ -348,6 +347,11 @@ void CoreSystem::SessionEnd(EntityManager& ecs) {
         }
         cS.Session = XR_NULL_HANDLE;
     });
+}
+
+void CoreSystem::SetLocalSpace(EntityManager& ecs, XrSpace localSpace) {
+    localSpace_ = localSpace;
+    ecs.ForEach<CoreState>([&](EntityID, CoreState& cS) { cS.localSpace = localSpace; });
 }
 
 bool CoreSystem::BuildPassthroughLayer(

@@ -10,13 +10,14 @@
 
 class CoreSystem {
 public:
-    CoreSystem(XrInstance instance, XrSystemId systemId, XrSpace localSpace);
+    CoreSystem(XrInstance instance, XrSystemId systemId);
     bool Init(EntityManager& ecs);
     std::vector<const char*> GetExtensions();
     void Shutdown(EntityManager& ecs);
     void Update(EntityManager& ecs);
     void SessionInit(EntityManager& ecs, XrSession session);
     void SessionEnd(EntityManager& ecs);
+    void SetLocalSpace(EntityManager& ecs, XrSpace localSpace);
     bool BuildPassthroughLayer(
         EntityManager& ecs,
         XrCompositionLayerPassthroughFB& outLayer,
@@ -36,5 +37,5 @@ private:
 
     XrInstance instance_;
     XrSystemId systemId_;
-    XrSpace localSpace_;
+    XrSpace localSpace_ = XR_NULL_HANDLE;
 };

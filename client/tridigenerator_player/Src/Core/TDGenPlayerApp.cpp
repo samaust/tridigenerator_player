@@ -105,9 +105,11 @@ std::vector<const char *> TDGenPlayerApp::GetExtensions()
     extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
     extensions.push_back(XR_FB_TOUCH_CONTROLLER_PRO_EXTENSION_NAME);
 
-    // Add extensions from coreSystem_
-    std::vector<const char*> coreSystemExtensions = coreSystem_->GetExtensions();
-    extensions.insert(extensions.end(), coreSystemExtensions.begin(), coreSystemExtensions.end());
+    // CoreSystem isn't constructed until AppInit(), but we must request any required
+    // instance extensions up-front (during XrApp::CreateInstance()).
+    extensions.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
+    extensions.push_back(XR_FB_TRIANGLE_MESH_EXTENSION_NAME);
+    extensions.push_back(XR_META_ENVIRONMENT_DEPTH_EXTENSION_NAME);
 
     return extensions;
 }
@@ -124,7 +126,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     // Initialize ECS and Systems
     entityManager_ = std::make_unique<EntityManager>();
 
-    coreSystem_ = std::make_unique<CoreSystem>(GetInstance(), GetSystemId(), GetLocalSpace());
+    coreSystem_ = std::make_unique<CoreSystem>(GetInstance(), GetSystemId());
     sceneSystem_ = std::make_unique<SceneSystem>();
     frameLoaderSystem_ = std::make_unique<FrameLoaderSystem>();
     audioSystem_ = std::make_unique<AudioSystem>();
@@ -182,6 +184,8 @@ bool TDGenPlayerApp::SessionInit()
     //xrInput_.CreateActionSpaces(GetLocalSpace());
 
     XrSession session = GetSession();
+    const XrSpace appSpace = (GetCurrentSpace() != XR_NULL_HANDLE) ? GetCurrentSpace() : GetLocalSpace();
+    coreSystem_->SetLocalSpace(*entityManager_, appSpace);
     coreSystem_->SessionInit(*entityManager_, session);
     environmentDepthSystem_->SessionInit(*entityManager_, session);
 
