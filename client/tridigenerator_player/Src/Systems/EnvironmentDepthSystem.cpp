@@ -42,23 +42,24 @@ XrResult CheckErrors(XrInstance instance, XrResult result, const char* function,
 #endif
 
 inline OVR::Matrix4f OvrFromXr(const XrMatrix4x4f& x) {
+    // Match SampleXrFramework conversion (column-major to row-major).
     return OVR::Matrix4f(
-        x.m[0x0],
-        x.m[0x1],
-        x.m[0x2],
-        x.m[0x3],
-        x.m[0x4],
-        x.m[0x5],
-        x.m[0x6],
-        x.m[0x7],
-        x.m[0x8],
-        x.m[0x9],
-        x.m[0xa],
-        x.m[0xb],
-        x.m[0xc],
-        x.m[0xd],
-        x.m[0xe],
-        x.m[0xf]);
+        x.m[0],
+        x.m[4],
+        x.m[8],
+        x.m[12],
+        x.m[1],
+        x.m[5],
+        x.m[9],
+        x.m[13],
+        x.m[2],
+        x.m[6],
+        x.m[10],
+        x.m[14],
+        x.m[3],
+        x.m[7],
+        x.m[11],
+        x.m[15]);
 }
 
 } // namespace
@@ -162,6 +163,8 @@ void EnvironmentDepthSystem::SessionInit(EntityManager& ecs, XrSession session) 
                     GL_TEXTURE_2D_ARRAY,
                     static_cast<int>(edS.Width),
                     static_cast<int>(edS.Height));
+                OVRFW::MakeTextureClamped(edS.SwapchainTextures.back());
+                OVRFW::MakeTextureNearest(edS.SwapchainTextures.back());
             }
 
             result = OXR(cS.XrStartEnvironmentDepthProviderMETA(cS.EnvironmentDepthProvider));

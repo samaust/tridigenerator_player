@@ -635,6 +635,7 @@ void UnlitGeometryRenderSystem::Render(EntityManager& ecs, std::vector<OVRFW::ov
         OVRFW::ovrSurfaceDef *surfaceDefToPush = &ugrS.surfaceDefs_[ugrS.currentSurfaceSet_];
 
         OVRFW::ovrGraphicsCommand &gc = surfaceDefToPush->graphicsCommand;
+        gc.GpuState.blendEnable = OVRFW::ovrGpuState::BLEND_ENABLE;
         gc.GpuState.blendMode = ugrC.BlendMode;
         gc.GpuState.blendSrc = ugrC.BlendSrc;
         gc.GpuState.blendDst = ugrC.BlendDst;
