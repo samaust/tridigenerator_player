@@ -14,6 +14,7 @@ extern "C" {
 #include <libavutil/avutil.h>
 #include <libavutil/mem.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/pixfmt.h>
 #include <libavcodec/avcodec.h>
 
 #include <dav1d/dav1d.h>
@@ -40,6 +41,46 @@ static inline int64_t pts_to_us(int64_t pts, AVRational tb) {
     if (pts == AV_NOPTS_VALUE) return AV_NOPTS_VALUE;
     AVRational us_tb = {1, 1000000};
     return av_rescale_q(pts, tb, us_tb);
+}
+
+static bool guess_full_range_from_samples(
+        const VideoFrame& frame, int /*ss_hor*/, int /*ss_ver*/) {
+    if (frame.textureYWidth == 0 || frame.textureYHeight == 0 ||
+        frame.textureUWidth == 0 || frame.textureUHeight == 0 ||
+        frame.textureVWidth == 0 || frame.textureVHeight == 0 ||
+        frame.textureYData.empty() || frame.textureUData.empty() || frame.textureVData.empty()) {
+        return false;
+    }
+
+    const int w = static_cast<int>(frame.textureYWidth);
+    const int h = static_cast<int>(frame.textureYHeight);
+    const int step_x = std::max(1, w / 32);
+    const int step_y = std::max(1, h / 32);
+
+    int samples = 0;
+    int minY = 255;
+    int maxY = 0;
+
+    for (int y = 0; y < h; y += step_y) {
+        for (int x = 0; x < w; x += step_x) {
+            const size_t y_idx = static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x);
+            if (y_idx >= frame.textureYData.size()) {
+                continue;
+            }
+            const int y8 = static_cast<int>(frame.textureYData[y_idx]);
+            minY = std::min(minY, y8);
+            maxY = std::max(maxY, y8);
+            samples++;
+        }
+    }
+
+    if (samples <= 0) return false;
+
+    // Heuristic: limited range nominally maps luma to [16,235]. If we see
+    // samples outside that band, treat it as full range. Keep margins to avoid
+    // misclassification due to noise/dithering.
+    if (minY <= 12 || maxY >= 239) return true;
+    return false;
 }
 
 // ---------- Static callback forwarders ----------
@@ -208,6 +249,10 @@ bool WebmInMemoryDemuxer::init(std::string* error) {
         width_ = fmtCtx_->streams[colorStreamIndex_]->codecpar->width;
         height_ = fmtCtx_->streams[colorStreamIndex_]->codecpar->height;
 
+        const AVCodecParameters* cp_color = fmtCtx_->streams[colorStreamIndex_]->codecpar;
+        colorRangeKnown_ = (cp_color->color_range != AVCOL_RANGE_UNSPECIFIED);
+        colorFullRange_ = (cp_color->color_range == AVCOL_RANGE_JPEG);
+
         // ready
         return true;
     } catch (const std::exception& ex) {
@@ -369,6 +414,11 @@ bool WebmInMemoryDemuxer::get_next_dav1d_picture(VideoFrame& outFrame) {
         outFrame.textureVHeight = ch;
 
         outFrame.ts_us = pic.m.timestamp;
+        if (colorRangeKnown_) {
+            outFrame.yuvFullRange = colorFullRange_;
+        } else {
+            outFrame.yuvFullRange = guess_full_range_from_samples(outFrame, ss_hor, ss_ver);
+        }
 
         dav1d_picture_unref(&pic);
         return true;

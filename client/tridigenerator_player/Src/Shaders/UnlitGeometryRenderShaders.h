@@ -81,14 +81,34 @@ varying lowp vec2 oTexCoord;
 varying lowp vec4 oColor;
 varying highp vec4 worldPosition;
 
+#ifndef YUV_FULL_RANGE
+#define YUV_FULL_RANGE 0
+#endif
+
 vec3 yuv_to_rgb(float y, float u, float v) {
-    float c = y - 0.0625;
     float d = u - 0.5;
     float e = v - 0.5;
+#if YUV_FULL_RANGE
+    float r = y + 1.402 * e;
+    float g = y - 0.344136 * d - 0.714136 * e;
+    float b = y + 1.772 * d;
+    return vec3(r, g, b);
+#else
+    float c = y - 0.0625;
     float r = 1.1643 * c + 1.5958 * e;
     float g = 1.1643 * c - 0.39173 * d - 0.81290 * e;
     float b = 1.1643 * c + 2.017 * d;
     return vec3(r, g, b);
+#endif
+}
+
+vec3 srgb_to_linear(vec3 c) {
+    c = clamp(c, 0.0, 1.0);
+    return vec3(
+        (c.r <= 0.04045) ? (c.r / 12.92) : pow((c.r + 0.055) / 1.055, 2.4),
+        (c.g <= 0.04045) ? (c.g / 12.92) : pow((c.g + 0.055) / 1.055, 2.4),
+        (c.b <= 0.04045) ? (c.b / 12.92) : pow((c.b + 0.055) / 1.055, 2.4)
+    );
 }
 
 #define TransformDepthVertex(localPos) (u_depthProjectionMatrix[VIEW_ID] * ( u_depthViewMatrix[VIEW_ID] * localPos ))
@@ -105,7 +125,7 @@ void main()
 	float y = texture(u_texY, oTexCoord).r;
 	float u = texture(u_texU, oTexCoord).r;
 	float v = texture(u_texV, oTexCoord).r;
-	vec3 rgb = yuv_to_rgb(y, u, v);
+	vec3 rgb = srgb_to_linear(yuv_to_rgb(y, u, v));
 
 	// Environment Depth
 	if (u_hasEnvironmentDepth == 0) {

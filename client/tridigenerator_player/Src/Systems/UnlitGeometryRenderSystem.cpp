@@ -116,23 +116,32 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
                 {"u_occlusionDepthBias", OVRFW::ovrProgramParmType::FLOAT},
         };
 
-        std::string programDefs;
+        std::string programDefsLimited;
+        std::string programDefsFullRange = "#define YUV_FULL_RANGE 1\n";
+
+        ugrS.ProgramLimited_ = OVRFW::GlProgram::Build(
+                programDefsLimited.c_str(),
+                UnlitGeometryVertexShaderSrc,
+                programDefsLimited.c_str(),
+                UnlitGeometryFragmentShaderSrc,
+                GeometryUniformParms,
+                sizeof(GeometryUniformParms) / sizeof(OVRFW::ovrProgramParm));
+
+        ugrS.ProgramFullRange_ = OVRFW::GlProgram::Build(
+                programDefsFullRange.c_str(),
+                UnlitGeometryVertexShaderSrc,
+                programDefsFullRange.c_str(),
+                UnlitGeometryFragmentShaderSrc,
+                GeometryUniformParms,
+                sizeof(GeometryUniformParms) / sizeof(OVRFW::ovrProgramParm));
 
         // Initialize BOTH surface definitions
         for (int i = 0; i < 2; ++i) {
             ugrS.surfaceDefs_[i].geo = OVRFW::GlGeometry(d.attribs, d.indices);
 
-            ugrS.Program_ = OVRFW::GlProgram::Build(
-                    programDefs.c_str(),
-                    UnlitGeometryVertexShaderSrc,
-                    programDefs.c_str(),
-                    UnlitGeometryFragmentShaderSrc,
-                    GeometryUniformParms,
-                    sizeof(GeometryUniformParms) / sizeof(OVRFW::ovrProgramParm));
-
             /// Hook the graphics command
             OVRFW::ovrGraphicsCommand &gc = ugrS.surfaceDefs_[i].graphicsCommand;
-            gc.Program = ugrS.Program_;
+            gc.Program = ugrS.ProgramLimited_;
             gc.BindUniformTextures();
 
             /// gpu state needs alpha blending
@@ -161,7 +170,8 @@ void UnlitGeometryRenderSystem::Shutdown(EntityManager& ecs) {
             OVRFW::FreeTexture(ugrS.textures_[i][TEX_ALPHA]);
             OVRFW::FreeTexture(ugrS.textures_[i][TEX_DEPTH]);
         }
-        OVRFW::GlProgram::Free(ugrS.Program_);
+        OVRFW::GlProgram::Free(ugrS.ProgramLimited_);
+        OVRFW::GlProgram::Free(ugrS.ProgramFullRange_);
                 ugrS.surfaceDefs_[0].geo.Free();
                 ugrS.surfaceDefs_[1].geo.Free();
     });
@@ -343,6 +353,14 @@ void UnlitGeometryRenderSystem::CreateTextures(
         gc.BindUniformTextures();
     }
 
+    // Choose shader program based on decoded color range.
+    ugrS.useFullRangeYuv_ = (*framePtr)->yuvFullRange ? 1 : 0;
+    for (int i = 0; i < 2; ++i) {
+        OVRFW::ovrGraphicsCommand& gc = ugrS.surfaceDefs_[i].graphicsCommand;
+        gc.Program = (ugrS.useFullRangeYuv_ != 0) ? ugrS.ProgramFullRange_ : ugrS.ProgramLimited_;
+        gc.BindUniformTextures();
+    }
+
     // Compute bytes per row
     const uint32_t tex_Y_bpr = (*framePtr)->textureYWidth * bytesPerPixel(ugrC.texture_internal_formats_[TEX_Y]);
     const uint32_t tex_U_bpr = (*framePtr)->textureUWidth * bytesPerPixel(ugrC.texture_internal_formats_[TEX_U]);
@@ -465,6 +483,16 @@ void UnlitGeometryRenderSystem::UpdateTextures(
     UnlitGeometryRenderComponent &ugrC,
     VideoFrame** framePtr,
     UnlitGeometryRenderState &ugrS) {
+    const int desiredFullRange = (*framePtr)->yuvFullRange ? 1 : 0;
+    if (desiredFullRange != ugrS.useFullRangeYuv_) {
+        ugrS.useFullRangeYuv_ = desiredFullRange;
+        for (int i = 0; i < 2; ++i) {
+            OVRFW::ovrGraphicsCommand& gc = ugrS.surfaceDefs_[i].graphicsCommand;
+            gc.Program = (ugrS.useFullRangeYuv_ != 0) ? ugrS.ProgramFullRange_ : ugrS.ProgramLimited_;
+            gc.BindUniformTextures();
+        }
+    }
+
     // Swap the current surface set index to point to the other set.
     ugrS.currentSurfaceSet_ = (ugrS.currentSurfaceSet_ + 1) % 2;
 

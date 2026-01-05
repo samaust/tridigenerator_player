@@ -9,6 +9,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 #include <libavutil/avutil.h>
+#include <libavutil/pixfmt.h>
 }
 
 #include <dav1d/dav1d.h>
@@ -110,6 +111,8 @@ private:
     // Video parameters
     int width_ = 0;
     int height_ = 0;
+    bool colorRangeKnown_ = false;
+    bool colorFullRange_ = false;
 
     // AVIO buffer
     AVIOContext* avioCtx_ = nullptr;

@@ -20,8 +20,10 @@ struct UnlitGeometryRenderState {
     // Which surface set is currently being used for rendering
     int currentSurfaceSet_ = 0;
 
-    // Shader program used for rendering
-    OVRFW::GlProgram Program_;
+    // Shader programs (limited-range and full-range YUV)
+    OVRFW::GlProgram ProgramLimited_;
+    OVRFW::GlProgram ProgramFullRange_;
+    int useFullRangeYuv_ = 0;
 
     float fovX_rad;
     float fovY_rad;

@@ -32,6 +32,7 @@ struct VideoFrame {
     int textureDepthStride = 0;
 
     int64_t ts_us = 0;
+    bool yuvFullRange = false;
 
     // Ownership: these internal buffers belong to WebmInMemoryDemuxer
     // and remain valid until the next call to decode_next_frame().
