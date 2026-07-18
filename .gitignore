@@ -13,6 +13,7 @@ client/tridigenerator_player/Projects/Android/.idea
 
 # preprocess
 preprocess/input/*
+vipe_encoded/
 
 # server
 server/frames/*
