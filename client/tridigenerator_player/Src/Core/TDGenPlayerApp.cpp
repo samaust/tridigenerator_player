@@ -14,7 +14,6 @@
 // Meta/SampleXrFramework
 #include "GUI/VRMenuObject.h"
 #include "Input/ControllerRenderer.h"
-#include "Input/HandRenderer.h"
 #include "Input/TinyUI.h"
 #include "Render/BitmapFont.h"
 #include "Render/GeometryBuilder.h"
@@ -101,8 +100,7 @@ std::vector<const char *> TDGenPlayerApp::GetExtensions()
     // Add extensions from XrApp
     std::vector<const char *> extensions = XrApp::GetExtensions();
 
-    // Add hand tracking and controller extensions
-    extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+    // Controller input is used by the dataset picker. Hand tracking is not required.
     extensions.push_back(XR_FB_TOUCH_CONTROLLER_PRO_EXTENSION_NAME);
 
     // CoreSystem isn't constructed until AppInit(), but we must request any required
@@ -147,6 +145,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
 
     // ---------- Create Object entity ----------
     auto ObjectEntity = entityManager_->CreateEntity();
+    objectEntity_ = ObjectEntity;
     TransformComponent transform;
     transform.modelPose = OVR::Posef(OVR::Quatf::Identity(), {0.0f, 0.0f, 0.0f});
     transform.modelScale = {1.0f, 1.0f, 1.0f};
@@ -167,6 +166,8 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     renderSystem_->Init(*entityManager_);
     environmentDepthSystem_->Init(*entityManager_);
     unlitGeometryRenderSystem_->Init(*entityManager_);
+
+    BuildDatasetPicker();
 
     return true;
 }
@@ -218,11 +219,23 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     renderSystem_->Update(*entityManager_);
     environmentDepthSystem_->Update(*entityManager_, in);
     unlitGeometryRenderSystem_->Update(*entityManager_, in);
+    if (datasetUi_) {
+        if (in.RightRemoteTracked) {
+            datasetUi_->AddHitTestRay(in.RightRemotePointPose, in.RightRemoteIndexTrigger > 0.5f, 1);
+        }
+        if (in.LeftRemoteTracked) {
+            datasetUi_->AddHitTestRay(in.LeftRemotePointPose, in.LeftRemoteIndexTrigger > 0.5f, 0);
+        }
+        datasetUi_->Update(in);
+    }
 }
 
 void TDGenPlayerApp::AppRenderFrame(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out)
 {
     OVRFW::XrApp::AppRenderFrame(in, out);
+    if (datasetUi_) {
+        datasetUi_->Render(in, out);
+    }
 }
 
 void TDGenPlayerApp::AppRenderEye(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out, int eye)
@@ -245,6 +258,11 @@ void TDGenPlayerApp::SessionEnd()
 
 void TDGenPlayerApp::AppShutdown(const xrJava *context)
 {
+    if (datasetUi_) {
+        datasetUi_->Shutdown();
+        datasetUi_.reset();
+        datasetStatusLabel_ = nullptr;
+    }
     // Explicitly destroy the systems and entity manager.
     // This is good practice to control the shutdown order.
     unlitGeometryRenderSystem_->Shutdown(*entityManager_);
@@ -273,6 +291,41 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
     curl_global_cleanup();
 
     OVRFW::XrApp::AppShutdown(context);
+}
+
+void TDGenPlayerApp::BuildDatasetPicker() {
+    datasetUi_ = std::make_unique<OVRFW::TinyUI>();
+    if (!datasetUi_->Init(GetContext(), GetFileSys())) {
+        LOGE("Failed to initialize dataset picker UI");
+        datasetUi_.reset();
+        return;
+    }
+    datasetStatusLabel_ = datasetUi_->AddLabel("ViPE datasets", {0.0f, 0.35f, -1.5f}, {500.0f, 70.0f});
+    auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+    float y = 0.20f;
+    for (const VipeCatalogEntry& entry : loader.catalog.datasets) {
+        const std::string id = entry.id;
+        datasetUi_->AddButton(entry.displayName, {0.0f, y, -1.5f}, {500.0f, 70.0f},
+            [this, id]() { SelectDataset(id); });
+        y -= 0.12f;
+    }
+    if (loader.catalog.datasets.empty() && datasetStatusLabel_) {
+        datasetStatusLabel_->SetText(loader.errorMessage.empty() ? "No datasets" : loader.errorMessage);
+    }
+}
+
+void TDGenPlayerApp::SelectDataset(const std::string& datasetId) {
+    auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+    auto& loaderState = entityManager_->GetComponent<FrameLoaderState>(objectEntity_);
+    unlitGeometryRenderSystem_->Shutdown(*entityManager_);
+    const bool selected = frameLoaderSystem_->SelectDataset(datasetId, loader, loaderState);
+    if (selected) {
+        unlitGeometryRenderSystem_->Init(*entityManager_);
+        if (datasetStatusLabel_) datasetStatusLabel_->SetText("Loaded: " + datasetId);
+    } else {
+        unlitGeometryRenderSystem_->Init(*entityManager_);
+        if (datasetStatusLabel_) datasetStatusLabel_->SetText("Load failed: " + loader.errorMessage);
+    }
 }
 // Insert passthrough layer before projection layers when available
 void TDGenPlayerApp::PreProjectionAddLayer(xrCompositorLayerUnion* layers, int& layerCount) {

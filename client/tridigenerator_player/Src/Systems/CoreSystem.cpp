@@ -42,7 +42,7 @@ bool CoreSystem::Init(EntityManager& ecs) {
             [&](EntityID e,
                 CoreComponent &cC,
                 CoreState &cS) {
-        InitHandtracking(cC, cS);
+        cC.supportsHandTracking = false;
         InitPassthrough(cC, cS);
 
     });

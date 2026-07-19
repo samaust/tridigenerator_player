@@ -25,8 +25,8 @@ struct UnlitGeometryRenderState {
     OVRFW::GlProgram ProgramFullRange_;
     int useFullRangeYuv_ = 0;
 
-    float fovX_rad;
-    float fovY_rad;
+    OVR::Vector4f intrinsics_ = OVR::Vector4f(1.0f, 1.0f, 0.0f, 0.0f);
+    OVR::Vector2f imageSize_ = OVR::Vector2f(1.0f, 1.0f);
     int hasEnvironmentDepth_ = 0;
     OVR::Vector2f environmentDepthTexelSize_ = OVR::Vector2f(0.0f, 0.0f);
 };

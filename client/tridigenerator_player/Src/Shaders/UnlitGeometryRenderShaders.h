@@ -7,8 +7,8 @@ attribute highp vec3 Normal;
 attribute highp vec2 TexCoord;
 
 uniform usampler2D u_texDepth;
-uniform highp float u_FovX_rad; // Horizontal FOV in radians (e.g., fovx_deg * PI / 180.0)
-uniform highp float u_FovY_rad; // Vertical FOV in radians (calculated from aspect ratio)
+uniform highp vec4 u_intrinsics; // fx, fy, cx, cy in pixels
+uniform highp vec2 u_imageSize;
 uniform highp float u_depthScaleFactor;
 
 
@@ -25,20 +25,9 @@ void main()
     // Convert to meters using the factor from the manifest
     float z = float(uz) / u_depthScaleFactor;
 
-    // Calculate X and Y world coordinates using projection math.
-    // TexCoord is [0, 1]. Convert to Normalized Device Coordinates [-1, 1].
-    float ndc_x = TexCoord.x * 2.0 - 1.0;
-    // For Y, texture coordinates often have 0 at the top. We need to flip this
-    // so that +Y in screen space maps to +Y in world space.
-    float ndc_y = 1.0 - TexCoord.y * 2.0;
-
-    // The tangent of the half-FOV gives the extent of the view plane at distance 1.
-    // We multiply by NDC to find the point on that plane, then scale by depth.
-    float x = ndc_x * tan(u_FovX_rad) * z;
-    float y = ndc_y * tan(u_FovY_rad) * z;
-
-    //float x = ndc_x;
-    //float y = ndc_y;
+    highp vec2 pixel = TexCoord * u_imageSize;
+    float x = (pixel.x - u_intrinsics.z) * z / u_intrinsics.x;
+    float y = -(pixel.y - u_intrinsics.w) * z / u_intrinsics.y;
 
 	// The Z coordinate in view space is negative.
 	highp vec4 localPosition = vec4(x, y, -z, 1.0);
@@ -68,6 +57,7 @@ uniform sampler2D u_texY;
 uniform sampler2D u_texU;
 uniform sampler2D u_texV;
 	uniform sampler2D u_texAlpha;
+	uniform highp usampler2D u_texDepth;
 	uniform lowp int u_hasEnvironmentDepth;
 	uniform lowp int u_softOcclusion;
 	uniform highp mat4 u_depthViewMatrix[NUM_VIEWS];
@@ -119,7 +109,7 @@ void main()
     float alpha = texture(u_texAlpha, oTexCoord).r;
 
     // Discard fragment if alpha is below a threshold
-    if (alpha < 0.5) discard;
+    if (alpha <= 0.0 || texture(u_texDepth, oTexCoord).r == uint(0)) discard;
 
 	// Get color value from YUV textures
 	float y = texture(u_texY, oTexCoord).r;

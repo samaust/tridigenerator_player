@@ -465,6 +465,7 @@ def make_manifest(sequence: str, output_path: Path, info: dict, depth_info: dict
         "height": video["height"],
         "fps": video["rate_num"] / video["rate_den"],
         "frame_rate": {"numerator": video["rate_num"], "denominator": video["rate_den"]},
+        "orientation_offset_degrees": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
         "streams": {
             "color": {"index": 0, "codec": "av1", "pixel_format": "yuv420p"},
             "mask": {"index": 1, "codec": "ffv1", "pixel_format": "gray"},

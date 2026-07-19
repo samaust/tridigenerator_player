@@ -288,6 +288,7 @@ bool WebmInMemoryDemuxer::seek_to_start() {
     }
 
     flush_decoders();
+    nextFrameIndex_ = 0;
     return true;
 }
 
@@ -604,7 +605,11 @@ bool WebmInMemoryDemuxer::decode_next_frame(VideoFrame& outFrame) {
     av_frame_free(&depth_frameLE);
 
     // Return true only if we successfully got all three components.
-    return (has_color && has_alpha && has_depth);
+    const bool complete = has_color && has_alpha && has_depth;
+    if (complete) {
+        outFrame.frameIndex = nextFrameIndex_++;
+    }
+    return complete;
 }
 
 // ---------- flush / reset ----------

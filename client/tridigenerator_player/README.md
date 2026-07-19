@@ -57,3 +57,61 @@ doxygen Doxyfile
 
 The output directory is configured in `Doxyfile` (`Docs/html/`), so open the generated
 `index.html` in a browser to view the documentation.
+
+## Linux desktop build
+
+The Linux target is a native C++ X11/GLX application. It uses local ViPE data and does not
+require an OpenXR runtime or network connection in its default desktop mode.
+
+Install development packages providing CMake, pkg-config, X11, OpenGL, OpenXR Loader,
+FFmpeg (`libavformat`, `libavcodec`, `libavutil`, `libswscale`), dav1d, and jsoncpp. Then:
+
+```bash
+sudo dnf install cmake gcc-c++ pkgconf-pkg-config openxr-devel ffmpeg-free-devel \
+  libdav1d-devel jsoncpp-devel libX11-devel mesa-libGL-devel
+```
+
+```bash
+cmake -S client -B build/linux -DCMAKE_BUILD_TYPE=Release
+cmake --build build/linux -j
+ctest --test-dir build/linux --output-on-failure
+./build/linux/tridigenerator_player/tridigenerator_player \
+  --data-dir ./vipe_encoded --sequence dog-example --backend desktop
+```
+
+Controls are mouse-look, `W/A/S/D`, `Q/E` for vertical movement, and Shift for faster
+movement. `C` restores the camera's starting position and orientation. Space pauses or
+resumes video playback without disabling camera movement. `M` toggles mask filtering. Escape
+releases the pointer; press Escape again to exit. Left click recaptures it.
+
+`--backend openxr` validates that the configured runtime advertises
+`XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MONO` before starting the desktop mirror. Runtime
+presentation remains dependent on a compatible user-supplied runtime/HMD setup.
+
+## Android ViPE catalog
+
+Android retains HTTP loading. The configured server must expose `/catalog.json`:
+
+```json
+{
+  "schema_version": 1,
+  "datasets": [
+    {
+      "id": "dog-example",
+      "display_name": "Dog Example",
+      "manifest": "/vipe_encoded/dog-example.json"
+    }
+  ]
+}
+```
+
+Each manifest's `file` is resolved relative to its manifest URL. The in-world picker uses
+controller aim rays and trigger clicks; hand tracking is not required.
+
+An optional `orientation_offset_degrees` manifest object corrects the reconstruction's
+initial alignment. `yaw` rotates around OpenGL +Y, `pitch` around +X, and `roll` around +Z;
+the world-space composition order is yaw, pitch, then roll. For example:
+
+```json
+"orientation_offset_degrees": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0}
+```

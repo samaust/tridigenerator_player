@@ -15,6 +15,11 @@
 #include "../Systems/EnvironmentDepthSystem.h"
 #include "../Systems/UnlitGeometryRenderSystem.h"
 
+namespace OVRFW {
+class TinyUI;
+class VRMenuObject;
+}
+
 //#include "input_actions.h"       // your XRInputActions module
 
 class TDGenPlayerApp : public OVRFW::XrApp {
@@ -34,6 +39,12 @@ private:
     std::unique_ptr<RenderSystem> renderSystem_;
     std::unique_ptr<EnvironmentDepthSystem> environmentDepthSystem_;
     std::unique_ptr<UnlitGeometryRenderSystem> unlitGeometryRenderSystem_;
+    std::unique_ptr<OVRFW::TinyUI> datasetUi_;
+    OVRFW::VRMenuObject* datasetStatusLabel_ = nullptr;
+    EntityID objectEntity_ = 0;
+
+    void BuildDatasetPicker();
+    void SelectDataset(const std::string& datasetId);
 
     // XRInputActions xrInput_;   // action set instance (init in SessionInit)
 
