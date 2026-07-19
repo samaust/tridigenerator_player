@@ -12,8 +12,10 @@
 #include "../Core/EntityManager.h"
 
 #include "../Components/FrameLoaderComponent.h"
+#include "../Components/TransformComponent.h"
 #include "../Components/UnlitGeometryRenderComponent.h"
 
+#include "../States/TransformState.h"
 #include "../States/UnlitGeometryRenderState.h"
 
 struct EnvironmentDepthState;
