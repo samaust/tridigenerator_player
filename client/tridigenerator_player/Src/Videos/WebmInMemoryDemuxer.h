@@ -113,6 +113,7 @@ private:
     int height_ = 0;
     bool colorRangeKnown_ = false;
     bool colorFullRange_ = false;
+    int nextFrameIndex_ = 0;
 
     // AVIO buffer
     AVIOContext* avioCtx_ = nullptr;

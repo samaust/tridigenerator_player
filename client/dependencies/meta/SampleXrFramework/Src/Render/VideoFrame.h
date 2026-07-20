@@ -5,6 +5,7 @@
  * All planes are tightly packed (row stride == width for each plane).
  */
 struct VideoFrame {
+    int frameIndex = -1;
     // --- COLOR DATA (YUV) ---
     std::vector<uint8_t> textureYData;
     uint32_t textureYWidth = 0;

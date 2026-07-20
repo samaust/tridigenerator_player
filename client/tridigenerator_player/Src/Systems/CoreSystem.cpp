@@ -42,6 +42,9 @@ bool CoreSystem::Init(EntityManager& ecs) {
             [&](EntityID e,
                 CoreComponent &cC,
                 CoreState &cS) {
+        cC.supportsHandTracking = false;
+        cC.supportsHandTrackingMesh = false;
+        cC.supportsHandTrackingAim = false;
         InitHandtracking(cC, cS);
         InitPassthrough(cC, cS);
 
@@ -63,6 +66,19 @@ void CoreSystem::Update(EntityManager& ecs) {
 }
 
 void CoreSystem::InitHandtracking(CoreComponent& cC, CoreState& cS) {
+    const bool hasHandTrackingExtension =
+            ExtensionsArePresent({XR_EXT_HAND_TRACKING_EXTENSION_NAME});
+    cC.supportsHandTrackingMesh =
+            hasHandTrackingExtension &&
+            ExtensionsArePresent({XR_FB_HAND_TRACKING_MESH_EXTENSION_NAME});
+    cC.supportsHandTrackingAim =
+            hasHandTrackingExtension &&
+            ExtensionsArePresent({XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME});
+    if (!hasHandTrackingExtension) {
+        LOGW("Hand tracking: XR_EXT_hand_tracking is unavailable; hands disabled");
+        return;
+    }
+
     // Even if the runtime supports the hand tracking extension,
     // the actual device might not support hand tracking.
     // Inspect the system properties to find out.
@@ -92,6 +108,25 @@ void CoreSystem::InitHandtracking(CoreComponent& cC, CoreState& cS) {
                 "xrLocateHandJointsEXT",
                 (PFN_xrVoidFunction*)(&cS.xrLocateHandJointsEXT_)));
         assert(cS.xrLocateHandJointsEXT_);
+
+        if (cC.supportsHandTrackingMesh) {
+            OXR(xrGetInstanceProcAddr(
+                    instance_,
+                    "xrGetHandMeshFB",
+                    reinterpret_cast<PFN_xrVoidFunction*>(&cS.xrGetHandMeshFB_)));
+            if (!cS.xrGetHandMeshFB_) {
+                cC.supportsHandTrackingMesh = false;
+                LOGW("Hand tracking: xrGetHandMeshFB unavailable; hand rendering disabled");
+            }
+        }
+        LOGI(
+                "Hand tracking: supported (mesh=%d, aim=%d)",
+                cC.supportsHandTrackingMesh,
+                cC.supportsHandTrackingAim);
+    } else {
+        cC.supportsHandTrackingMesh = false;
+        cC.supportsHandTrackingAim = false;
+        LOGW("Hand tracking: extension present but unsupported by this system");
     }
 }
 

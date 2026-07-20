@@ -12,8 +12,10 @@
 #include "../Core/EntityManager.h"
 
 #include "../Components/FrameLoaderComponent.h"
+#include "../Components/TransformComponent.h"
 #include "../Components/UnlitGeometryRenderComponent.h"
 
+#include "../States/TransformState.h"
 #include "../States/UnlitGeometryRenderState.h"
 
 struct EnvironmentDepthState;
@@ -29,7 +31,12 @@ public:
             UnlitGeometryRenderComponent &ugrC,
             UnlitGeometryRenderState &ugrS);
     OVRFW::GlTexture CreateGlTexture(GLenum internalformat, uint32_t pixelWidth, uint32_t pixelHeight);
-    void UpdateFov(float fovX_deg, UnlitGeometryRenderState &ugrS);
+    void UpdateFrameGeometry(
+            const FrameLoaderComponent& flC,
+            const VideoFrame& frame,
+            TransformComponent& transform,
+            TransformState& transformState,
+            UnlitGeometryRenderState& renderState);
     void UpdateDepthScaleFactor(FrameLoaderComponent &flC, UnlitGeometryRenderState &ugrS);
     void UpdateTextures(
             UnlitGeometryRenderComponent &ugrC,

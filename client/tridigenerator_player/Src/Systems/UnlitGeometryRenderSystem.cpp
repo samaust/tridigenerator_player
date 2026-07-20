@@ -50,6 +50,7 @@
 #include "../States/EnvironmentDepthState.h"
 #include "../States/TransformState.h"
 #include "../States/FrameLoaderState.h"
+#include "../Data/VipeDataset.h"
 
 using OVR::Matrix4f;
 using OVR::Posef;
@@ -104,8 +105,8 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
                 {"u_texAlpha", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
                 {"u_texDepth", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
                 {"u_environmentDepthTexture", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
-                {"u_FovX_rad", OVRFW::ovrProgramParmType::FLOAT},
-                {"u_FovY_rad", OVRFW::ovrProgramParmType::FLOAT},
+                {"u_intrinsics", OVRFW::ovrProgramParmType::FLOAT_VECTOR4},
+                {"u_imageSize", OVRFW::ovrProgramParmType::FLOAT_VECTOR2},
                 {"u_depthScaleFactor", OVRFW::ovrProgramParmType::FLOAT},
                 {"u_depthViewMatrix", OVRFW::ovrProgramParmType::FLOAT_MATRIX4},
                 {"u_depthProjectionMatrix", OVRFW::ovrProgramParmType::FLOAT_MATRIX4},
@@ -169,11 +170,17 @@ void UnlitGeometryRenderSystem::Shutdown(EntityManager& ecs) {
             OVRFW::FreeTexture(ugrS.textures_[i][TEX_V]);
             OVRFW::FreeTexture(ugrS.textures_[i][TEX_ALPHA]);
             OVRFW::FreeTexture(ugrS.textures_[i][TEX_DEPTH]);
+            for (int texture = 0; texture < TEXTURE_SLOT_MAX; ++texture) {
+                ugrS.textures_[i][texture] = {};
+            }
+            ugrS.surfaceDefs_[i].geo.Free();
+            ugrS.surfaceDefs_[i] = {};
         }
         OVRFW::GlProgram::Free(ugrS.ProgramLimited_);
         OVRFW::GlProgram::Free(ugrS.ProgramFullRange_);
-                ugrS.surfaceDefs_[0].geo.Free();
-                ugrS.surfaceDefs_[1].geo.Free();
+        ugrS.ProgramLimited_ = {};
+        ugrS.ProgramFullRange_ = {};
+        ugrS.currentSurfaceSet_ = 0;
     });
 }
 
@@ -207,42 +214,6 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                  FrameLoaderState &flS,
                  UnlitGeometryRenderComponent &ugrC,
                  UnlitGeometryRenderState &ugrS) {
-        // Initialize pose if needed
-        if (!ugrC.poseInitialized) {
-            LOGI("Initialising pose of entity");
-            if (ugrC.poseParent == "HeadPose") {
-                // Might contain errors
-                const OVR::Posef headPose = in.HeadPose;
-                OVR::Posef combinedPose = headPose;
-                combinedPose.Translation = headPose.Translate(ugrC.poseTranslationOffset);
-                LOGI("  HeadPose Rotation: (%f, %f, %f, %f)",
-                     headPose.Rotation.x,
-                     headPose.Rotation.y,
-                     headPose.Rotation.z,
-                     headPose.Rotation.w);
-                LOGI("  combinedPose Rotation: (%f, %f, %f, %f)",
-                     combinedPose.Rotation.x,
-                     combinedPose.Rotation.y,
-                     combinedPose.Rotation.z,
-                     combinedPose.Rotation.w);
-
-                LOGI("  HeadPose Translation: (%f, %f, %f)",
-                     headPose.Translation.x,
-                     headPose.Translation.y,
-                     headPose.Translation.z);
-                LOGI("  combinedPose Translation: (%f, %f, %f)",
-                     combinedPose.Translation.x,
-                     combinedPose.Translation.y,
-                     combinedPose.Translation.z);
-                TransformSystem::SetPose(tC, tS, combinedPose);
-            }
-            ugrC.poseInitialized = true;
-        }
-
-        // Update model matrix
-        tC.modelPose.Rotation.Normalize();
-        tS.modelMatrix = OVR::Matrix4f(tC.modelPose) * OVR::Matrix4f::Scaling(tC.modelScale);
-
         UpdateEnvironmentDepthUniforms(ugrC, ugrS, environmentDepthState);
 
         // Create color, alpha, depth textures if not already created
@@ -252,13 +223,14 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                 flS.framePtr,
                 ugrC,
                 ugrS);
-            UpdateFov(flC.fovX_deg, ugrS);
             UpdateDepthScaleFactor(flC, ugrS);
         }
 
         if (flS.frameReady.load(std::memory_order_acquire)) {
             //LOGI("Update textures with new frame");
             // A new frame is available, so update textures and matrices.
+            const VideoFrame& frame = **flS.framePtr;
+            UpdateFrameGeometry(flC, frame, tC, tS, ugrS);
             UpdateTextures(ugrC, flS.framePtr, ugrS);
 
             // Consume the flag by setting it back to false.
@@ -336,6 +308,9 @@ void UnlitGeometryRenderSystem::CreateTextures(
             ugrC.texture_internal_formats_[TEX_ALPHA],
             (*framePtr)->textureAlphaWidth,
             (*framePtr)->textureAlphaHeight);
+        glBindTexture(GL_TEXTURE_2D, ugrS.textures_[i][TEX_ALPHA].texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
         // Create one 16-bit textures for the 16-bit depth data
         ugrS.textures_[i][TEX_DEPTH] = CreateGlTexture(
@@ -398,7 +373,7 @@ OVRFW::GlTexture UnlitGeometryRenderSystem::CreateGlTexture(
     glBindTexture(GL_TEXTURE_2D, texId);
 
     if (internalformat == GL_R16UI) {
-        // Integer textures (depth) MUST use NEAREST filtering.
+        // Integer depth must not be interpolated.
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     } else {
@@ -426,25 +401,36 @@ OVRFW::GlTexture UnlitGeometryRenderSystem::CreateGlTexture(
  * @param fovX_deg Horizontal field of view in degrees (full-angle).
  * @param ugrS The render state to update (stores fov values and uniforms).
  */
-void UnlitGeometryRenderSystem::UpdateFov(float fovX_deg, UnlitGeometryRenderState &ugrS) {
-    float aspect_ratio = 1.0f;
-    if (ugrS.textures_[0][0].Width != 0 && ugrS.textures_[0][0].Height != 0) {
-        aspect_ratio = (float)ugrS.textures_[0][0].Height / (float)ugrS.textures_[0][0].Width;
+void UnlitGeometryRenderSystem::UpdateFrameGeometry(
+    const FrameLoaderComponent& flC,
+    const VideoFrame& frame,
+    TransformComponent& transform,
+    TransformState& transformState,
+    UnlitGeometryRenderState& renderState) {
+    if (frame.frameIndex < 0 || frame.frameIndex >= static_cast<int>(flC.dataset.frames.size())) {
+        LOGE("Decoded frame index %d is outside manifest metadata", frame.frameIndex);
+        return;
     }
-
-    ugrS.fovX_rad = fovX_deg * (M_PI / 180.0f) / 2.0f;
-
-    // This is the correct formula to derive vertical FOV from horizontal FOV and aspect ratio
-    ugrS.fovY_rad = atan(tan(ugrS.fovX_rad) * aspect_ratio);
-
-    // Set the uniform values on the renderer's graphics command
+    const VipeFrameMetadata& metadata = flC.dataset.frames[frame.frameIndex];
+    const std::array<float, 16> relative = OrientedRelativeOpenGlCameraPose(
+        metadata.cameraToWorld,
+        flC.dataset.frames.front().cameraToWorld,
+        flC.dataset.orientationOffsetDegrees);
+    const OVR::Matrix4f pose(
+        relative[0], relative[1], relative[2], relative[3],
+        relative[4], relative[5], relative[6], relative[7],
+        relative[8], relative[9], relative[10], relative[11],
+        relative[12], relative[13], relative[14], relative[15]);
+    transformState.modelMatrix = pose * OVR::Matrix4f::Scaling(transform.modelScale);
+    renderState.intrinsics_ = OVR::Vector4f(
+        metadata.intrinsics[0], metadata.intrinsics[1],
+        metadata.intrinsics[2], metadata.intrinsics[3]);
+    renderState.imageSize_ = OVR::Vector2f(
+        static_cast<float>(flC.width), static_cast<float>(flC.height));
     for (int i = 0; i < 2; ++i) {
-        // u_FovX_rad
-        ugrS.surfaceDefs_[i].graphicsCommand.UniformData[6].Data = &ugrS.fovX_rad;
-        // u_FovY_rad
-        ugrS.surfaceDefs_[i].graphicsCommand.UniformData[7].Data = &ugrS.fovY_rad;
+        renderState.surfaceDefs_[i].graphicsCommand.UniformData[6].Data = &renderState.intrinsics_;
+        renderState.surfaceDefs_[i].graphicsCommand.UniformData[7].Data = &renderState.imageSize_;
     }
-    LOGI("Updated FOV: fovX_rad=%f, fovY_rad=%f", ugrS.fovX_rad, ugrS.fovY_rad);
 }
 
 /**

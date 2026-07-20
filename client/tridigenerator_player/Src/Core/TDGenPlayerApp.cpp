@@ -47,6 +47,7 @@
 #include "../States/FrameLoaderState.h"
 #include "../States/UnlitGeometryRenderState.h"
 #include "../States/EnvironmentDepthState.h"
+#include "../States/InputState.h"
 
 #include "../Systems/CoreSystem.h"
 #include "../Systems/SceneSystem.h"
@@ -101,9 +102,11 @@ std::vector<const char *> TDGenPlayerApp::GetExtensions()
     // Add extensions from XrApp
     std::vector<const char *> extensions = XrApp::GetExtensions();
 
-    // Add hand tracking and controller extensions
-    extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+    // Controller and hand input are used by the dataset picker.
     extensions.push_back(XR_FB_TOUCH_CONTROLLER_PRO_EXTENSION_NAME);
+    extensions.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+    extensions.push_back(XR_FB_HAND_TRACKING_MESH_EXTENSION_NAME);
+    extensions.push_back(XR_FB_HAND_TRACKING_AIM_EXTENSION_NAME);
 
     // CoreSystem isn't constructed until AppInit(), but we must request any required
     // instance extensions up-front (during XrApp::CreateInstance()).
@@ -144,9 +147,12 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     entityManager_->AddComponent<CoreComponent>(CoreEntity, {});
     entityManager_->AddComponent<CoreState>(CoreEntity, {});
     entityManager_->AddComponent<EnvironmentDepthState>(CoreEntity, {});
+    entityManager_->AddComponent<InputComponent>(CoreEntity, {});
+    entityManager_->AddComponent<InputState>(CoreEntity, {});
 
     // ---------- Create Object entity ----------
     auto ObjectEntity = entityManager_->CreateEntity();
+    objectEntity_ = ObjectEntity;
     TransformComponent transform;
     transform.modelPose = OVR::Posef(OVR::Quatf::Identity(), {0.0f, 0.0f, 0.0f});
     transform.modelScale = {1.0f, 1.0f, 1.0f};
@@ -168,6 +174,8 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     environmentDepthSystem_->Init(*entityManager_);
     unlitGeometryRenderSystem_->Init(*entityManager_);
 
+    BuildDatasetPicker();
+
     return true;
 }
 
@@ -187,6 +195,7 @@ bool TDGenPlayerApp::SessionInit()
     const XrSpace appSpace = (GetCurrentSpace() != XR_NULL_HANDLE) ? GetCurrentSpace() : GetLocalSpace();
     coreSystem_->SetLocalSpace(*entityManager_, appSpace);
     coreSystem_->SessionInit(*entityManager_, session);
+    inputSystem_->SessionInit(*entityManager_, session);
     environmentDepthSystem_->SessionInit(*entityManager_, session);
 
     return true;
@@ -213,16 +222,40 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     sceneSystem_->Update(*entityManager_);
     frameLoaderSystem_->Update(*entityManager_, nowSeconds);
     audioSystem_->Update(*entityManager_);
-    inputSystem_->Update(*entityManager_);
+    inputSystem_->Update(*entityManager_, in);
     transformSystem_->Update(*entityManager_);
     renderSystem_->Update(*entityManager_);
     environmentDepthSystem_->Update(*entityManager_, in);
     unlitGeometryRenderSystem_->Update(*entityManager_, in);
+    if (datasetUi_) {
+        datasetUi_->HitTestDevices().clear();
+        entityManager_->ForEach<InputComponent>([&](EntityID, InputComponent& input) {
+            for (size_t handIndex = 0; handIndex < input.hands.size(); ++handIndex) {
+                const HandInput& hand = input.hands[handIndex];
+                const ControllerInput& controller = input.controllers[handIndex];
+                if (hand.active && hand.aimValid) {
+                    datasetUi_->AddHitTestRay(
+                            hand.aimPose,
+                            hand.indexPinching,
+                            static_cast<int>(handIndex));
+                } else if (controller.tracked) {
+                    datasetUi_->AddHitTestRay(
+                            controller.aimPose,
+                            controller.indexTrigger > 0.5f,
+                            static_cast<int>(handIndex));
+                }
+            }
+        });
+        datasetUi_->Update(in);
+    }
 }
 
 void TDGenPlayerApp::AppRenderFrame(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out)
 {
     OVRFW::XrApp::AppRenderFrame(in, out);
+    if (datasetUi_) {
+        datasetUi_->Render(in, out);
+    }
 }
 
 void TDGenPlayerApp::AppRenderEye(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out, int eye)
@@ -234,17 +267,24 @@ void TDGenPlayerApp::AppRenderEye(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRen
 void TDGenPlayerApp::Render(const OVRFW::ovrApplFrameIn &in, OVRFW::ovrRendererOutput &out)
 {
     unlitGeometryRenderSystem_->Render(*entityManager_, out.Surfaces);
+    inputSystem_->Render(*entityManager_, out.Surfaces);
 }
 
 void TDGenPlayerApp::SessionEnd()
 {
     //xrInput_.Destroy();
+    inputSystem_->SessionEnd(*entityManager_);
     environmentDepthSystem_->SessionEnd(*entityManager_);
     coreSystem_->SessionEnd(*entityManager_);
 }
 
 void TDGenPlayerApp::AppShutdown(const xrJava *context)
 {
+    if (datasetUi_) {
+        datasetUi_->Shutdown();
+        datasetUi_.reset();
+        datasetStatusLabel_ = nullptr;
+    }
     // Explicitly destroy the systems and entity manager.
     // This is good practice to control the shutdown order.
     unlitGeometryRenderSystem_->Shutdown(*entityManager_);
@@ -273,6 +313,44 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
     curl_global_cleanup();
 
     OVRFW::XrApp::AppShutdown(context);
+}
+
+void TDGenPlayerApp::BuildDatasetPicker() {
+    datasetUi_ = std::make_unique<OVRFW::TinyUI>();
+    if (!datasetUi_->Init(GetContext(), GetFileSys())) {
+        LOGE("Failed to initialize dataset picker UI");
+        datasetUi_.reset();
+        return;
+    }
+    datasetStatusLabel_ = datasetUi_->AddLabel("ViPE datasets", {0.0f, 0.35f, -1.5f}, {500.0f, 70.0f});
+    auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+    float y = 0.20f;
+    for (const VipeCatalogEntry& entry : loader.catalog.datasets) {
+        const std::string id = entry.id;
+        datasetUi_->AddButton(entry.displayName, {0.0f, y, -1.5f}, {500.0f, 70.0f},
+            [this, id]() { SelectDataset(id); });
+        y -= 0.12f;
+    }
+    if (loader.catalog.datasets.empty() && datasetStatusLabel_) {
+        const std::string status = loader.errorMessage.empty() ? "No datasets" : loader.errorMessage;
+        datasetStatusLabel_->SetText("%s", status.c_str());
+    }
+}
+
+void TDGenPlayerApp::SelectDataset(const std::string& datasetId) {
+    auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+    auto& loaderState = entityManager_->GetComponent<FrameLoaderState>(objectEntity_);
+    unlitGeometryRenderSystem_->Shutdown(*entityManager_);
+    const bool selected = frameLoaderSystem_->SelectDataset(datasetId, loader, loaderState);
+    if (selected) {
+        unlitGeometryRenderSystem_->Init(*entityManager_);
+        if (datasetStatusLabel_) datasetStatusLabel_->SetText("Loaded: %s", datasetId.c_str());
+    } else {
+        unlitGeometryRenderSystem_->Init(*entityManager_);
+        if (datasetStatusLabel_) {
+            datasetStatusLabel_->SetText("Load failed: %s", loader.errorMessage.c_str());
+        }
+    }
 }
 // Insert passthrough layer before projection layers when available
 void TDGenPlayerApp::PreProjectionAddLayer(xrCompositorLayerUnion* layers, int& layerCount) {

@@ -7,15 +7,18 @@
 /// configurable FPS. Uses a background thread for video decoding to avoid blocking the main
 /// thread, with atomic operations for safe frame sharing between decoder and consumer.
 
-#include <android/log.h>
-
+#include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <stdexcept>
 #include <inttypes.h>
 
+#if defined(ANDROID)
 #include <curl/curl.h>
-#include <json/json.h>
+#endif
 
 #include "Videos/WebmInMemoryDemuxer.h"
 
@@ -26,6 +29,7 @@
 
 #include "../Components/FrameLoaderComponent.h"
 #include "../States/FrameLoaderState.h"
+#include "../Data/VipeDataset.h"
 
 static constexpr int RING_SIZE = 8;
 
@@ -86,12 +90,17 @@ bool FrameLoaderSystem::Init(EntityManager& ecs) {
         [&](EntityID e,
             FrameLoaderComponent& flC,
             FrameLoaderState& flS) {
+#if defined(ANDROID)
         flC.baseUrl = std::string("http://192.168.111.250:8080");
+#else
+        flC.dataDirectory = "vipe_encoded";
+#endif
         flS.framePool.resize(RING_SIZE);
         flS.ring.resize(RING_SIZE);
 
-        LoadManifest(flC, flS);
-        StartBackgroundWriter(flC, flS);
+        if (LoadCatalog(flC) && !flC.catalog.datasets.empty()) {
+            SelectDataset(flC.catalog.datasets.front().id, flC, flS);
+        }
     });
     return true;
 }
@@ -146,47 +155,35 @@ void FrameLoaderSystem::Update(EntityManager& ecs, double nowSeconds) {
  */
 bool FrameLoaderSystem::LoadManifest(FrameLoaderComponent& flC,
                                      FrameLoaderState& flS) {
-    std::string url = flC.baseUrl + "/manifest/frames.json";
-    std::string jsonStr;
-    // reuse HttpGetBinary? No, this one uses string body
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        LOGE("curl init failed");
+    std::vector<uint8_t> bytes;
+    if (!ReadResource(flC.manifestLocation, bytes)) {
+        flC.errorMessage = "Failed to load manifest: " + flC.manifestLocation;
+        LOGE("%s", flC.errorMessage.c_str());
         return false;
     }
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeString);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &jsonStr);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    CURLcode res = curl_easy_perform(curl);
-    curl_easy_cleanup(curl);
-    if (res != CURLE_OK) {
-        LOGE("Failed GET manifest %s", url.c_str());
+    const std::string jsonText(bytes.begin(), bytes.end());
+    std::string parseError;
+    if (!ParseVipeDataset(jsonText, flC.dataset, parseError)) {
+        flC.errorMessage = "Invalid ViPE manifest: " + parseError;
+        LOGE("%s", flC.errorMessage.c_str());
         return false;
     }
-
-    Json::Value root;
-    Json::Reader reader;
-    if (!reader.parse(jsonStr, root)) {
-        LOGE("Failed to parse manifest JSON");
-        return false;
-    }
-
-    if (root.isMember("file") && root["file"].isString()) {
-        flC.file = root["file"].asString();
-    }
-    if (root.isMember("width") && root["width"].isIntegral()) {
-        flC.width = root["width"].asInt();
-    }
-    if (root.isMember("height") && root["height"].isIntegral()) {
-        flC.height = root["height"].asInt();
-    }
-    if (root.isMember("fps") && root["fps"].isIntegral()) {
-        flC.fps = root["fps"].asInt();
-    }
-    if (root.isMember("depth_scale_factor") && root["depth_scale_factor"].isNumeric()) {
-        flC.depthScaleFactor = root["depth_scale_factor"].asFloat();
-    }
+    flC.file = flC.dataset.videoFile;
+    flC.width = flC.dataset.width;
+    flC.height = flC.dataset.height;
+    flC.fps = static_cast<double>(flC.dataset.frameRateNumerator) /
+        static_cast<double>(flC.dataset.frameRateDenominator);
+    flC.depthScaleFactor = flC.dataset.depthUnitsPerMetre;
+#if defined(ANDROID)
+    const std::string::size_type slash = flC.manifestLocation.find_last_of('/');
+    flC.videoLocation = (slash == std::string::npos)
+        ? flC.baseUrl + "/" + flC.file
+        : flC.manifestLocation.substr(0, slash + 1) + flC.file;
+#else
+    flC.videoLocation =
+        (std::filesystem::path(flC.manifestLocation).parent_path() / flC.file).string();
+#endif
+    flC.errorMessage.clear();
 
     // reset indices
     flS.writeIdx.store(0);
@@ -199,9 +196,93 @@ bool FrameLoaderSystem::LoadManifest(FrameLoaderComponent& flC,
         flS.nextReadTime = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
     }
 
-    LOGI("Loaded manifest: file=%s width=%d height=%d fps=%d",
+    LOGI("Loaded ViPE manifest: file=%s width=%d height=%d fps=%.6f",
          flC.file.c_str(), flC.width, flC.height, flC.fps);
 
+    return true;
+}
+
+bool FrameLoaderSystem::LoadCatalog(FrameLoaderComponent& flC) {
+#if defined(ANDROID)
+    const std::string catalogLocation = flC.baseUrl + "/catalog.json";
+    std::vector<uint8_t> bytes;
+    if (!ReadResource(catalogLocation, bytes)) {
+        flC.errorMessage = "Failed to load dataset catalog: " + catalogLocation;
+        LOGE("%s", flC.errorMessage.c_str());
+        return false;
+    }
+    std::string error;
+    if (!ParseVipeCatalog(std::string(bytes.begin(), bytes.end()), flC.catalog, error)) {
+        flC.errorMessage = "Invalid dataset catalog: " + error;
+        LOGE("%s", flC.errorMessage.c_str());
+        return false;
+    }
+#else
+    namespace fs = std::filesystem;
+    const fs::path directory(flC.dataDirectory);
+    if (!fs::is_directory(directory)) {
+        flC.errorMessage = "ViPE data directory does not exist: " + directory.string();
+        LOGE("%s", flC.errorMessage.c_str());
+        return false;
+    }
+    flC.catalog = {};
+    flC.catalog.schemaVersion = 1;
+    for (const fs::directory_entry& entry : fs::directory_iterator(directory)) {
+        if (!entry.is_regular_file() || entry.path().extension() != ".json" ||
+            entry.path().filename() == "catalog.json") {
+            continue;
+        }
+        VipeCatalogEntry item;
+        item.id = entry.path().stem().string();
+        item.displayName = item.id;
+        item.manifest = entry.path().string();
+        flC.catalog.datasets.push_back(std::move(item));
+    }
+    std::sort(flC.catalog.datasets.begin(), flC.catalog.datasets.end(),
+        [](const VipeCatalogEntry& a, const VipeCatalogEntry& b) { return a.id < b.id; });
+    if (flC.catalog.datasets.empty()) {
+        flC.errorMessage = "No ViPE manifests found in " + directory.string();
+        LOGE("%s", flC.errorMessage.c_str());
+        return false;
+    }
+#endif
+    return true;
+}
+
+bool FrameLoaderSystem::SelectDataset(
+    const std::string& datasetId,
+    FrameLoaderComponent& flC,
+    FrameLoaderState& flS) {
+    const auto selected = std::find_if(
+        flC.catalog.datasets.begin(), flC.catalog.datasets.end(),
+        [&](const VipeCatalogEntry& entry) { return entry.id == datasetId; });
+    if (selected == flC.catalog.datasets.end()) {
+        flC.errorMessage = "Dataset is not present in catalog: " + datasetId;
+        return false;
+    }
+    StopBackgroundWriter(flC, flS);
+    for (FrameSlot& slot : flS.ring) {
+        slot.ready.store(false, std::memory_order_release);
+        slot.frame = nullptr;
+    }
+    flS.framePtr = nullptr;
+    flS.frameReady.store(false, std::memory_order_release);
+    flS.readIdx.store(0, std::memory_order_release);
+    flS.writeIdx.store(0, std::memory_order_release);
+    flC.selectedDatasetId = selected->id;
+#if defined(ANDROID)
+    if (!selected->manifest.empty() && selected->manifest.front() == '/') {
+        flC.manifestLocation = flC.baseUrl + selected->manifest;
+    } else {
+        flC.manifestLocation = flC.baseUrl + "/" + selected->manifest;
+    }
+#else
+    flC.manifestLocation = selected->manifest;
+#endif
+    if (!LoadManifest(flC, flS)) {
+        return false;
+    }
+    StartBackgroundWriter(flC, flS);
     return true;
 }
 
@@ -256,7 +337,13 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
     const int TARGET_FILL = RING_SIZE / 2; // keep half-filled
 
     // Download video
-    std::vector<uint8_t> fetched = LoadVideoFromUrl(flC.baseUrl, flC.file);
+    std::vector<uint8_t> fetched = LoadVideo(flC);
+    if (fetched.empty()) {
+        flC.errorMessage = "Video is empty or could not be loaded: " + flC.videoLocation;
+        LOGE("%s", flC.errorMessage.c_str());
+        flC.writerRunning.store(false, std::memory_order_release);
+        return;
+    }
 
     // Create and init demuxer
     WebmInMemoryDemuxer demuxer(fetched);
@@ -354,16 +441,33 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
  * @param file Filename as reported by the manifest.
  * @return Byte vector containing the video file, or empty on failure.
  */
-std::vector<uint8_t> FrameLoaderSystem::LoadVideoFromUrl(std::string& baseUrl, std::string file) {
+std::vector<uint8_t> FrameLoaderSystem::LoadVideo(FrameLoaderComponent& flC) {
     std::vector<uint8_t> blob;
-
-    std::string url = baseUrl + "/frames/" + file.c_str();
-    LOGI("Loading video from %s", url.c_str());
-    if (!HttpGetBinary(url, blob)) {
-        LOGE("HttpGetBinary failed for %s", url.c_str());
+    LOGI("Loading video from %s", flC.videoLocation.c_str());
+    if (!ReadResource(flC.videoLocation, blob)) {
+        LOGE("Video load failed for %s", flC.videoLocation.c_str());
         return blob;
     }
     return blob;
+}
+
+bool FrameLoaderSystem::ReadResource(const std::string& location, std::vector<uint8_t>& out) {
+#if defined(ANDROID)
+    return HttpGetBinary(location, out);
+#else
+    std::ifstream input(location, std::ios::binary);
+    if (!input) {
+        return false;
+    }
+    input.seekg(0, std::ios::end);
+    const std::streamoff size = input.tellg();
+    if (size < 0) {
+        return false;
+    }
+    input.seekg(0, std::ios::beg);
+    out.resize(static_cast<size_t>(size));
+    return size == 0 || static_cast<bool>(input.read(reinterpret_cast<char*>(out.data()), size));
+#endif
 }
 
 /**
@@ -377,6 +481,7 @@ std::vector<uint8_t> FrameLoaderSystem::LoadVideoFromUrl(std::string& baseUrl, s
  * @return true if the download succeeded, false otherwise.
  */
 bool FrameLoaderSystem::HttpGetBinary(const std::string& url, std::vector<uint8_t>& out) {
+#if defined(ANDROID)
     CURL* curl = curl_easy_init();
     if (!curl) return false;
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
@@ -398,6 +503,11 @@ bool FrameLoaderSystem::HttpGetBinary(const std::string& url, std::vector<uint8_
     CURLcode res = curl_easy_perform(curl);
     curl_easy_cleanup(curl);
     return (res == CURLE_OK);
+#else
+    (void)url;
+    (void)out;
+    return false;
+#endif
 }
 
 /**
@@ -435,7 +545,7 @@ int FrameLoaderSystem::ComputeFreeSlots(FrameLoaderState& flS) const {
  * @param flC FrameLoader component to update.
  * @param flS FrameLoader state whose timing will be adjusted.
  */
-void FrameLoaderSystem::SetFPS(int newFps, FrameLoaderComponent& flC, FrameLoaderState& flS) {
+void FrameLoaderSystem::SetFPS(double newFps, FrameLoaderComponent& flC, FrameLoaderState& flS) {
     flC.fps = newFps;
     // adjust nextReadTime to avoid huge skips
     std::lock_guard<std::mutex> lk(flS.timingMutex);
@@ -461,7 +571,7 @@ bool FrameLoaderSystem::SwapNextFrame(
         FrameLoaderComponent& flC,
         FrameLoaderState& flS) {
     // 1. Perform timing checks to see if we should advance to a new frame.
-    int localFps = flC.fps;
+    double localFps = flC.fps;
     if (localFps <= 0) localFps = 1;
     double period = 1.0 / double(localFps);
 
