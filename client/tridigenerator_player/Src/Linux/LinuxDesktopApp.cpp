@@ -1,4 +1,5 @@
 #include "LinuxOpenXrBackend.h"
+#include "LinuxStereo.h"
 
 #include "Data/VipeDataset.h"
 #include "Videos/WebmInMemoryDemuxer.h"
@@ -33,6 +34,7 @@ struct Options {
     std::filesystem::path dataDirectory = "vipe_encoded";
     std::string sequence;
     std::string backend = "desktop";
+    StereoLayout stereoLayout = StereoLayout::SideBySide;
 };
 
 struct Vec3 {
@@ -135,7 +137,8 @@ Options ParseOptions(int argc, char** argv) {
         const std::string argument = argv[i];
         if (argument == "--help") {
             std::cout << "Usage: tridigenerator_player [--data-dir PATH] [--sequence NAME] "
-                         "[--backend desktop|openxr]\n";
+                         "[--backend desktop|openxr] "
+                         "[--stereo-layout side-by-side|over-under]\n";
             std::exit(0);
         }
         if (i + 1 >= argc) throw std::runtime_error("Missing value after " + argument);
@@ -143,6 +146,12 @@ Options ParseOptions(int argc, char** argv) {
         if (argument == "--data-dir") options.dataDirectory = value;
         else if (argument == "--sequence") options.sequence = value;
         else if (argument == "--backend") options.backend = value;
+        else if (argument == "--stereo-layout") {
+            if (!ParseStereoLayout(value, options.stereoLayout)) {
+                throw std::runtime_error(
+                    "--stereo-layout must be side-by-side or over-under");
+            }
+        }
         else throw std::runtime_error("Unknown argument: " + argument);
     }
     if (options.backend != "desktop" && options.backend != "openxr") {
@@ -388,6 +397,18 @@ struct Camera {
         if (keys['q']) position.y -= speed;
         if (keys['e']) position.y += speed;
     }
+
+    void UpdateOpenXr(float seconds) {
+        const float speed = (keys[static_cast<unsigned char>('!')] ? 5.0f : 1.5f) * seconds;
+        if (keys['w']) position.z -= speed;
+        if (keys['s']) position.z += speed;
+        if (keys['a']) position.x -= speed;
+        if (keys['d']) position.x += speed;
+        if (keys['q']) position.y -= speed;
+        if (keys['e']) position.y += speed;
+    }
+
+    void ResetOpenXr() { position = {}; }
 };
 
 GLuint CreateTexture(GLenum internalFormat, int width, int height, GLenum filter) {
@@ -495,6 +516,7 @@ int Run(int argc, char** argv) {
     glGenRenderbuffers(1, &xrDepthBuffer);
 
     Camera camera;
+    if (openXr) camera.ResetOpenXr();
     bool running = true;
     bool escapeReleased = false;
     bool videoPaused = false;
@@ -502,8 +524,11 @@ int Run(int argc, char** argv) {
     bool centerDown = false;
     bool maskEnabled = true;
     bool maskDown = false;
-    int centerX = kWindowWidth / 2, centerY = kWindowHeight / 2;
-    window.SetPointerCaptured(true, centerX, centerY);
+    int windowWidth = kWindowWidth, windowHeight = kWindowHeight;
+    int centerX = windowWidth / 2, centerY = windowHeight / 2;
+    camera.captured = !openXr;
+    escapeReleased = static_cast<bool>(openXr);
+    window.SetPointerCaptured(camera.captured, centerX, centerY);
     XSync(window.DisplayHandle(), False);
     auto previous = std::chrono::steady_clock::now();
     auto nextVideoFrame = previous;
@@ -518,14 +543,17 @@ int Run(int argc, char** argv) {
             if (event.type == ClientMessage && static_cast<Atom>(event.xclient.data.l[0]) == window.CloseAtom()) {
                 running = false;
             } else if (event.type == ConfigureNotify) {
-                glViewport(0, 0, event.xconfigure.width, event.xconfigure.height);
-                centerX = event.xconfigure.width / 2;
-                centerY = event.xconfigure.height / 2;
+                windowWidth = std::max(1, event.xconfigure.width);
+                windowHeight = std::max(1, event.xconfigure.height);
+                glViewport(0, 0, windowWidth, windowHeight);
+                centerX = windowWidth / 2;
+                centerY = windowHeight / 2;
                 if (camera.captured) {
                     XWarpPointer(window.DisplayHandle(), None, window.WindowHandle(),
                         0, 0, 0, 0, centerX, centerY);
                 }
-            } else if (event.type == ButtonPress && event.xbutton.button == Button1 && !camera.captured) {
+            } else if (!openXr && event.type == ButtonPress &&
+                       event.xbutton.button == Button1 && !camera.captured) {
                 camera.captured = true; escapeReleased = false;
                 window.SetPointerCaptured(true, centerX, centerY);
             } else if (event.type == MotionNotify && camera.captured) {
@@ -574,7 +602,10 @@ int Run(int argc, char** argv) {
                 const char key = symbol <= 255
                     ? static_cast<char>(std::tolower(static_cast<unsigned char>(symbol))) : '\0';
                 if (key == 'c') {
-                    if (down && !centerDown) camera.Reset();
+                    if (down && !centerDown) {
+                        if (openXr) camera.ResetOpenXr();
+                        else camera.Reset();
+                    }
                     centerDown = down;
                 }
                 if (key == 'm') {
@@ -592,7 +623,8 @@ int Run(int argc, char** argv) {
         const auto now = std::chrono::steady_clock::now();
         const float delta = std::chrono::duration<float>(now - previous).count();
         previous = now;
-        camera.Update(std::min(delta, 0.1f));
+        if (openXr) camera.UpdateOpenXr(std::min(delta, 0.1f));
+        else camera.Update(std::min(delta, 0.1f));
         if (!videoPaused && now >= nextVideoFrame) {
             if (!decoder.decode_next_frame(frame)) {
                 if (!decoder.seek_to_start() || !decoder.decode_next_frame(frame)) {
@@ -608,12 +640,9 @@ int Run(int argc, char** argv) {
             dataset.frames.front().cameraToWorld,
             dataset.orientationOffsetDegrees);
         const Mat4 model = FromRowMajor(relative);
-        const Vec3 forward = camera.Forward();
-        const Mat4 view = LookAt(camera.position, camera.position + forward, {0, 1, 0});
         const auto& intrinsics = dataset.frames[frameIndex].intrinsics;
-        const auto renderScene = [&](int renderWidth, int renderHeight) {
-            const Mat4 projection = Perspective(60.0f * kPi / 180.0f,
-                static_cast<float>(renderWidth) / static_cast<float>(renderHeight), 0.01f, 1000.0f);
+        const auto renderScene = [&](int renderWidth, int renderHeight,
+                                     const Mat4& view, const Mat4& projection) {
             const Mat4 viewProjection = Multiply(projection, view);
             glViewport(0, 0, renderWidth, renderHeight);
             glClearColor(0.02f, 0.02f, 0.025f, 1.0f);
@@ -630,31 +659,58 @@ int Run(int argc, char** argv) {
             glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, nullptr);
         };
         if (openXr) {
-            uint32_t xrColorTexture = 0;
-            int xrWidth = 0, xrHeight = 0;
+            LinuxOpenXrBackend::Frame xrFrame;
             std::string error;
-            const bool shouldRenderXr = openXr->BeginFrame(xrColorTexture, xrWidth, xrHeight, error);
+            const bool shouldRenderXr = openXr->BeginFrame(xrFrame, error);
             if (!error.empty()) throw std::runtime_error(error);
             if (shouldRenderXr) {
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+                glViewport(0, 0, windowWidth, windowHeight);
+                glClearColor(0.02f, 0.02f, 0.025f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+                const auto mirrorViewports = PackedStereoViewports(
+                    options.stereoLayout, windowWidth, windowHeight);
                 glBindFramebuffer(GL_FRAMEBUFFER, xrFramebuffer);
-                glFramebufferTexture2D(
-                    GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, xrColorTexture, 0);
-                if (xrWidth != xrDepthWidth || xrHeight != xrDepthHeight) {
-                    xrDepthWidth = xrWidth; xrDepthHeight = xrHeight;
+                if (xrFrame.width != xrDepthWidth || xrFrame.height != xrDepthHeight) {
+                    xrDepthWidth = xrFrame.width; xrDepthHeight = xrFrame.height;
                     glBindRenderbuffer(GL_RENDERBUFFER, xrDepthBuffer);
-                    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, xrWidth, xrHeight);
+                    glRenderbufferStorage(
+                        GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, xrFrame.width, xrFrame.height);
                     glFramebufferRenderbuffer(
                         GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, xrDepthBuffer);
                 }
-                if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-                    throw std::runtime_error("OpenXR mirror framebuffer is incomplete");
+                for (uint32_t eye = 0; eye < xrFrame.views.size(); ++eye) {
+                    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                        xrFrame.colorTexture, 0, static_cast<GLint>(eye));
+                    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                        throw std::runtime_error("OpenXR stereo framebuffer is incomplete");
+                    }
+                    Mat4 eyeView;
+                    eyeView.m = OpenXrView(xrFrame.views[eye].pose,
+                        {camera.position.x, camera.position.y, camera.position.z});
+                    Mat4 eyeProjection;
+                    eyeProjection.m = OpenXrProjection(
+                        xrFrame.views[eye].fov, 0.01f, 1000.0f);
+                    renderScene(xrFrame.width, xrFrame.height, eyeView, eyeProjection);
+
+                    const StereoViewport& target = mirrorViewports[eye];
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, xrFramebuffer);
+                    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+                    glBlitFramebuffer(0, 0, xrFrame.width, xrFrame.height,
+                        target.x, target.y, target.x + target.width, target.y + target.height,
+                        GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                    glBindFramebuffer(GL_FRAMEBUFFER, xrFramebuffer);
                 }
-                renderScene(xrWidth, xrHeight);
             }
             if (!openXr->EndFrame(error)) throw std::runtime_error(error);
+        } else {
+            const Vec3 forward = camera.Forward();
+            const Mat4 view = LookAt(camera.position, camera.position + forward, {0, 1, 0});
+            const Mat4 projection = Perspective(60.0f * kPi / 180.0f,
+                static_cast<float>(windowWidth) / static_cast<float>(windowHeight), 0.01f, 1000.0f);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            renderScene(windowWidth, windowHeight, view, projection);
         }
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        renderScene(kWindowWidth, kWindowHeight);
         window.Swap();
     }
     glDeleteRenderbuffers(1, &xrDepthBuffer);

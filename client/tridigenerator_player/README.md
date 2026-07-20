@@ -84,9 +84,29 @@ movement. `C` restores the camera's starting position and orientation. Space pau
 resumes video playback without disabling camera movement. `M` toggles mask filtering. Escape
 releases the pointer; press Escape again to exit. Left click recaptures it.
 
-`--backend openxr` validates that the configured runtime advertises
-`XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MONO` before starting the desktop mirror. Runtime
-presentation remains dependent on a compatible user-supplied runtime/HMD setup.
+`--backend openxr` uses the active system OpenXR runtime and requires a runtime that advertises
+`XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO`. [Monado](https://monado.freedesktop.org/) is
+supported through the standard OpenXR loader: install Monado using your distribution packages
+or build it separately, then select its runtime JSON using your system's OpenXR configuration
+(or `XR_RUNTIME_JSON`). The player prints the selected runtime name at startup and remains
+compatible with other conformant runtimes.
+
+The X11 mirror can pack the tracked left and right eye views horizontally or vertically:
+
+```bash
+./build/linux/tridigenerator_player/tridigenerator_player \
+  --data-dir ./vipe_encoded --sequence dog-example --backend openxr \
+  --stereo-layout side-by-side
+
+./build/linux/tridigenerator_player/tridigenerator_player \
+  --data-dir ./vipe_encoded --sequence dog-example --backend openxr \
+  --stereo-layout over-under
+```
+
+Side by side is the default. In OpenXR mode the runtime controls head orientation and eye poses;
+`W/A/S/D` and `Q/E` add a locomotion offset, Shift increases movement speed, and `C` clears the
+offset. Mouse-look remains exclusive to desktop mode. Space and `M` retain their playback and
+mask controls in both modes.
 
 ## Android ViPE catalog
 

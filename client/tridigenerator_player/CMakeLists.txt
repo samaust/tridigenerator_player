@@ -16,6 +16,7 @@ if(UNIX AND NOT ANDROID)
     add_executable(${PROJECT_NAME}
         Src/Linux/LinuxDesktopApp.cpp
         Src/Linux/LinuxOpenXrBackend.cpp
+        Src/Linux/LinuxStereo.cpp
         Src/Data/VipeDataset.cpp
         Src/Videos/WebmInMemoryDemuxer.cpp)
     target_compile_definitions(${PROJECT_NAME} PRIVATE
@@ -49,6 +50,12 @@ if(UNIX AND NOT ANDROID)
             PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL
             PkgConfig::SWSCALE PkgConfig::DAV1D)
         add_test(NAME vipe_decoder_tests COMMAND vipe_decoder_tests)
+        add_executable(linux_stereo_tests
+            Tests/LinuxStereoTests.cpp
+            Src/Linux/LinuxStereo.cpp)
+        target_include_directories(linux_stereo_tests PRIVATE Src)
+        target_link_libraries(linux_stereo_tests PRIVATE PkgConfig::OPENXR)
+        add_test(NAME linux_stereo_tests COMMAND linux_stereo_tests)
     endif()
     install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
     return()

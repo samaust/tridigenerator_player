@@ -49,6 +49,10 @@ bool LinuxOpenXrBackend::Initialize(
             "). Use --backend desktop or configure a runtime.";
         return false;
     }
+    XrInstanceProperties instanceProperties{XR_TYPE_INSTANCE_PROPERTIES};
+    if (XR_SUCCEEDED(xrGetInstanceProperties(instance_, &instanceProperties))) {
+        std::fprintf(stderr, "OpenXR runtime: %s\n", instanceProperties.runtimeName);
+    }
     XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};
     systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     result = xrGetSystem(instance_, &systemInfo, &systemId_);
@@ -62,8 +66,8 @@ bool LinuxOpenXrBackend::Initialize(
     xrEnumerateViewConfigurations(
         instance_, systemId_, configurationCount, &configurationCount, configurations.data());
     if (std::find(configurations.begin(), configurations.end(),
-            XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MONO) == configurations.end()) {
-        error = "The selected OpenXR runtime does not advertise PRIMARY_MONO";
+            XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO) == configurations.end()) {
+        error = "The selected OpenXR runtime does not advertise PRIMARY_STEREO";
         return false;
     }
     PFN_xrGetOpenGLGraphicsRequirementsKHR getRequirements = nullptr;
@@ -104,17 +108,23 @@ bool LinuxOpenXrBackend::Initialize(
         return false;
     }
     uint32_t viewCount = 0;
-    xrEnumerateViewConfigurationViews(instance_, systemId_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MONO,
+    xrEnumerateViewConfigurationViews(instance_, systemId_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
         0, &viewCount, nullptr);
-    if (viewCount != 1) {
-        error = "PRIMARY_MONO did not return exactly one view";
+    if (viewCount != 2) {
+        error = "PRIMARY_STEREO did not return exactly two views";
         return false;
     }
-    XrViewConfigurationView view{XR_TYPE_VIEW_CONFIGURATION_VIEW};
-    xrEnumerateViewConfigurationViews(instance_, systemId_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MONO,
-        1, &viewCount, &view);
-    width_ = static_cast<int>(view.recommendedImageRectWidth);
-    height_ = static_cast<int>(view.recommendedImageRectHeight);
+    std::array<XrViewConfigurationView, 2> viewConfigurationViews{
+        XrViewConfigurationView{XR_TYPE_VIEW_CONFIGURATION_VIEW},
+        XrViewConfigurationView{XR_TYPE_VIEW_CONFIGURATION_VIEW}};
+    xrEnumerateViewConfigurationViews(instance_, systemId_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO,
+        2, &viewCount, viewConfigurationViews.data());
+    width_ = static_cast<int>(std::max(
+        viewConfigurationViews[0].recommendedImageRectWidth,
+        viewConfigurationViews[1].recommendedImageRectWidth));
+    height_ = static_cast<int>(std::max(
+        viewConfigurationViews[0].recommendedImageRectHeight,
+        viewConfigurationViews[1].recommendedImageRectHeight));
     uint32_t formatCount = 0;
     xrEnumerateSwapchainFormats(session_, 0, &formatCount, nullptr);
     std::vector<int64_t> formats(formatCount);
@@ -139,7 +149,7 @@ bool LinuxOpenXrBackend::Initialize(
     swapchainInfo.width = width_;
     swapchainInfo.height = height_;
     swapchainInfo.faceCount = 1;
-    swapchainInfo.arraySize = 1;
+    swapchainInfo.arraySize = 2;
     swapchainInfo.mipCount = 1;
     result = xrCreateSwapchain(session_, &swapchainInfo, &swapchain_);
     if (XR_FAILED(result)) {
@@ -165,7 +175,7 @@ void LinuxOpenXrBackend::PollEvents() {
             const auto* changed = reinterpret_cast<const XrEventDataSessionStateChanged*>(&event);
             if (changed->state == XR_SESSION_STATE_READY && !sessionRunning_) {
                 XrSessionBeginInfo begin{XR_TYPE_SESSION_BEGIN_INFO};
-                begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_MONO;
+                begin.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
                 if (XR_SUCCEEDED(xrBeginSession(session_, &begin))) sessionRunning_ = true;
             } else if (changed->state == XR_SESSION_STATE_STOPPING && sessionRunning_) {
                 xrEndSession(session_);
@@ -181,8 +191,7 @@ void LinuxOpenXrBackend::PollEvents() {
     }
 }
 
-bool LinuxOpenXrBackend::BeginFrame(
-    uint32_t& colorTexture, int& width, int& height, std::string& error) {
+bool LinuxOpenXrBackend::BeginFrame(Frame& frame, std::string& error) {
     PollEvents();
     if (!sessionRunning_) return false;
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
@@ -193,6 +202,24 @@ bool LinuxOpenXrBackend::BeginFrame(
     if (XR_FAILED(result)) { error = "xrBeginFrame failed: " + ResultString(result); return false; }
     frameBegun_ = true;
     if (!frameState_.shouldRender) return false;
+    XrViewLocateInfo locateInfo{XR_TYPE_VIEW_LOCATE_INFO};
+    locateInfo.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+    locateInfo.displayTime = frameState_.predictedDisplayTime;
+    locateInfo.space = space_;
+    XrViewState viewState{XR_TYPE_VIEW_STATE};
+    uint32_t viewCount = 0;
+    views_ = {XrView{XR_TYPE_VIEW}, XrView{XR_TYPE_VIEW}};
+    result = xrLocateViews(session_, &locateInfo, &viewState, 2, &viewCount, views_.data());
+    if (XR_FAILED(result) || viewCount != 2) {
+        error = "xrLocateViews failed to return two views: " + ResultString(result);
+        return false;
+    }
+    constexpr XrViewStateFlags requiredFlags =
+        XR_VIEW_STATE_POSITION_VALID_BIT | XR_VIEW_STATE_ORIENTATION_VALID_BIT;
+    if ((viewState.viewStateFlags & requiredFlags) != requiredFlags) {
+        error = "OpenXR runtime returned invalid stereo view poses";
+        return false;
+    }
     XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
     result = xrAcquireSwapchainImage(swapchain_, &acquireInfo, &acquiredImage_);
     if (XR_FAILED(result)) { error = "xrAcquireSwapchainImage failed: " + ResultString(result); return false; }
@@ -201,9 +228,10 @@ bool LinuxOpenXrBackend::BeginFrame(
     waitImage.timeout = XR_INFINITE_DURATION;
     result = xrWaitSwapchainImage(swapchain_, &waitImage);
     if (XR_FAILED(result)) { error = "xrWaitSwapchainImage failed: " + ResultString(result); return false; }
-    colorTexture = images_[acquiredImage_].image;
-    width = width_;
-    height = height_;
+    frame.colorTexture = images_[acquiredImage_].image;
+    frame.width = width_;
+    frame.height = height_;
+    frame.views = views_;
     return true;
 }
 
@@ -218,19 +246,20 @@ bool LinuxOpenXrBackend::EndFrame(std::string& error) {
             return false;
         }
     }
-    XrCompositionLayerProjectionView projectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
-    projectionView.pose.orientation.w = 1.0f;
-    constexpr float verticalHalfFov = 0.5235987756f;
-    const float horizontalHalfFov = std::atan(
-        std::tan(verticalHalfFov) * static_cast<float>(width_) / static_cast<float>(height_));
-    projectionView.fov = {
-        -horizontalHalfFov, horizontalHalfFov, verticalHalfFov, -verticalHalfFov};
-    projectionView.subImage.swapchain = swapchain_;
-    projectionView.subImage.imageRect.extent = {width_, height_};
+    std::array<XrCompositionLayerProjectionView, 2> projectionViews{
+        XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
+        XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
+    for (uint32_t eye = 0; eye < projectionViews.size(); ++eye) {
+        projectionViews[eye].pose = views_[eye].pose;
+        projectionViews[eye].fov = views_[eye].fov;
+        projectionViews[eye].subImage.swapchain = swapchain_;
+        projectionViews[eye].subImage.imageRect.extent = {width_, height_};
+        projectionViews[eye].subImage.imageArrayIndex = eye;
+    }
     XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
     layer.space = space_;
-    layer.viewCount = 1;
-    layer.views = &projectionView;
+    layer.viewCount = 2;
+    layer.views = projectionViews.data();
     const XrCompositionLayerBaseHeader* layers[] = {
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&layer)};
     XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
