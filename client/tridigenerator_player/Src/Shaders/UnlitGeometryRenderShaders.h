@@ -59,13 +59,13 @@ uniform sampler2D u_texV;
 	uniform sampler2D u_texAlpha;
 	uniform highp usampler2D u_texDepth;
 	uniform lowp int u_hasEnvironmentDepth;
-	uniform lowp int u_softOcclusion;
+	uniform highp vec4 u_occlusionParams; // soft-enabled, softness, bias, unused
 	uniform highp mat4 u_depthViewMatrix[NUM_VIEWS];
 	uniform highp mat4 u_depthProjectionMatrix[NUM_VIEWS];
 	uniform highp sampler2DArray u_environmentDepthTexture;
 	uniform highp vec2 u_environmentDepthTexelSize;
-	uniform highp float u_occlusionSoftness;
-	uniform highp float u_occlusionDepthBias;
+	uniform highp sampler3D u_lightField;
+	uniform highp mat4 u_lightParams;
 
 varying lowp vec2 oTexCoord;
 varying lowp vec4 oColor;
@@ -117,6 +117,16 @@ void main()
 	float v = texture(u_texV, oTexCoord).r;
 	vec3 rgb = srgb_to_linear(yuv_to_rgb(y, u, v));
 
+	vec4 estimatedLight = u_lightParams[0];
+	if (u_lightParams[1].w >= 2.0) {
+	    highp vec3 gridUv = (worldPosition.xyz - u_lightParams[1].xyz) * u_lightParams[2].xyz;
+	    if (all(greaterThanEqual(gridUv, vec3(0.0))) && all(lessThanEqual(gridUv, vec3(1.0)))) {
+	        estimatedLight = texture(u_lightField, gridUv);
+	    }
+	}
+	highp float matchAmount = clamp(u_lightParams[2].w * u_lightParams[3].x, 0.0, 1.0);
+	rgb *= mix(vec3(1.0), estimatedLight.rgb * estimatedLight.a, matchAmount);
+
 	// Environment Depth
 	if (u_hasEnvironmentDepth == 0) {
 	    gl_FragColor = vec4(rgb, 1.0);
@@ -162,8 +172,8 @@ void main()
     // If the virtual object is further away (occluded) output a transparent color so real scene content from PT layer is displayed.
 
     highp float occlusionFactor = 0.0;
-    if (u_softOcclusion == 0 || u_occlusionSoftness <= 0.0) {
-      occlusionFactor = step(depthViewEyeZ - u_occlusionDepthBias, objectDepth);
+    if (u_occlusionParams.x < 0.5 || u_occlusionParams.y <= 0.0) {
+      occlusionFactor = step(depthViewEyeZ - u_occlusionParams.z, objectDepth);
     } else {
       highp float occlusionSum = 0.0;
       highp float validCount = 0.0;
@@ -177,8 +187,8 @@ void main()
         highp vec2 uv = baseUv + offsets[i] * u_environmentDepthTexelSize;
         highp float sampleDepth = texture(u_environmentDepthTexture, vec3(uv, VIEW_ID)).r;
         if (sampleDepth > 0.0 && sampleDepth < 1.0) {
-          highp float edge0 = sampleDepth - u_occlusionDepthBias;
-          highp float edge1 = edge0 + u_occlusionSoftness;
+          highp float edge0 = sampleDepth - u_occlusionParams.z;
+          highp float edge1 = edge0 + u_occlusionParams.y;
           occlusionSum += smoothstep(edge0, edge1, objectDepth);
           validCount += 1.0;
         }

@@ -1,6 +1,10 @@
 #pragma once
 
 #include <openxr/openxr.h>
+#include <ctime>
+
+using PFN_TDConvertTimespecTimeToTime =
+        XrResult (XRAPI_PTR*)(XrInstance, const struct timespec*, XrTime*);
 
 struct CoreState {
     XrSession Session = XR_NULL_HANDLE;
@@ -48,4 +52,6 @@ struct CoreState {
     XrEnvironmentDepthSwapchainMETA EnvironmentDepthSwapchain = XR_NULL_HANDLE;
 
     XrSpace localSpace = XR_NULL_HANDLE;
+    XrSpace viewSpace = XR_NULL_HANDLE;
+    PFN_TDConvertTimespecTimeToTime XrConvertTimespecTimeToTimeKHR = nullptr;
 };

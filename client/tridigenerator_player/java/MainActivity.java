@@ -31,7 +31,9 @@ public class MainActivity extends android.app.Activity {
 
     // Just adding these permissions to manifest does not work for Android >= 11. Requests have to
     // be made explicitly in code.
-    private static final String PERMISSIONS[] = {"com.oculus.permission.USE_SCENE"};
+    private static final String REQUIRED_PERMISSION = "com.oculus.permission.USE_SCENE";
+    private static final String OPTIONAL_CAMERA_PERMISSION = "horizonos.permission.HEADSET_CAMERA";
+    private static final String PERMISSIONS[] = {REQUIRED_PERMISSION, OPTIONAL_CAMERA_PERMISSION};
 
     private static final int PERMISSION_REQUEST_CODE = 1;
 
@@ -81,10 +83,13 @@ public class MainActivity extends android.app.Activity {
             if (grantResults[i] == PackageManager.PERMISSION_GRANTED) {
                 Log.d(TAG, String.format("Permission %s granted", permission));
                 requestedPermissions.remove(permission);
-            } else {
+            } else if (REQUIRED_PERMISSION.equals(permission)) {
                 Log.d(TAG, String.format("Permission %s DENIED", permission));
                 finish();
                 return;
+            } else {
+                Log.w(TAG, "Headset camera permission denied; color matching will be disabled");
+                requestedPermissions.remove(permission);
             }
         }
 

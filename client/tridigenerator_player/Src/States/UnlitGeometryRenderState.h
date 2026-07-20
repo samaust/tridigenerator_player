@@ -29,4 +29,6 @@ struct UnlitGeometryRenderState {
     OVR::Vector2f imageSize_ = OVR::Vector2f(1.0f, 1.0f);
     int hasEnvironmentDepth_ = 0;
     OVR::Vector2f environmentDepthTexelSize_ = OVR::Vector2f(0.0f, 0.0f);
+    OVR::Vector4f occlusionParams_ = OVR::Vector4f(1.0f, 0.01f, 0.0025f, 0.0f);
+    OVR::Matrix4f lightParams_;
 };

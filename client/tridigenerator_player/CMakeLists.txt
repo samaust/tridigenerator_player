@@ -56,6 +56,9 @@ if(UNIX AND NOT ANDROID)
         target_include_directories(linux_stereo_tests PRIVATE Src)
         target_link_libraries(linux_stereo_tests PRIVATE PkgConfig::OPENXR)
         add_test(NAME linux_stereo_tests COMMAND linux_stereo_tests)
+        add_executable(camera_light_math_tests Tests/CameraLightMathTests.cpp)
+        target_include_directories(camera_light_math_tests PRIVATE Src)
+        add_test(NAME camera_light_math_tests COMMAND camera_light_math_tests)
     endif()
     install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
     return()
@@ -97,12 +100,14 @@ if(ANDROID)
     # Link libraries (only link files that actually exist)
     set(ANDROID_LINK_LIBS
             android
+            camera2ndk
             CURL::libcurl
             EGL
             GLESv3
             jsoncpp_external
             glm
             log
+            mediandk
             ktx
             dav1d
             ffmpeg

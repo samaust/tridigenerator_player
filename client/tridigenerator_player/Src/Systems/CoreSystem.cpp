@@ -47,6 +47,15 @@ bool CoreSystem::Init(EntityManager& ecs) {
         cC.supportsHandTrackingAim = false;
         InitHandtracking(cC, cS);
         InitPassthrough(cC, cS);
+        cC.supportsTimeConversion =
+                ExtensionsArePresent({"XR_KHR_convert_timespec_time"});
+        if (cC.supportsTimeConversion) {
+            OXR(xrGetInstanceProcAddr(
+                    instance_,
+                    "xrConvertTimespecTimeToTimeKHR",
+                    reinterpret_cast<PFN_xrVoidFunction*>(&cS.XrConvertTimespecTimeToTimeKHR)));
+            cC.supportsTimeConversion = cS.XrConvertTimespecTimeToTimeKHR != nullptr;
+        }
 
     });
     return true;
@@ -351,6 +360,17 @@ void CoreSystem::SessionInit(EntityManager& ecs, XrSession session) {
                 CoreState &cS) {
         cS.Session = session;
 
+        if (session != XR_NULL_HANDLE) {
+            XrReferenceSpaceCreateInfo viewInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+            viewInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+            viewInfo.poseInReferenceSpace.orientation.w = 1.0f;
+            XrResult viewResult = xrCreateReferenceSpace(session, &viewInfo, &cS.viewSpace);
+            CheckErrors(instance_, viewResult, "xrCreateReferenceSpace", true);
+            if (XR_FAILED(viewResult)) {
+                cS.viewSpace = XR_NULL_HANDLE;
+            }
+        }
+
         // Passthrough
         if (cC.supportsPassthrough && session != XR_NULL_HANDLE) {
             LOGI("Passthrough: Initializing for this session");
@@ -373,6 +393,10 @@ void CoreSystem::SessionEnd(EntityManager& ecs) {
     ecs.ForEach<CoreState>(
             [&](EntityID e,
                 CoreState &cS) {
+        if (cS.viewSpace != XR_NULL_HANDLE) {
+            OXR(xrDestroySpace(cS.viewSpace));
+            cS.viewSpace = XR_NULL_HANDLE;
+        }
         if (cS.Passthrough != XR_NULL_HANDLE) {
             if (cS.PassthroughLayer != XR_NULL_HANDLE) {
                 DestroyLayer(cS);

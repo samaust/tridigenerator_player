@@ -48,6 +48,8 @@
 #include "../Components/TransformComponent.h"
 
 #include "../States/EnvironmentDepthState.h"
+#include "../States/CameraLightEstimationState.h"
+#include "../Components/CameraLightEstimationComponent.h"
 #include "../States/TransformState.h"
 #include "../States/FrameLoaderState.h"
 #include "../Data/VipeDataset.h"
@@ -111,10 +113,10 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
                 {"u_depthViewMatrix", OVRFW::ovrProgramParmType::FLOAT_MATRIX4},
                 {"u_depthProjectionMatrix", OVRFW::ovrProgramParmType::FLOAT_MATRIX4},
                 {"u_hasEnvironmentDepth", OVRFW::ovrProgramParmType::INT},
-                {"u_softOcclusion", OVRFW::ovrProgramParmType::INT},
+                {"u_occlusionParams", OVRFW::ovrProgramParmType::FLOAT_VECTOR4},
                 {"u_environmentDepthTexelSize", OVRFW::ovrProgramParmType::FLOAT_VECTOR2},
-                {"u_occlusionSoftness", OVRFW::ovrProgramParmType::FLOAT},
-                {"u_occlusionDepthBias", OVRFW::ovrProgramParmType::FLOAT},
+                {"u_lightField", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
+                {"u_lightParams", OVRFW::ovrProgramParmType::FLOAT_MATRIX4},
         };
 
         std::string programDefsLimited;
@@ -195,11 +197,17 @@ void UnlitGeometryRenderSystem::Shutdown(EntityManager& ecs) {
  */
 void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplFrameIn &in) {
     EnvironmentDepthState* environmentDepthState = nullptr;
+    CameraLightEstimationState* lightState = nullptr;
+    CameraLightEstimationComponent* lightComponent = nullptr;
     ecs.ForEach<EnvironmentDepthState>([&](EntityID, EnvironmentDepthState& edS) {
         if (environmentDepthState == nullptr) {
             environmentDepthState = &edS;
         }
     });
+    ecs.ForEachMulti<CameraLightEstimationComponent, CameraLightEstimationState>(
+        [&](EntityID, CameraLightEstimationComponent& component, CameraLightEstimationState& state) {
+            lightComponent = &component; lightState = &state;
+        });
 
     ecs.ForEachMulti<TransformComponent,
                      TransformState,
@@ -215,6 +223,26 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                  UnlitGeometryRenderComponent &ugrC,
                  UnlitGeometryRenderState &ugrS) {
         UpdateEnvironmentDepthUniforms(ugrC, ugrS, environmentDepthState);
+        const OVR::Vector4f global = lightState ? lightState->globalLight : OVR::Vector4f(1.0f);
+        const OVR::Vector3f minimum = lightState ? lightState->gridMinimum : OVR::Vector3f(0.0f);
+        const OVR::Vector3f inverseExtent = lightState ? OVR::Vector3f(
+            1.0f/lightState->gridExtent.x, 1.0f/lightState->gridExtent.y, 1.0f/lightState->gridExtent.z) : OVR::Vector3f(0.0f);
+        ugrS.lightParams_ = OVR::Matrix4f(
+            global.x, global.y, global.z, global.w,
+            minimum.x, minimum.y, minimum.z, lightState ? static_cast<float>(lightState->tier) : 0.0f,
+            inverseExtent.x, inverseExtent.y, inverseExtent.z, lightState ? lightState->tierBlend : 0.0f,
+            lightComponent ? lightComponent->matchingStrength : 0.0f, 0.0f, 0.0f, 0.0f);
+        for (int surface=0; surface<2; ++surface) {
+            auto& gc = ugrS.surfaceDefs_[surface].graphicsCommand;
+            gc.UniformData[15].Data = &ugrS.lightParams_;
+            if (lightState && lightState->texturesReady) {
+                gc.Textures[TEX_LIGHT_FIELD] = OVRFW::GlTexture(
+                    lightState->lightFieldTexture, GL_TEXTURE_3D,
+                    CameraLightEstimationState::GridWidth, CameraLightEstimationState::GridHeight);
+            } else {
+                gc.Textures[TEX_LIGHT_FIELD] = {};
+            }
+        }
 
         // Create color, alpha, depth textures if not already created
         if (!TexturesCreated(ugrS) && flS.framePtr != nullptr) {
@@ -627,10 +655,10 @@ void UnlitGeometryRenderSystem::UpdateEnvironmentDepthUniforms(
     for (int i = 0; i < 2; ++i) {
         OVRFW::ovrGraphicsCommand& gc = ugrS.surfaceDefs_[i].graphicsCommand;
         gc.UniformData[11].Data = &ugrS.hasEnvironmentDepth_;
-        gc.UniformData[12].Data = &ugrC.softOcclusion_;
+        ugrS.occlusionParams_ = OVR::Vector4f(
+            static_cast<float>(ugrC.softOcclusion_), ugrC.occlusionSoftness_, ugrC.occlusionDepthBias_, 0.0f);
+        gc.UniformData[12].Data = &ugrS.occlusionParams_;
         gc.UniformData[13].Data = &ugrS.environmentDepthTexelSize_;
-        gc.UniformData[14].Data = &ugrC.occlusionSoftness_;
-        gc.UniformData[15].Data = &ugrC.occlusionDepthBias_;
 
         if (hasDepth) {
             gc.UniformData[9].Data = environmentDepthState->DepthViewMatrices;

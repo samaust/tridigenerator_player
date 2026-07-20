@@ -42,11 +42,13 @@
 #include "../Components/FrameLoaderComponent.h"
 #include "../Components/RenderComponent.h"
 #include "../Components/UnlitGeometryRenderComponent.h"
+#include "../Components/CameraLightEstimationComponent.h"
 
 #include "../States/TransformState.h"
 #include "../States/FrameLoaderState.h"
 #include "../States/UnlitGeometryRenderState.h"
 #include "../States/EnvironmentDepthState.h"
+#include "../States/CameraLightEstimationState.h"
 #include "../States/InputState.h"
 
 #include "../Systems/CoreSystem.h"
@@ -56,6 +58,7 @@
 #include "../Systems/InputSystem.h"
 #include "../Systems/RenderSystem.h"
 #include "../Systems/EnvironmentDepthSystem.h"
+#include "../Systems/CameraLightEstimationSystem.h"
 #include "../Systems/UnlitGeometryRenderSystem.h"
 
 // All physical units in OpenXR are in meters, but sometimes it's more useful
@@ -113,6 +116,7 @@ std::vector<const char *> TDGenPlayerApp::GetExtensions()
     extensions.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
     extensions.push_back(XR_FB_TRIANGLE_MESH_EXTENSION_NAME);
     extensions.push_back(XR_META_ENVIRONMENT_DEPTH_EXTENSION_NAME);
+    extensions.push_back("XR_KHR_convert_timespec_time");
 
     return extensions;
 }
@@ -137,6 +141,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     transformSystem_ = std::make_unique<TransformSystem>();
     renderSystem_ = std::make_unique<RenderSystem>();
     environmentDepthSystem_ = std::make_unique<EnvironmentDepthSystem>(GetInstance());
+    cameraLightEstimationSystem_ = std::make_unique<CameraLightEstimationSystem>(GetInstance());
     unlitGeometryRenderSystem_ = std::make_unique<UnlitGeometryRenderSystem>();
     LOGI("ECS Systems Initialized");
 
@@ -147,6 +152,8 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     entityManager_->AddComponent<CoreComponent>(CoreEntity, {});
     entityManager_->AddComponent<CoreState>(CoreEntity, {});
     entityManager_->AddComponent<EnvironmentDepthState>(CoreEntity, {});
+    entityManager_->AddComponent<CameraLightEstimationComponent>(CoreEntity, {});
+    entityManager_->AddComponent<CameraLightEstimationState>(CoreEntity, {});
     entityManager_->AddComponent<InputComponent>(CoreEntity, {});
     entityManager_->AddComponent<InputState>(CoreEntity, {});
 
@@ -172,6 +179,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     transformSystem_->Init(*entityManager_);
     renderSystem_->Init(*entityManager_);
     environmentDepthSystem_->Init(*entityManager_);
+    cameraLightEstimationSystem_->Init(*entityManager_);
     unlitGeometryRenderSystem_->Init(*entityManager_);
 
     BuildDatasetPicker();
@@ -197,6 +205,7 @@ bool TDGenPlayerApp::SessionInit()
     coreSystem_->SessionInit(*entityManager_, session);
     inputSystem_->SessionInit(*entityManager_, session);
     environmentDepthSystem_->SessionInit(*entityManager_, session);
+    cameraLightEstimationSystem_->SessionInit(*entityManager_, session);
 
     return true;
 }
@@ -226,6 +235,7 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     transformSystem_->Update(*entityManager_);
     renderSystem_->Update(*entityManager_);
     environmentDepthSystem_->Update(*entityManager_, in);
+    cameraLightEstimationSystem_->Update(*entityManager_, in, Focused);
     unlitGeometryRenderSystem_->Update(*entityManager_, in);
     if (datasetUi_) {
         datasetUi_->HitTestDevices().clear();
@@ -274,6 +284,7 @@ void TDGenPlayerApp::SessionEnd()
 {
     //xrInput_.Destroy();
     inputSystem_->SessionEnd(*entityManager_);
+    cameraLightEstimationSystem_->SessionEnd(*entityManager_);
     environmentDepthSystem_->SessionEnd(*entityManager_);
     coreSystem_->SessionEnd(*entityManager_);
 }
@@ -288,6 +299,7 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
     // Explicitly destroy the systems and entity manager.
     // This is good practice to control the shutdown order.
     unlitGeometryRenderSystem_->Shutdown(*entityManager_);
+    cameraLightEstimationSystem_->Shutdown(*entityManager_);
     renderSystem_->Shutdown(*entityManager_);
     transformSystem_->Shutdown(*entityManager_);
     inputSystem_->Shutdown(*entityManager_);
@@ -298,6 +310,7 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
     environmentDepthSystem_->Shutdown(*entityManager_);
 
     unlitGeometryRenderSystem_.reset();
+    cameraLightEstimationSystem_.reset();
     environmentDepthSystem_.reset();
     renderSystem_.reset();
     transformSystem_.reset();

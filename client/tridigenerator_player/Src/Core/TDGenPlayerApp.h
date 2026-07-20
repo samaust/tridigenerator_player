@@ -13,6 +13,7 @@
 #include "../Systems/TransformSystem.h"
 #include "../Systems/RenderSystem.h"
 #include "../Systems/EnvironmentDepthSystem.h"
+#include "../Systems/CameraLightEstimationSystem.h"
 #include "../Systems/UnlitGeometryRenderSystem.h"
 
 namespace OVRFW {
@@ -38,6 +39,7 @@ private:
     std::unique_ptr<TransformSystem> transformSystem_;
     std::unique_ptr<RenderSystem> renderSystem_;
     std::unique_ptr<EnvironmentDepthSystem> environmentDepthSystem_;
+    std::unique_ptr<CameraLightEstimationSystem> cameraLightEstimationSystem_;
     std::unique_ptr<UnlitGeometryRenderSystem> unlitGeometryRenderSystem_;
     std::unique_ptr<OVRFW::TinyUI> datasetUi_;
     OVRFW::VRMenuObject* datasetStatusLabel_ = nullptr;

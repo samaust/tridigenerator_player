@@ -6,4 +6,5 @@ struct CoreComponent {
     bool supportsHandTrackingAim{false};
     bool supportsPassthrough{false};
     bool supportsDepth{false};
+    bool supportsTimeConversion{false};
 };

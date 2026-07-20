@@ -20,6 +20,7 @@
       android:required="true"
       />
   <uses-permission android:name="com.oculus.permission.USE_SCENE" />
+  <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
   <!-- Tell the system this app can handle tracked remotes and hands -->
   <uses-feature
       android:name="oculus.software.handtracking"
