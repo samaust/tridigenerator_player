@@ -15,6 +15,7 @@ if(UNIX AND NOT ANDROID)
 
     add_executable(${PROJECT_NAME}
         Src/Linux/LinuxDesktopApp.cpp
+        Src/Linux/MaskVisibility.cpp
         Src/Linux/LinuxOpenXrBackend.cpp
         Src/Linux/LinuxStereo.cpp
         Src/Data/VipeDataset.cpp
@@ -59,6 +60,11 @@ if(UNIX AND NOT ANDROID)
         add_executable(camera_light_math_tests Tests/CameraLightMathTests.cpp)
         target_include_directories(camera_light_math_tests PRIVATE Src)
         add_test(NAME camera_light_math_tests COMMAND camera_light_math_tests)
+        add_executable(mask_visibility_tests
+            Tests/MaskVisibilityTests.cpp
+            Src/Linux/MaskVisibility.cpp)
+        target_include_directories(mask_visibility_tests PRIVATE Src)
+        add_test(NAME mask_visibility_tests COMMAND mask_visibility_tests)
     endif()
     install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
     return()

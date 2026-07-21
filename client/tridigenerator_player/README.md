@@ -341,4 +341,12 @@ the pointer; press Escape again to exit. Left click recaptures it.
 In OpenXR mode the runtime controls head orientation and eye poses; `W/A/S/D` and `Q/E` add a
 locomotion offset, Shift increases movement speed, and `C` clears the offset. Mouse-look remains
 exclusive to desktop mode. In both modes, Space pauses or resumes video playback without
-disabling camera movement, and `M` toggles mask filtering.
+disabling camera movement.
+
+The mask visibility panel in the upper-left lists the manifest's mask IDs and labels. Every mask,
+including background ID 0, is visible when the player starts. Click a checkbox to show or hide one
+mask, use `Show all` or `Hide all` for bulk changes, and use the mouse wheel to scroll long lists.
+The panel is visible at startup; press `M` to hide or show it without changing mask selections.
+In desktop mode, press Escape to release the captured pointer before interacting with the panel;
+click outside the panel to recapture mouse-look. Selections last for the current session only and,
+in OpenXR mode, apply to both the headset view and the mirror.

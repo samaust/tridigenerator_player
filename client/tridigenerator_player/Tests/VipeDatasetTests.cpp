@@ -35,8 +35,12 @@ int main() {
     Expect(dataset.frames.size() == 122, "per-frame metadata count");
     Expect(dataset.depthUnitsPerMetre > 8000.0f, "depth scale parsed");
     Expect(dataset.orientationOffsetDegrees[0] == 0.0f &&
-        dataset.orientationOffsetDegrees[1] == 0.0f &&
+        dataset.orientationOffsetDegrees[1] == -45.0f &&
         dataset.orientationOffsetDegrees[2] == 0.0f, "orientation offsets parsed");
+    Expect(dataset.maskLabels.size() == 3, "dog-example mask labels parsed");
+    Expect(dataset.maskLabels.at(0) == "background", "background mask label");
+    Expect(dataset.maskLabels.at(2) == "animal", "animal mask label");
+    Expect(dataset.maskLabels.at(3) == "pet", "pet mask label");
 
     if (!dataset.frames.empty()) {
         const auto identity = RelativeOpenGlCameraPose(

@@ -1,5 +1,6 @@
 #include "LinuxOpenXrBackend.h"
 #include "LinuxStereo.h"
+#include "MaskVisibility.h"
 
 #include "Data/VipeDataset.h"
 #include "Videos/WebmInMemoryDemuxer.h"
@@ -226,14 +227,15 @@ in vec2 textureCoordinate;
 uniform sampler2D yTexture;
 uniform sampler2D uTexture;
 uniform sampler2D vTexture;
-uniform sampler2D maskTexture;
+uniform usampler2D maskTexture;
 uniform usampler2D depthTexture;
 uniform int fullRange;
-uniform int maskEnabled;
+uniform int maskVisibility[256];
 out vec4 color;
 void main() {
+    uint maskId = texture(maskTexture, textureCoordinate).r;
     if (texture(depthTexture, textureCoordinate).r == uint(0) ||
-        (maskEnabled != 0 && texture(maskTexture, textureCoordinate).r <= 0.0)) discard;
+        maskVisibility[int(maskId)] == 0) discard;
     float y = texture(yTexture, textureCoordinate).r;
     float u = texture(uTexture, textureCoordinate).r - 0.5;
     float v = texture(vTexture, textureCoordinate).r - 0.5;
@@ -356,6 +358,143 @@ public:
     GLXContext ContextHandle() const { return context_; }
 };
 
+class MaskPanel {
+public:
+    MaskPanel(Display* display, Window parent, MaskVisibility& visibility)
+        : display_(display), visibility_(visibility) {
+        const int screen = DefaultScreen(display_);
+        window_ = XCreateSimpleWindow(display_, parent, kMargin, kMargin, kWidth, 300, 1,
+            BlackPixel(display_, screen), WhitePixel(display_, screen));
+        XSelectInput(display_, window_, ExposureMask | ButtonPressMask);
+        gc_ = XCreateGC(display_, window_, 0, nullptr);
+        XSetForeground(display_, gc_, BlackPixel(display_, screen));
+        XMapRaised(display_, window_);
+    }
+
+    ~MaskPanel() {
+        if (gc_) XFreeGC(display_, gc_);
+        if (window_) XDestroyWindow(display_, window_);
+    }
+
+    bool Owns(const XEvent& event) const { return event.xany.window == window_; }
+
+    void Show() {
+        if (visible_) return;
+        visible_ = true;
+        XMapRaised(display_, window_);
+    }
+
+    void Hide() {
+        if (!visible_) return;
+        visible_ = false;
+        XUnmapWindow(display_, window_);
+    }
+
+    void Toggle() {
+        if (visible_) Hide();
+        else Show();
+    }
+
+    void ResizeForParent(int parentWidth, int parentHeight) {
+        width_ = std::max(1, std::min(kWidth, parentWidth - 2 * kMargin));
+        height_ = std::max(1, std::min(420, parentHeight - 2 * kMargin));
+        ClampScroll();
+        XMoveResizeWindow(display_, window_, kMargin, kMargin,
+            static_cast<unsigned int>(width_), static_cast<unsigned int>(height_));
+    }
+
+    void HandleEvent(const XEvent& event, bool allowInput) {
+        if (event.type == Expose) {
+            Draw();
+            return;
+        }
+        if (!allowInput || event.type != ButtonPress) return;
+        if (event.xbutton.button == Button4) {
+            scrollOffset_ = std::max(0, scrollOffset_ - 1);
+        } else if (event.xbutton.button == Button5) {
+            scrollOffset_ = std::min(MaxScroll(), scrollOffset_ + 1);
+        } else if (event.xbutton.button == Button1) {
+            const int x = event.xbutton.x;
+            const int y = event.xbutton.y;
+            if (y >= kButtonTop && y < kButtonTop + kButtonHeight) {
+                if (x >= 10 && x < 100) visibility_.ShowAll();
+                else if (x >= 110 && x < 200) visibility_.HideAll();
+            } else if (y >= kRowsTop && y < height_) {
+                const int index = scrollOffset_ + (y - kRowsTop) / kRowHeight;
+                const auto& entries = visibility_.Entries();
+                if (index >= 0 && index < static_cast<int>(entries.size())) {
+                    const uint8_t id = entries[static_cast<size_t>(index)].id;
+                    visibility_.SetVisible(id, !visibility_.IsVisible(id));
+                }
+            }
+        }
+        ClampScroll();
+        XClearWindow(display_, window_);
+        Draw();
+    }
+
+private:
+    static constexpr int kMargin = 12;
+    static constexpr int kWidth = 320;
+    static constexpr int kButtonTop = 28;
+    static constexpr int kButtonHeight = 24;
+    static constexpr int kRowsTop = 62;
+    static constexpr int kRowHeight = 24;
+
+    int VisibleRows() const { return std::max(0, (height_ - kRowsTop) / kRowHeight); }
+    int MaxScroll() const {
+        return std::max(0, static_cast<int>(visibility_.Entries().size()) - VisibleRows());
+    }
+    void ClampScroll() { scrollOffset_ = std::clamp(scrollOffset_, 0, MaxScroll()); }
+
+    void DrawButton(int left, const char* text) {
+        XDrawRectangle(display_, window_, gc_, left, kButtonTop, 89, kButtonHeight - 1);
+        XDrawString(display_, window_, gc_, left + 10, kButtonTop + 17,
+            text, static_cast<int>(std::char_traits<char>::length(text)));
+    }
+
+    void Draw() {
+        const char title[] = "Mask visibility";
+        XDrawString(display_, window_, gc_, 10, 19, title, sizeof(title) - 1);
+        DrawButton(10, "Show all");
+        DrawButton(110, "Hide all");
+        const auto& entries = visibility_.Entries();
+        for (int row = 0; row < VisibleRows(); ++row) {
+            const int index = scrollOffset_ + row;
+            if (index >= static_cast<int>(entries.size())) break;
+            const auto& entry = entries[static_cast<size_t>(index)];
+            const int top = kRowsTop + row * kRowHeight;
+            XDrawRectangle(display_, window_, gc_, 12, top + 5, 13, 13);
+            if (visibility_.IsVisible(entry.id)) {
+                XDrawLine(display_, window_, gc_, 14, top + 11, 18, top + 16);
+                XDrawLine(display_, window_, gc_, 18, top + 16, 24, top + 7);
+            }
+            const std::string label = std::to_string(static_cast<unsigned int>(entry.id)) +
+                " - " + entry.label;
+            XDrawString(display_, window_, gc_, 34, top + 17, label.c_str(),
+                static_cast<int>(label.size()));
+        }
+        XFlush(display_);
+    }
+
+    Display* display_ = nullptr;
+    Window window_ = 0;
+    GC gc_ = 0;
+    MaskVisibility& visibility_;
+    int width_ = kWidth;
+    int height_ = 300;
+    int scrollOffset_ = 0;
+    bool visible_ = true;
+};
+
+bool IsAutoRepeatRelease(Display* display, const XEvent& event) {
+    if (event.type != KeyRelease || XPending(display) == 0) return false;
+    XEvent next{};
+    XPeekEvent(display, &next);
+    return next.type == KeyPress && next.xkey.time == event.xkey.time &&
+        next.xkey.keycode == event.xkey.keycode;
+}
+
 struct Camera {
     static constexpr Vec3 kStartPosition{0.0f, 0.0f, 1.5f};
     static constexpr float kStartYaw = -kPi * 0.5f;
@@ -415,7 +554,8 @@ GLuint CreateTexture(GLenum internalFormat, int width, int height, GLenum filter
     GLuint texture = 0;
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
-    const GLenum sourceFormat = internalFormat == GL_R16UI ? GL_RED_INTEGER : GL_RED;
+    const bool integerTexture = internalFormat == GL_R8UI || internalFormat == GL_R16UI;
+    const GLenum sourceFormat = integerTexture ? GL_RED_INTEGER : GL_RED;
     const GLenum sourceType = internalFormat == GL_R16UI ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE;
     glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, sourceFormat, sourceType, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
@@ -427,15 +567,16 @@ GLuint CreateTexture(GLenum internalFormat, int width, int height, GLenum filter
 
 void UploadFrame(const VideoFrame& frame, const std::array<GLuint, 5>& textures) {
     glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    const auto upload8 = [&](int unit, int width, int height, const uint8_t* data) {
+    const auto upload8 = [&](int unit, int width, int height, GLenum format, const uint8_t* data) {
         glActiveTexture(GL_TEXTURE0 + unit);
         glBindTexture(GL_TEXTURE_2D, textures[unit]);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RED, GL_UNSIGNED_BYTE, data);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, format, GL_UNSIGNED_BYTE, data);
     };
-    upload8(0, frame.textureYWidth, frame.textureYHeight, frame.textureYData.data());
-    upload8(1, frame.textureUWidth, frame.textureUHeight, frame.textureUData.data());
-    upload8(2, frame.textureVWidth, frame.textureVHeight, frame.textureVData.data());
-    upload8(3, frame.textureAlphaWidth, frame.textureAlphaHeight, frame.textureAlphaData.data());
+    upload8(0, frame.textureYWidth, frame.textureYHeight, GL_RED, frame.textureYData.data());
+    upload8(1, frame.textureUWidth, frame.textureUHeight, GL_RED, frame.textureUData.data());
+    upload8(2, frame.textureVWidth, frame.textureVHeight, GL_RED, frame.textureVData.data());
+    upload8(3, frame.textureAlphaWidth, frame.textureAlphaHeight,
+        GL_RED_INTEGER, frame.textureAlphaData.data());
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, textures[4]);
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, frame.textureDepthWidth, frame.textureDepthHeight,
@@ -458,6 +599,8 @@ int Run(int argc, char** argv) {
     if (!decoder.init(&decoderError)) throw std::runtime_error("Decoder initialization failed: " + decoderError);
 
     DesktopWindow window;
+    MaskVisibility maskVisibility(dataset.maskLabels);
+    MaskPanel maskPanel(window.DisplayHandle(), window.WindowHandle(), maskVisibility);
     std::unique_ptr<LinuxOpenXrBackend> openXr;
     if (options.backend == "openxr") {
         openXr = std::make_unique<LinuxOpenXrBackend>();
@@ -501,7 +644,7 @@ int Run(int argc, char** argv) {
         CreateTexture(GL_R8, frame.textureYWidth, frame.textureYHeight, GL_LINEAR),
         CreateTexture(GL_R8, frame.textureUWidth, frame.textureUHeight, GL_LINEAR),
         CreateTexture(GL_R8, frame.textureVWidth, frame.textureVHeight, GL_LINEAR),
-        CreateTexture(GL_R8, frame.textureAlphaWidth, frame.textureAlphaHeight, GL_NEAREST),
+        CreateTexture(GL_R8UI, frame.textureAlphaWidth, frame.textureAlphaHeight, GL_NEAREST),
         CreateTexture(GL_R16UI, frame.textureDepthWidth, frame.textureDepthHeight, GL_NEAREST)};
     UploadFrame(frame, textures);
     glUseProgram(program);
@@ -522,10 +665,10 @@ int Run(int argc, char** argv) {
     bool videoPaused = false;
     bool spaceDown = false;
     bool centerDown = false;
-    bool maskEnabled = true;
-    bool maskDown = false;
+    bool maskPanelDown = false;
     int windowWidth = kWindowWidth, windowHeight = kWindowHeight;
     int centerX = windowWidth / 2, centerY = windowHeight / 2;
+    maskPanel.ResizeForParent(windowWidth, windowHeight);
     camera.captured = !openXr;
     escapeReleased = static_cast<bool>(openXr);
     window.SetPointerCaptured(camera.captured, centerX, centerY);
@@ -542,12 +685,15 @@ int Run(int argc, char** argv) {
             XNextEvent(window.DisplayHandle(), &event);
             if (event.type == ClientMessage && static_cast<Atom>(event.xclient.data.l[0]) == window.CloseAtom()) {
                 running = false;
+            } else if (maskPanel.Owns(event)) {
+                maskPanel.HandleEvent(event, !camera.captured);
             } else if (event.type == ConfigureNotify) {
                 windowWidth = std::max(1, event.xconfigure.width);
                 windowHeight = std::max(1, event.xconfigure.height);
                 glViewport(0, 0, windowWidth, windowHeight);
                 centerX = windowWidth / 2;
                 centerY = windowHeight / 2;
+                maskPanel.ResizeForParent(windowWidth, windowHeight);
                 if (camera.captured) {
                     XWarpPointer(window.DisplayHandle(), None, window.WindowHandle(),
                         0, 0, 0, 0, centerX, centerY);
@@ -609,11 +755,10 @@ int Run(int argc, char** argv) {
                     centerDown = down;
                 }
                 if (key == 'm') {
-                    if (down && !maskDown) {
-                        maskEnabled = !maskEnabled;
-                        std::cerr << (maskEnabled ? "Mask enabled\n" : "Mask disabled\n");
+                    if (down && !maskPanelDown) maskPanel.Toggle();
+                    if (down || !IsAutoRepeatRelease(window.DisplayHandle(), event)) {
+                        maskPanelDown = down;
                     }
-                    maskDown = down;
                 }
                 if (key == 'w' || key == 'a' || key == 's' || key == 'd' || key == 'q' || key == 'e') {
                     camera.keys[static_cast<unsigned char>(key)] = down;
@@ -654,7 +799,8 @@ int Run(int argc, char** argv) {
             glUniform2f(glGetUniformLocation(program, "imageSize"), dataset.width, dataset.height);
             glUniform1f(glGetUniformLocation(program, "depthUnitsPerMetre"), dataset.depthUnitsPerMetre);
             glUniform1i(glGetUniformLocation(program, "fullRange"), frame.yuvFullRange ? 1 : 0);
-            glUniform1i(glGetUniformLocation(program, "maskEnabled"), maskEnabled ? 1 : 0);
+            glUniform1iv(glGetUniformLocation(program, "maskVisibility[0]"),
+                256, maskVisibility.ShaderValues());
             glBindVertexArray(vao);
             glDrawElements(GL_TRIANGLES, static_cast<GLsizei>(indices.size()), GL_UNSIGNED_INT, nullptr);
         };
