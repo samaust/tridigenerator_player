@@ -14,5 +14,8 @@ struct InputState {
     std::array<bool, 2> controllerRendererInitialized{false, false};
     std::array<bool, 2> handRendererInitialized{false, false};
     std::array<bool, 2> previousPinch{false, false};
+    std::array<bool, 2> previousGrip{false, false};
+    float previousPalmDistance{0.0f};
+    bool clapArmed{true};
     bool sessionInitialized{false};
 };

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <fstream>
 #include <iterator>
 #include <iostream>
@@ -38,6 +39,7 @@
 #include "TDGenPlayerApp.h"
 
 #include "../Components/InputComponent.h"
+#include "../Components/InteractableComponent.h"
 #include "../Components/TransformComponent.h"
 #include "../Components/FrameLoaderComponent.h"
 #include "../Components/RenderComponent.h"
@@ -50,12 +52,14 @@
 #include "../States/EnvironmentDepthState.h"
 #include "../States/CameraLightEstimationState.h"
 #include "../States/InputState.h"
+#include "../States/InteractionState.h"
 
 #include "../Systems/CoreSystem.h"
 #include "../Systems/SceneSystem.h"
 #include "../Systems/FrameLoaderSystem.h"
 #include "../Systems/AudioSystem.h"
 #include "../Systems/InputSystem.h"
+#include "../Systems/InteractionSystem.h"
 #include "../Systems/RenderSystem.h"
 #include "../Systems/EnvironmentDepthSystem.h"
 #include "../Systems/CameraLightEstimationSystem.h"
@@ -121,6 +125,29 @@ std::vector<const char *> TDGenPlayerApp::GetExtensions()
     return extensions;
 }
 
+std::unordered_map<XrPath, std::vector<XrActionSuggestedBinding>>
+TDGenPlayerApp::GetSuggestedBindings(XrInstance instance) {
+    auto bindings = OVRFW::XrApp::GetSuggestedBindings(instance);
+    XrPath handPaths[2] = {LeftHandPath, RightHandPath};
+    hapticAction_ = CreateAction(
+            BaseActionSet, XR_ACTION_TYPE_VIBRATION_OUTPUT,
+            "mesh_haptic", "Mesh interaction haptic", 2, handPaths);
+
+    XrPath touchProfile = XR_NULL_PATH;
+    XrPath touchProProfile = XR_NULL_PATH;
+    XrPath touchPlusProfile = XR_NULL_PATH;
+    xrStringToPath(instance, "/interaction_profiles/oculus/touch_controller", &touchProfile);
+    xrStringToPath(instance, "/interaction_profiles/meta/touch_pro_controller", &touchProProfile);
+    xrStringToPath(instance, "/interaction_profiles/meta/touch_plus_controller", &touchPlusProfile);
+    bindings[touchProfile].emplace_back(
+            ActionSuggestedBinding(hapticAction_, "/user/hand/left/output/haptic"));
+    bindings[touchProfile].emplace_back(
+            ActionSuggestedBinding(hapticAction_, "/user/hand/right/output/haptic"));
+    bindings[touchProProfile] = bindings[touchProfile];
+    bindings[touchPlusProfile] = bindings[touchProfile];
+    return bindings;
+}
+
 // OVRFW::XrApp::Init() calls, among other things;
 //  - xrInitializeLoaderKHR(...)
 //  - xrCreateInstance with the extensions from GetExtensions(...),
@@ -138,6 +165,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     frameLoaderSystem_ = std::make_unique<FrameLoaderSystem>();
     audioSystem_ = std::make_unique<AudioSystem>();
     inputSystem_ = std::make_unique<InputSystem>();
+    interactionSystem_ = std::make_unique<InteractionSystem>();
     transformSystem_ = std::make_unique<TransformSystem>();
     renderSystem_ = std::make_unique<RenderSystem>();
     environmentDepthSystem_ = std::make_unique<EnvironmentDepthSystem>(GetInstance());
@@ -165,6 +193,8 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     transform.modelScale = {1.0f, 1.0f, 1.0f};
     entityManager_->AddComponent<TransformComponent>(ObjectEntity, transform);
     entityManager_->AddComponent<TransformState>(ObjectEntity, {});
+    entityManager_->AddComponent<InteractableComponent>(ObjectEntity, {});
+    entityManager_->AddComponent<InteractionState>(ObjectEntity, {});
     entityManager_->AddComponent<FrameLoaderComponent>(ObjectEntity, {});
     entityManager_->AddComponent<FrameLoaderState>(ObjectEntity, {});
     entityManager_->AddComponent<UnlitGeometryRenderComponent>(ObjectEntity, {});
@@ -176,6 +206,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     frameLoaderSystem_->Init(*entityManager_);
     audioSystem_->Init(*entityManager_);
     inputSystem_->Init(*entityManager_);
+    interactionSystem_->Init(*entityManager_);
     transformSystem_->Init(*entityManager_);
     renderSystem_->Init(*entityManager_);
     environmentDepthSystem_->Init(*entityManager_);
@@ -239,12 +270,31 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     frameLoaderSystem_->Update(*entityManager_, nowSeconds);
     audioSystem_->Update(*entityManager_);
     inputSystem_->Update(*entityManager_, in);
+    const float deltaSeconds = lastUpdateSeconds_ > 0.0
+            ? static_cast<float>(std::clamp(nowSeconds - lastUpdateSeconds_, 0.0, 0.1))
+            : 0.0f;
+    lastUpdateSeconds_ = nowSeconds;
+    interactionSystem_->Update(*entityManager_, deltaSeconds);
+    entityManager_->ForEach<InteractionState>([&](EntityID, InteractionState& state) {
+        for (const HapticRequest& request : state.hapticRequests) {
+            DispatchHaptic(request.event, request.controllerMask);
+        }
+    });
+    entityManager_->ForEach<InputComponent>([&](EntityID, InputComponent& input) {
+        if (input.uiToggleRequested) {
+            uiVisible_ = !uiVisible_;
+            if (input.leftXPressedThisFrame) {
+                DispatchHaptic(HapticEvent::UiToggled, 1u << InputComponent::Left);
+            }
+            input.uiToggleRequested = false;
+        }
+    });
     transformSystem_->Update(*entityManager_);
     renderSystem_->Update(*entityManager_);
     environmentDepthSystem_->Update(*entityManager_, in);
     cameraLightEstimationSystem_->Update(*entityManager_, in, Focused);
     unlitGeometryRenderSystem_->Update(*entityManager_, in);
-    if (ui_) {
+    if (ui_ && uiVisible_) {
         ui_->HitTestDevices().clear();
         entityManager_->ForEach<InputComponent>([&](EntityID, InputComponent& input) {
             for (size_t handIndex = 0; handIndex < input.hands.size(); ++handIndex) {
@@ -276,7 +326,7 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 void TDGenPlayerApp::AppRenderFrame(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out)
 {
     OVRFW::XrApp::AppRenderFrame(in, out);
-    if (ui_) {
+    if (ui_ && uiVisible_) {
         ui_->Render(in, out);
     }
 }
@@ -295,6 +345,8 @@ void TDGenPlayerApp::Render(const OVRFW::ovrApplFrameIn &in, OVRFW::ovrRendererO
 
 void TDGenPlayerApp::SessionEnd()
 {
+    StopHaptics();
+    lastUpdateSeconds_ = 0.0;
     //xrInput_.Destroy();
     inputSystem_->SessionEnd(*entityManager_);
     cameraLightEstimationSystem_->SessionEnd(*entityManager_);
@@ -311,6 +363,7 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
     cameraLightEstimationSystem_->Shutdown(*entityManager_);
     renderSystem_->Shutdown(*entityManager_);
     transformSystem_->Shutdown(*entityManager_);
+    interactionSystem_->Shutdown(*entityManager_);
     inputSystem_->Shutdown(*entityManager_);
     audioSystem_->Shutdown(*entityManager_);
     frameLoaderSystem_->Shutdown(*entityManager_);
@@ -323,6 +376,7 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
     environmentDepthSystem_.reset();
     renderSystem_.reset();
     transformSystem_.reset();
+    interactionSystem_.reset();
     inputSystem_.reset();
     audioSystem_.reset();
     frameLoaderSystem_.reset();
@@ -330,6 +384,7 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
     coreSystem_.reset();
 
     entityManager_.reset(); // Calls delete and empties the unique_ptr.
+    hapticAction_ = XR_NULL_HANDLE;
     LOGI("ECS Systems Shutdown");
 
     curl_global_cleanup();
@@ -422,6 +477,51 @@ void TDGenPlayerApp::SelectDataset(const std::string& datasetId) {
         unlitGeometryRenderSystem_->Init(*entityManager_);
         if (uiStatusLabel_) {
             uiStatusLabel_->SetText("Load failed: %s", loader.errorMessage.c_str());
+        }
+    }
+}
+
+void TDGenPlayerApp::DispatchHaptic(HapticEvent event, uint8_t controllerMask) {
+    if (!Focused || GetSession() == XR_NULL_HANDLE || hapticAction_ == XR_NULL_HANDLE ||
+        controllerMask == 0) return;
+
+    float durationSeconds = 0.025f;
+    float amplitude = 0.25f;
+    switch (event) {
+        case HapticEvent::GrabAccepted: durationSeconds = 0.035f; amplitude = 0.30f; break;
+        case HapticEvent::TwoHandStarted: durationSeconds = 0.050f; amplitude = 0.45f; break;
+        case HapticEvent::GrabReleased: durationSeconds = 0.020f; amplitude = 0.18f; break;
+        case HapticEvent::ScaleLimitReached: durationSeconds = 0.070f; amplitude = 0.65f; break;
+        case HapticEvent::UiToggled: durationSeconds = 0.030f; amplitude = 0.32f; break;
+    }
+
+    XrHapticVibration vibration{XR_TYPE_HAPTIC_VIBRATION};
+    vibration.duration = ToXrTime(durationSeconds);
+    vibration.frequency = XR_FREQUENCY_UNSPECIFIED;
+    vibration.amplitude = amplitude;
+    const XrPath paths[2] = {LeftHandPath, RightHandPath};
+    for (size_t side = 0; side < 2; ++side) {
+        if ((controllerMask & (1u << side)) == 0) continue;
+        XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+        info.action = hapticAction_;
+        info.subactionPath = paths[side];
+        const XrResult result = xrApplyHapticFeedback(
+                GetSession(), &info,
+                reinterpret_cast<const XrHapticBaseHeader*>(&vibration));
+        if (XR_FAILED(result)) LOGW("xrApplyHapticFeedback failed for side %zu: %d", side, result);
+    }
+}
+
+void TDGenPlayerApp::StopHaptics() {
+    if (GetSession() == XR_NULL_HANDLE || hapticAction_ == XR_NULL_HANDLE) return;
+    const XrPath paths[2] = {LeftHandPath, RightHandPath};
+    for (size_t side = 0; side < 2; ++side) {
+        XrHapticActionInfo info{XR_TYPE_HAPTIC_ACTION_INFO};
+        info.action = hapticAction_;
+        info.subactionPath = paths[side];
+        const XrResult result = xrStopHapticFeedback(GetSession(), &info);
+        if (XR_FAILED(result)) {
+            LOGW("xrStopHapticFeedback failed for side %zu: %d", side, result);
         }
     }
 }

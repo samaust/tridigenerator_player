@@ -13,6 +13,7 @@
 
 #include "../Components/FrameLoaderComponent.h"
 #include "../Components/TransformComponent.h"
+#include "../Components/InteractableComponent.h"
 #include "../Components/UnlitGeometryRenderComponent.h"
 
 #include "../States/TransformState.h"
@@ -36,7 +37,8 @@ public:
             const VideoFrame& frame,
             TransformComponent& transform,
             TransformState& transformState,
-            UnlitGeometryRenderState& renderState);
+            UnlitGeometryRenderState& renderState,
+            InteractableComponent& interactable);
     void UpdateDepthScaleFactor(FrameLoaderComponent &flC, UnlitGeometryRenderState &ugrS);
     void UpdateTextures(
             UnlitGeometryRenderComponent &ugrC,

@@ -180,6 +180,10 @@ void InputSystem::Update(EntityManager& ecs, const OVRFW::ovrApplFrameIn& in) {
         input.lastButtons = in.LastFrameAllButtons;
         input.touches = in.AllTouches;
         input.lastTouches = in.LastFrameAllTouches;
+        input.leftXPressedThisFrame =
+                (input.buttons & OVRFW::ovrApplFrameIn::kButtonX) != 0 &&
+                (input.lastButtons & OVRFW::ovrApplFrameIn::kButtonX) == 0;
+        input.uiToggleRequested = input.leftXPressedThisFrame;
 
         input.controllers[InputComponent::Left] = {
                 in.LeftRemoteTracked,
@@ -199,11 +203,23 @@ void InputSystem::Update(EntityManager& ecs, const OVRFW::ovrApplFrameIn& in) {
                 in.RightRemoteIndexClick};
 
         for (size_t handIndex = 0; handIndex < kHandCount; ++handIndex) {
+            ControllerInput& controller = input.controllers[handIndex];
+            controller.gripPressed = controller.gripTrigger >= 0.55f;
+            controller.gripPressedThisFrame =
+                    controller.gripPressed && !state.previousGrip[handIndex];
+            controller.gripReleasedThisFrame =
+                    !controller.gripPressed && state.previousGrip[handIndex];
+            state.previousGrip[handIndex] = controller.gripPressed;
+        }
+
+        for (size_t handIndex = 0; handIndex < kHandCount; ++handIndex) {
             HandInput& hand = input.hands[handIndex];
             state.previousPinch[handIndex] = hand.indexPinching;
             hand.active = false;
             hand.aimValid = false;
             hand.indexPinching = false;
+            hand.pinchPressedThisFrame = false;
+            hand.pinchReleasedThisFrame = false;
 
             if (!state.sessionInitialized || !core.supportsHandTracking ||
                 !coreState.xrLocateHandJointsEXT_ ||
@@ -232,6 +248,7 @@ void InputSystem::Update(EntityManager& ecs, const OVRFW::ovrApplFrameIn& in) {
             if (!hand.active) {
                 continue;
             }
+            hand.palmPose = ToOvrPose(hand.joints[XR_HAND_JOINT_PALM_EXT].pose);
 
             if (core.supportsHandTrackingAim &&
                 (aimState.status & XR_HAND_TRACKING_AIM_VALID_BIT_FB) != 0) {
@@ -240,6 +257,10 @@ void InputSystem::Update(EntityManager& ecs, const OVRFW::ovrApplFrameIn& in) {
                 hand.indexPinching =
                         (aimState.status & XR_HAND_TRACKING_AIM_INDEX_PINCHING_BIT_FB) != 0;
             }
+            hand.pinchPressedThisFrame =
+                    hand.indexPinching && !state.previousPinch[handIndex];
+            hand.pinchReleasedThisFrame =
+                    !hand.indexPinching && state.previousPinch[handIndex];
 
             if (state.handRendererInitialized[handIndex]) {
                 state.handRenderers[handIndex].Update(hand.joints.data());

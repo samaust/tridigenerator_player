@@ -12,11 +12,13 @@
 #include "../Systems/FrameLoaderSystem.h"
 #include "../Systems/AudioSystem.h"
 #include "../Systems/InputSystem.h"
+#include "../Systems/InteractionSystem.h"
 #include "../Systems/TransformSystem.h"
 #include "../Systems/RenderSystem.h"
 #include "../Systems/EnvironmentDepthSystem.h"
 #include "../Systems/CameraLightEstimationSystem.h"
 #include "../Systems/UnlitGeometryRenderSystem.h"
+#include "../States/InteractionState.h"
 
 namespace OVRFW {
 class TinyUI;
@@ -40,6 +42,7 @@ private:
     std::unique_ptr<FrameLoaderSystem> frameLoaderSystem_;
     std::unique_ptr<AudioSystem> audioSystem_;
     std::unique_ptr<InputSystem> inputSystem_;
+    std::unique_ptr<InteractionSystem> interactionSystem_;
     std::unique_ptr<TransformSystem> transformSystem_;
     std::unique_ptr<RenderSystem> renderSystem_;
     std::unique_ptr<EnvironmentDepthSystem> environmentDepthSystem_;
@@ -50,17 +53,24 @@ private:
     std::array<bool, 256> maskToggleValues_{};
     UiMode pendingUiMode_ = UiMode::Datasets;
     bool uiRebuildPending_ = false;
+    bool uiVisible_ = true;
+    double lastUpdateSeconds_ = 0.0;
     EntityID objectEntity_ = 0;
+    XrAction hapticAction_ = XR_NULL_HANDLE;
 
     void ShutdownUi();
     void BuildDatasetPicker();
     void BuildMaskSelector();
     void RequestUiMode(UiMode mode);
     void SelectDataset(const std::string& datasetId);
+    void DispatchHaptic(HapticEvent event, uint8_t controllerMask);
+    void StopHaptics();
 
     // XRInputActions xrInput_;   // action set instance (init in SessionInit)
 
     virtual std::vector<const char *> GetExtensions() override;
+    virtual std::unordered_map<XrPath, std::vector<XrActionSuggestedBinding>>
+        GetSuggestedBindings(XrInstance instance) override;
     virtual bool AppInit(const xrJava *context) override;
     virtual bool SessionInit() override;
     virtual void Update(const OVRFW::ovrApplFrameIn &in) override;

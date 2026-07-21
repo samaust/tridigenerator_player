@@ -34,10 +34,19 @@ void TransformSystem::SetScale(TransformComponent &tC,
 void TransformSystem::SetModelMatrix(TransformComponent &tC,
                                      TransformState &tS) {
     tC.modelPose.Rotation.Normalize();
-    tS.modelMatrix = OVR::Matrix4f(tC.modelPose) * OVR::Matrix4f::Scaling(tC.modelScale);
+    tS.modelMatrix = OVR::Matrix4f(tC.modelPose) * tS.animationMatrix *
+            OVR::Matrix4f::Scaling(tC.modelScale);
+}
+
+void TransformSystem::Refresh(TransformComponent& tC, TransformState& tS) {
+    SetModelMatrix(tC, tS);
 }
 
 bool TransformSystem::Init(EntityManager& ecs) {
+    ecs.ForEachMulti<TransformComponent, TransformState>(
+            [](EntityID, TransformComponent& component, TransformState& state) {
+        Refresh(component, state);
+    });
     return true;
 }
 

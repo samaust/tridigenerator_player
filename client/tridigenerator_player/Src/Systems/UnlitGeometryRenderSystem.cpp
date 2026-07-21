@@ -35,6 +35,7 @@
 #include "../Core/Logging.h"
 
 #include <algorithm>
+#include <cfloat>
 
 #include "UnlitGeometryRenderSystem.h"
 
@@ -46,6 +47,7 @@
 #include "../Systems/TransformSystem.h"
 
 #include "../Components/TransformComponent.h"
+#include "../Components/InteractableComponent.h"
 
 #include "../States/EnvironmentDepthState.h"
 #include "../States/CameraLightEstimationState.h"
@@ -217,6 +219,7 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                      TransformState,
                      FrameLoaderComponent,
                      FrameLoaderState,
+                     InteractableComponent,
                      UnlitGeometryRenderComponent,
                      UnlitGeometryRenderState>(
         [&](EntityID e,
@@ -224,6 +227,7 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                  TransformState &tS,
                  FrameLoaderComponent &flC,
                  FrameLoaderState &flS,
+                 InteractableComponent& interactable,
                  UnlitGeometryRenderComponent &ugrC,
                  UnlitGeometryRenderState &ugrS) {
         UpdateEnvironmentDepthUniforms(ugrC, ugrS, environmentDepthState);
@@ -262,7 +266,7 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
             //LOGI("Update textures with new frame");
             // A new frame is available, so update textures and matrices.
             const VideoFrame& frame = **flS.framePtr;
-            UpdateFrameGeometry(flC, frame, tC, tS, ugrS);
+            UpdateFrameGeometry(flC, frame, tC, tS, ugrS, interactable);
             UpdateTextures(ugrC, flS.framePtr, ugrS);
 
             // Consume the flag by setting it back to false.
@@ -438,7 +442,8 @@ void UnlitGeometryRenderSystem::UpdateFrameGeometry(
     const VideoFrame& frame,
     TransformComponent& transform,
     TransformState& transformState,
-    UnlitGeometryRenderState& renderState) {
+    UnlitGeometryRenderState& renderState,
+    InteractableComponent& interactable) {
     if (frame.frameIndex < 0 || frame.frameIndex >= static_cast<int>(flC.dataset.frames.size())) {
         LOGE("Decoded frame index %d is outside manifest metadata", frame.frameIndex);
         return;
@@ -453,12 +458,44 @@ void UnlitGeometryRenderSystem::UpdateFrameGeometry(
         relative[4], relative[5], relative[6], relative[7],
         relative[8], relative[9], relative[10], relative[11],
         relative[12], relative[13], relative[14], relative[15]);
-    transformState.modelMatrix = pose * OVR::Matrix4f::Scaling(transform.modelScale);
+    transformState.animationMatrix = pose;
+    TransformSystem::Refresh(transform, transformState);
     renderState.intrinsics_ = OVR::Vector4f(
         metadata.intrinsics[0], metadata.intrinsics[1],
         metadata.intrinsics[2], metadata.intrinsics[3]);
     renderState.imageSize_ = OVR::Vector2f(
         static_cast<float>(flC.width), static_cast<float>(flC.height));
+
+    interactable.boundsValid = false;
+    if (frame.textureDepthWidth > 0 && frame.textureDepthHeight > 0 &&
+        frame.textureDepthData.size() >=
+            static_cast<size_t>(frame.textureDepthWidth) * frame.textureDepthHeight) {
+        OVR::Vector3f minimum(FLT_MAX, FLT_MAX, FLT_MAX);
+        OVR::Vector3f maximum(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+        for (uint32_t y = 0; y < frame.textureDepthHeight; ++y) {
+            for (uint32_t x = 0; x < frame.textureDepthWidth; ++x) {
+                const uint16_t encoded = frame.textureDepthData[
+                        static_cast<size_t>(y) * frame.textureDepthWidth + x];
+                if (encoded == flC.dataset.invalidDepthValue) continue;
+                const float z = static_cast<float>(encoded) / flC.dataset.depthUnitsPerMetre;
+                const OVR::Vector3f point(
+                        (static_cast<float>(x) - metadata.intrinsics[2]) * z / metadata.intrinsics[0],
+                        -(static_cast<float>(y) - metadata.intrinsics[3]) * z / metadata.intrinsics[1],
+                        -z);
+                minimum.x = std::min(minimum.x, point.x);
+                minimum.y = std::min(minimum.y, point.y);
+                minimum.z = std::min(minimum.z, point.z);
+                maximum.x = std::max(maximum.x, point.x);
+                maximum.y = std::max(maximum.y, point.y);
+                maximum.z = std::max(maximum.z, point.z);
+                interactable.boundsValid = true;
+            }
+        }
+        if (interactable.boundsValid) {
+            interactable.localBoundsMin = minimum;
+            interactable.localBoundsMax = maximum;
+        }
+    }
     for (int i = 0; i < 2; ++i) {
         renderState.surfaceDefs_[i].graphicsCommand.UniformData[6].Data = &renderState.intrinsics_;
         renderState.surfaceDefs_[i].graphicsCommand.UniformData[7].Data = &renderState.imageSize_;

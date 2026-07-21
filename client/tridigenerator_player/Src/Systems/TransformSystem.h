@@ -16,6 +16,7 @@ public:
     static void SetScale(TransformComponent &tC,
                          TransformState &tS,
                          OVR::Vector3f newScale);
+    static void Refresh(TransformComponent& tC, TransformState& tS);
 
     bool Init(EntityManager& ecs);
     void Shutdown(EntityManager& ecs);
