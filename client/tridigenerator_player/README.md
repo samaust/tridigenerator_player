@@ -220,7 +220,7 @@ The application declares these permissions in `Projects/Android/AndroidManifest.
 |---|---|---|
 | `com.oculus.permission.USE_SCENE` | Yes | Provides scene access needed by the environment-depth integration. `MainActivity` requests it at startup and closes the application if it is denied. |
 | `horizonos.permission.HEADSET_CAMERA` | No | Provides headset RGB camera frames for camera-based color and exposure matching. `MainActivity` requests it at startup; if it is denied, playback continues with color matching disabled. |
-| `com.oculus.permission.HAND_TRACKING` | No | Enables tracked-hand poses, rendering, aim rays, and pinch selection in the dataset picker. Touch controllers remain available when hand tracking is unavailable. |
+| `com.oculus.permission.HAND_TRACKING` | No | Enables tracked-hand poses, rendering, aim rays, and pinch selection in the dataset and mask panels. Touch controllers remain available when hand tracking is unavailable. |
 | `android.permission.INTERNET` | Yes | Downloads `/catalog.json`, ViPE manifests, and video data from the configured HTTP server. This is a normal install-time Android permission and does not display a runtime prompt. |
 
 Passthrough is declared as a required device feature rather than an Android permission. The
@@ -259,13 +259,20 @@ schema-v1 manifest fields.
 
 ### Input controls
 
-The in-world panel is the dataset picker. With Touch controllers, point either controller's aim
-ray at a dataset button and squeeze its index trigger to select it. The trigger becomes active
-after it passes the application's halfway threshold. With hand tracking, point either hand at a
-button and pinch the index finger and thumb to select it. Either hand can interact; an actively
-tracked hand takes precedence over the controller on the same side. Hand tracking is optional,
-and the picker remains fully usable with Touch controllers. The Android implementation does not
-currently assign locomotion, playback, mask, grip, face-button, or thumbstick actions.
+The in-world panel initially shows the masks for the automatically loaded dataset. Every uint8
+mask ID, including background ID 0 and IDs not listed in the manifest, starts visible. Each
+manifest-labeled mask has a `Visible`/`Hidden` toggle; selecting another dataset resets all masks
+to visible. Use `Back to datasets` to replace the mask panel with the dataset picker. The current
+video and mask choices continue rendering while the picker is open, until another dataset is
+selected.
+
+With Touch controllers, point either controller's aim ray at a button and squeeze its index
+trigger to select it. The trigger becomes active after it passes the application's halfway
+threshold. With hand tracking, point either hand at a button and pinch the index finger and thumb
+to select it. Either hand can interact; an actively tracked hand takes precedence over the
+controller on the same side. Hand tracking is optional, and both panels remain fully usable with
+Touch controllers. The Android implementation does not currently assign locomotion, playback,
+grip, face-button, or thumbstick actions.
 
 ### Troubleshooting
 

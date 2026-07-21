@@ -1,6 +1,6 @@
 #include "LinuxOpenXrBackend.h"
 #include "LinuxStereo.h"
-#include "MaskVisibility.h"
+#include "Data/MaskVisibility.h"
 
 #include "Data/VipeDataset.h"
 #include "Videos/WebmInMemoryDemuxer.h"

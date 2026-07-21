@@ -96,7 +96,7 @@ struct ovrProgramParm {
 
 struct ovrUniform {
     // can be made as high as 16
-    static const int MAX_UNIFORMS = 16;
+    static const int MAX_UNIFORMS = 24;
 
     ovrUniform() : Location(-1), Binding(-1), Type(ovrProgramParmType::MAX) {}
 

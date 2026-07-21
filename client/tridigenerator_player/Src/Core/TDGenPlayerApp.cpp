@@ -182,7 +182,14 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     cameraLightEstimationSystem_->Init(*entityManager_);
     unlitGeometryRenderSystem_->Init(*entityManager_);
 
-    BuildDatasetPicker();
+    auto& initialLoader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+    if (!initialLoader.selectedDatasetId.empty() && initialLoader.errorMessage.empty()) {
+        auto& render = entityManager_->GetComponent<UnlitGeometryRenderComponent>(objectEntity_);
+        render.maskVisibility_.Reset(initialLoader.dataset.maskLabels);
+        BuildMaskSelector();
+    } else {
+        BuildDatasetPicker();
+    }
 
     return true;
 }
@@ -237,34 +244,40 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     environmentDepthSystem_->Update(*entityManager_, in);
     cameraLightEstimationSystem_->Update(*entityManager_, in, Focused);
     unlitGeometryRenderSystem_->Update(*entityManager_, in);
-    if (datasetUi_) {
-        datasetUi_->HitTestDevices().clear();
+    if (ui_) {
+        ui_->HitTestDevices().clear();
         entityManager_->ForEach<InputComponent>([&](EntityID, InputComponent& input) {
             for (size_t handIndex = 0; handIndex < input.hands.size(); ++handIndex) {
                 const HandInput& hand = input.hands[handIndex];
                 const ControllerInput& controller = input.controllers[handIndex];
                 if (hand.active && hand.aimValid) {
-                    datasetUi_->AddHitTestRay(
+                    ui_->AddHitTestRay(
                             hand.aimPose,
                             hand.indexPinching,
                             static_cast<int>(handIndex));
                 } else if (controller.tracked) {
-                    datasetUi_->AddHitTestRay(
+                    ui_->AddHitTestRay(
                             controller.aimPose,
                             controller.indexTrigger > 0.5f,
                             static_cast<int>(handIndex));
                 }
             }
         });
-        datasetUi_->Update(in);
+        ui_->Update(in);
+        if (uiRebuildPending_) {
+            const UiMode nextMode = pendingUiMode_;
+            uiRebuildPending_ = false;
+            if (nextMode == UiMode::Masks) BuildMaskSelector();
+            else BuildDatasetPicker();
+        }
     }
 }
 
 void TDGenPlayerApp::AppRenderFrame(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out)
 {
     OVRFW::XrApp::AppRenderFrame(in, out);
-    if (datasetUi_) {
-        datasetUi_->Render(in, out);
+    if (ui_) {
+        ui_->Render(in, out);
     }
 }
 
@@ -291,11 +304,7 @@ void TDGenPlayerApp::SessionEnd()
 
 void TDGenPlayerApp::AppShutdown(const xrJava *context)
 {
-    if (datasetUi_) {
-        datasetUi_->Shutdown();
-        datasetUi_.reset();
-        datasetStatusLabel_ = nullptr;
-    }
+    ShutdownUi();
     // Explicitly destroy the systems and entity manager.
     // This is good practice to control the shutdown order.
     unlitGeometryRenderSystem_->Shutdown(*entityManager_);
@@ -328,26 +337,75 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
     OVRFW::XrApp::AppShutdown(context);
 }
 
+void TDGenPlayerApp::ShutdownUi() {
+    if (ui_) {
+        ui_->Shutdown();
+        ui_.reset();
+    }
+    uiStatusLabel_ = nullptr;
+}
+
 void TDGenPlayerApp::BuildDatasetPicker() {
-    datasetUi_ = std::make_unique<OVRFW::TinyUI>();
-    if (!datasetUi_->Init(GetContext(), GetFileSys())) {
+    ShutdownUi();
+    ui_ = std::make_unique<OVRFW::TinyUI>();
+    if (!ui_->Init(GetContext(), GetFileSys())) {
         LOGE("Failed to initialize dataset picker UI");
-        datasetUi_.reset();
+        ui_.reset();
         return;
     }
-    datasetStatusLabel_ = datasetUi_->AddLabel("ViPE datasets", {0.0f, 0.35f, -1.5f}, {500.0f, 70.0f});
+    uiStatusLabel_ = ui_->AddLabel("ViPE datasets", {0.0f, 0.35f, -1.5f}, {500.0f, 70.0f});
     auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
     float y = 0.20f;
     for (const VipeCatalogEntry& entry : loader.catalog.datasets) {
         const std::string id = entry.id;
-        datasetUi_->AddButton(entry.displayName, {0.0f, y, -1.5f}, {500.0f, 70.0f},
+        ui_->AddButton(entry.displayName, {0.0f, y, -1.5f}, {500.0f, 70.0f},
             [this, id]() { SelectDataset(id); });
         y -= 0.12f;
     }
-    if (loader.catalog.datasets.empty() && datasetStatusLabel_) {
+    if (loader.catalog.datasets.empty() && uiStatusLabel_) {
         const std::string status = loader.errorMessage.empty() ? "No datasets" : loader.errorMessage;
-        datasetStatusLabel_->SetText("%s", status.c_str());
+        uiStatusLabel_->SetText("%s", status.c_str());
     }
+}
+
+void TDGenPlayerApp::BuildMaskSelector() {
+    ShutdownUi();
+    ui_ = std::make_unique<OVRFW::TinyUI>();
+    if (!ui_->Init(GetContext(), GetFileSys())) {
+        LOGE("Failed to initialize mask selector UI");
+        ui_.reset();
+        return;
+    }
+
+    auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+    auto& render = entityManager_->GetComponent<UnlitGeometryRenderComponent>(objectEntity_);
+    ui_->AddLabel("Masks: " + loader.selectedDatasetId,
+        {0.0f, 0.42f, -1.5f}, {620.0f, 60.0f});
+    ui_->AddButton("Back to datasets", {0.0f, 0.31f, -1.5f}, {620.0f, 60.0f},
+        [this]() { RequestUiMode(UiMode::Datasets); });
+
+    for (int id = 0; id < 256; ++id) {
+        maskToggleValues_[static_cast<size_t>(id)] =
+            render.maskVisibility_.IsVisible(static_cast<uint8_t>(id));
+    }
+    float y = 0.20f;
+    for (const MaskVisibilityEntry& entry : render.maskVisibility_.Entries()) {
+        const uint8_t id = entry.id;
+        const std::string suffix = std::to_string(static_cast<unsigned int>(id)) +
+            " - " + entry.label;
+        ui_->AddToggleButton("Visible: " + suffix, "Hidden: " + suffix,
+            &maskToggleValues_[id], {0.0f, y, -1.5f}, {620.0f, 60.0f},
+            [this, id]() {
+                auto& component = entityManager_->GetComponent<UnlitGeometryRenderComponent>(objectEntity_);
+                component.maskVisibility_.SetVisible(id, maskToggleValues_[id]);
+            });
+        y -= 0.10f;
+    }
+}
+
+void TDGenPlayerApp::RequestUiMode(UiMode mode) {
+    pendingUiMode_ = mode;
+    uiRebuildPending_ = true;
 }
 
 void TDGenPlayerApp::SelectDataset(const std::string& datasetId) {
@@ -356,12 +414,14 @@ void TDGenPlayerApp::SelectDataset(const std::string& datasetId) {
     unlitGeometryRenderSystem_->Shutdown(*entityManager_);
     const bool selected = frameLoaderSystem_->SelectDataset(datasetId, loader, loaderState);
     if (selected) {
+        auto& render = entityManager_->GetComponent<UnlitGeometryRenderComponent>(objectEntity_);
+        render.maskVisibility_.Reset(loader.dataset.maskLabels);
         unlitGeometryRenderSystem_->Init(*entityManager_);
-        if (datasetStatusLabel_) datasetStatusLabel_->SetText("Loaded: %s", datasetId.c_str());
+        RequestUiMode(UiMode::Masks);
     } else {
         unlitGeometryRenderSystem_->Init(*entityManager_);
-        if (datasetStatusLabel_) {
-            datasetStatusLabel_->SetText("Load failed: %s", loader.errorMessage.c_str());
+        if (uiStatusLabel_) {
+            uiStatusLabel_->SetText("Load failed: %s", loader.errorMessage.c_str());
         }
     }
 }

@@ -1,4 +1,6 @@
 #pragma once
+#include <array>
+
 #include <GLES3/gl3.h>
 
 #include "XrApp.h"
@@ -29,6 +31,8 @@ public:
     virtual ~TDGenPlayerApp();
 
 private:
+    enum class UiMode { Datasets, Masks };
+
     std::unique_ptr<EntityManager> entityManager_;
 
     std::unique_ptr<CoreSystem> coreSystem_;
@@ -41,11 +45,17 @@ private:
     std::unique_ptr<EnvironmentDepthSystem> environmentDepthSystem_;
     std::unique_ptr<CameraLightEstimationSystem> cameraLightEstimationSystem_;
     std::unique_ptr<UnlitGeometryRenderSystem> unlitGeometryRenderSystem_;
-    std::unique_ptr<OVRFW::TinyUI> datasetUi_;
-    OVRFW::VRMenuObject* datasetStatusLabel_ = nullptr;
+    std::unique_ptr<OVRFW::TinyUI> ui_;
+    OVRFW::VRMenuObject* uiStatusLabel_ = nullptr;
+    std::array<bool, 256> maskToggleValues_{};
+    UiMode pendingUiMode_ = UiMode::Datasets;
+    bool uiRebuildPending_ = false;
     EntityID objectEntity_ = 0;
 
+    void ShutdownUi();
     void BuildDatasetPicker();
+    void BuildMaskSelector();
+    void RequestUiMode(UiMode mode);
     void SelectDataset(const std::string& datasetId);
 
     // XRInputActions xrInput_;   // action set instance (init in SessionInit)

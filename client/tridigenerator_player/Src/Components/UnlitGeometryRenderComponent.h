@@ -5,6 +5,8 @@
 
 #include "OVR_Math.h"
 
+#include "../Data/MaskVisibility.h"
+
 // Texture indices for clarity
 enum TextureSlot {
     TEX_Y = 0,
@@ -23,7 +25,7 @@ struct UnlitGeometryRenderComponent {
             GL_R8,      // For TEX_Y
             GL_R8,      // For TEX_U
             GL_R8,      // For TEX_V
-            GL_R8,      // For TEX_ALPHA
+            GL_R8UI,    // For TEX_ALPHA (uint8 mask IDs)
             GL_R16UI,   // For TEX_DEPTH
             0,          // For TEX_ENV_DEPTH (external)
             0           // For TEX_LIGHT_FIELD (external)
@@ -42,4 +44,6 @@ struct UnlitGeometryRenderComponent {
     int softOcclusion_ = 1;
     float occlusionSoftness_ = 0.01f;
     float occlusionDepthBias_ = 0.0025f;
+
+    MaskVisibility maskVisibility_;
 };

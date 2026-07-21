@@ -73,8 +73,9 @@ using OVR::Vector4f;
  * @return true on successful initialization, false otherwise.
  */
 bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
-    ecs.ForEachMulti<UnlitGeometryRenderState, FrameLoaderComponent>(
+    ecs.ForEachMulti<UnlitGeometryRenderComponent, UnlitGeometryRenderState, FrameLoaderComponent>(
             [&](EntityID e,
+                     UnlitGeometryRenderComponent& ugrC,
                      UnlitGeometryRenderState& ugrS,
                      FrameLoaderComponent& flC) {
         // Create initial plane geometry and renderer
@@ -117,6 +118,7 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
                 {"u_environmentDepthTexelSize", OVRFW::ovrProgramParmType::FLOAT_VECTOR2},
                 {"u_lightField", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
                 {"u_lightParams", OVRFW::ovrProgramParmType::FLOAT_MATRIX4},
+                {"u_maskVisibility[0]", OVRFW::ovrProgramParmType::INT},
         };
 
         std::string programDefsLimited;
@@ -146,6 +148,8 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
             OVRFW::ovrGraphicsCommand &gc = ugrS.surfaceDefs_[i].graphicsCommand;
             gc.Program = ugrS.ProgramLimited_;
             gc.BindUniformTextures();
+            gc.UniformData[16].Data = ugrC.maskVisibility_.ShaderValues();
+            gc.UniformData[16].Count = 256;
 
             /// gpu state needs alpha blending
             gc.GpuState.depthEnable = gc.GpuState.depthMaskEnable = true;
@@ -400,8 +404,8 @@ OVRFW::GlTexture UnlitGeometryRenderSystem::CreateGlTexture(
     glGenTextures(1, &texId);
     glBindTexture(GL_TEXTURE_2D, texId);
 
-    if (internalformat == GL_R16UI) {
-        // Integer depth must not be interpolated.
+    if (internalformat == GL_R8UI || internalformat == GL_R16UI) {
+        // Integer mask and depth values must not be interpolated.
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     } else {
@@ -523,7 +527,7 @@ void UnlitGeometryRenderSystem::UpdateTextures(
                     (*framePtr)->textureVData.data(),
                     ugrC.texture_unpack_alignments_[TEX_V],
                     (*framePtr)->textureVStride);
-    UpdateGl8Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_ALPHA], GL_RED,
+    UpdateGl8Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_ALPHA], GL_RED_INTEGER,
                     (*framePtr)->textureAlphaData.data(),
                     ugrC.texture_unpack_alignments_[TEX_ALPHA],
                     (*framePtr)->textureAlphaStride);

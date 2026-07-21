@@ -283,7 +283,7 @@ ovrDrawCounters ovrSurfaceRender::RenderSurfaceList(
                             if (parmLocation >= 0 && cmd.UniformData[i].Data != NULL) {
                                 GL(glUniform1iv(
                                     parmLocation,
-                                    1,
+                                    cmd.UniformData[i].Count,
                                     static_cast<const int*>(cmd.UniformData[i].Data)));
                             }
                         } break;

@@ -56,8 +56,9 @@ static const char* UnlitGeometryFragmentShaderSrc = R"glsl(
 uniform sampler2D u_texY;
 uniform sampler2D u_texU;
 uniform sampler2D u_texV;
-	uniform sampler2D u_texAlpha;
+	uniform highp usampler2D u_texAlpha;
 	uniform highp usampler2D u_texDepth;
+	uniform highp int u_maskVisibility[256];
 	uniform lowp int u_hasEnvironmentDepth;
 	uniform highp vec4 u_occlusionParams; // soft-enabled, softness, bias, unused
 	uniform highp mat4 u_depthViewMatrix[NUM_VIEWS];
@@ -105,11 +106,9 @@ vec3 srgb_to_linear(vec3 c) {
 
 void main()
 {
-    // Get alpha value from its own texture
-    float alpha = texture(u_texAlpha, oTexCoord).r;
-
-    // Discard fragment if alpha is below a threshold
-    if (alpha <= 0.0 || texture(u_texDepth, oTexCoord).r == uint(0)) discard;
+    uint maskId = texture(u_texAlpha, oTexCoord).r;
+    if (u_maskVisibility[int(maskId)] == 0 ||
+        texture(u_texDepth, oTexCoord).r == uint(0)) discard;
 
 	// Get color value from YUV textures
 	float y = texture(u_texY, oTexCoord).r;

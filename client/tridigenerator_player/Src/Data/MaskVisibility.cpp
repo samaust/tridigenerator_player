@@ -2,8 +2,17 @@
 
 #include <algorithm>
 
-MaskVisibility::MaskVisibility(const std::unordered_map<uint8_t, std::string>& labels) {
+MaskVisibility::MaskVisibility() {
     ShowAll();
+}
+
+MaskVisibility::MaskVisibility(const std::unordered_map<uint8_t, std::string>& labels) {
+    Reset(labels);
+}
+
+void MaskVisibility::Reset(const std::unordered_map<uint8_t, std::string>& labels) {
+    ShowAll();
+    entries_.clear();
     entries_.reserve(labels.size());
     for (const auto& [id, label] : labels) entries_.push_back({id, label});
     std::sort(entries_.begin(), entries_.end(), [](const auto& left, const auto& right) {
