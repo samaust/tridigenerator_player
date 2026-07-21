@@ -58,6 +58,122 @@ doxygen Doxyfile
 The output directory is configured in `Doxyfile` (`Docs/html/`), so open the generated
 `index.html` in a browser to view the documentation.
 
+## ViPE encoded data format
+
+A ViPE encoded sequence consists of a schema-v1 JSON manifest and the Matroska (`.mkv`) file
+named by its `file` field. Keep both files together: the player resolves `file` relative to the
+manifest location. Android downloads them over HTTP, while Linux reads them from the local data
+directory.
+
+### Matroska stream contract
+
+The Matroska file contains exactly three synchronized video streams:
+
+| Index | Content | Codec | Pixel format | Value |
+|---:|---|---|---|---|
+| 0 | Color | AV1 | `yuv420p` | 8-bit YUV 4:2:0 color. |
+| 1 | Mask | FFV1 | `gray` | 8-bit label or visibility value. |
+| 2 | Depth | PNG | `gray16be` | Big-endian unsigned 16-bit linear depth. |
+
+All three streams must use the manifest's `width`, `height`, and rational `frame_rate`, and each
+must contain `frame_count` frames. For each output frame, the player decodes one color, mask, and
+depth frame as a synchronized set. Audio and additional video streams are not part of the
+schema-v1 contract.
+
+Inspect an encoded file with:
+
+```bash
+ffprobe -v error -count_frames \
+  -show_entries stream=index,codec_name,pix_fmt,width,height,avg_frame_rate,nb_read_frames \
+  -of compact=p=0:nk=0 vipe_encoded/dog-example.mkv
+```
+
+### JSON manifest
+
+This single-frame example shows the complete structure accepted by the player:
+
+```json
+{
+  "schema_version": 1,
+  "file": "example.mkv",
+  "sequence": "example",
+  "frame_count": 1,
+  "width": 1280,
+  "height": 720,
+  "frame_rate": {
+    "numerator": 2997,
+    "denominator": 100
+  },
+  "orientation_offset_degrees": {
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0
+  },
+  "streams": {
+    "color": {"index": 0, "codec": "av1", "pixel_format": "yuv420p"},
+    "mask": {"index": 1, "codec": "ffv1", "pixel_format": "gray"},
+    "depth": {"index": 2, "codec": "png", "pixel_format": "gray16be"}
+  },
+  "depth": {
+    "encoding": "uint16_linear",
+    "units": "metres",
+    "units_per_metre": 8507.586206896553,
+    "invalid_value": 0
+  },
+  "pose": {
+    "type": "camera_to_world",
+    "matrix_layout": "row_major",
+    "coordinate_convention": "opencv_x_right_y_down_z_forward",
+    "frame_indices": [0],
+    "matrices": [[
+      1.0, 0.0, 0.0, 0.0,
+      0.0, 1.0, 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0,
+      0.0, 0.0, 0.0, 1.0
+    ]]
+  },
+  "intrinsics": {
+    "frame_indices": [0],
+    "camera_models": ["PINHOLE"],
+    "values": [[989.2, 989.3, 640.0, 360.0]]
+  },
+  "mask_labels": {
+    "0": "background",
+    "2": "animal"
+  }
+}
+```
+
+The required identity and timing fields are `schema_version`, `file`, `sequence`, `frame_count`,
+`width`, `height`, and `frame_rate`. Only schema version 1 is supported. Dimensions and frame
+count must be positive, and both frame-rate values must be positive integers. The `streams`
+object must match the three fixed entries in the stream table. The `depth` object must specify
+`uint16_linear` encoding, `metres`, a positive finite `units_per_metre`, and a uint16
+`invalid_value`.
+
+Depth samples convert to metric distance as:
+
+```text
+depth_metres = encoded_value / units_per_metre
+```
+
+An encoded value equal to `invalid_value` (normally zero) has no valid depth. The required
+`pose` and `intrinsics` arrays must each have exactly `frame_count` entries, with contiguous,
+zero-based `frame_indices`. Every pose is a finite, rigid, row-major 4x4 camera-to-world matrix
+using OpenCV axes (+X right, +Y down, +Z forward). Each camera model must be `PINHOLE`, with
+intrinsics ordered `[fx, fy, cx, cy]` in pixels and positive focal lengths.
+
+`orientation_offset_degrees` is optional and defaults to zero rotation. It corrects a
+reconstruction's initial alignment: yaw rotates around OpenGL +Y, pitch around +X, and roll
+around +Z, with world-space composition order yaw, pitch, then roll. `mask_labels` is also
+optional; it maps uint8 keys written as JSON strings (`"0"` through `"255"`) to human-readable
+label names.
+
+The encoder also emits descriptive fields that the current player does not validate or consume:
+top-level `fps`; `depth_scale_factor`, `max_depth_metres`, `valid_source_pixels`, and
+`invalid_source_pixels` inside `depth`; and `layout` and `units` inside `intrinsics`. These values
+are useful for inspection, but the required fields above define playback behavior.
+
 ## Android Quest 3 build
 
 The Android target is an `arm64-v8a` OpenXR application for Quest 3. This workflow builds a
@@ -137,16 +253,9 @@ Android retains HTTP loading. The configured server must expose `/catalog.json`:
 }
 ```
 
-Each manifest's `file` is resolved relative to its manifest URL. The in-world picker uses
-controller aim rays and trigger clicks; hand tracking is not required.
-
-An optional `orientation_offset_degrees` manifest object corrects the reconstruction's
-initial alignment. `yaw` rotates around OpenGL +Y, `pitch` around +X, and `roll` around +Z;
-the world-space composition order is yaw, pitch, then roll. For example:
-
-```json
-"orientation_offset_degrees": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0}
-```
+Each manifest's `file` is resolved relative to its manifest URL. See
+[ViPE encoded data format](#vipe-encoded-data-format) for the Matroska stream contract and
+schema-v1 manifest fields.
 
 ### Input controls
 
