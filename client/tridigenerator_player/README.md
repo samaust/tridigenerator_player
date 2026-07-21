@@ -212,6 +212,26 @@ adb install -r build/outputs/apk/debug/tridigenerator_player-debug.apk
 adb shell am start -n io.github.samaust.tridigenerator_player/.MainActivity
 ```
 
+### On-device validation
+
+After launching the player on a Quest 3, verify the interaction paths before relying on them in
+a demo or test session:
+
+1. Point each Touch controller at the mesh, hold its grip control, and confirm that controller
+   translation and rotation move and rotate the mesh without snapping.
+2. While either controller is holding the mesh, move the right thumbstick up and down and confirm
+   that the mesh moves farther away and closer, respectively.
+3. Grab the mesh with both controllers, move the controllers together and apart, and confirm that
+   the mesh translates, rotates, and scales uniformly without exceeding `0.01x` or `100x`.
+4. Repeat the single- and two-hand interactions using index-finger pinches after switching to hand
+   tracking.
+5. Release one actor during a two-actor grab and confirm that the remaining actor continues with a
+   stable single grab. Hide or untrack an active actor and confirm that its grab is released.
+6. Press X on the left controller, then clap both tracked hands, and confirm that each action hides
+   or restores the current UI without resetting its screen or selections.
+7. Confirm that grab, release, two-controller, scale-limit, and X-button UI events vibrate the
+   expected left or right controller.
+
 ### Android permissions
 
 The application declares these permissions in `Projects/Android/AndroidManifest.xml`:
@@ -266,13 +286,38 @@ to visible. Use `Back to datasets` to replace the mask panel with the dataset pi
 video and mask choices continue rendering while the picker is open, until another dataset is
 selected.
 
-With Touch controllers, point either controller's aim ray at a button and squeeze its index
-trigger to select it. The trigger becomes active after it passes the application's halfway
-threshold. With hand tracking, point either hand at a button and pinch the index finger and thumb
-to select it. Either hand can interact; an actively tracked hand takes precedence over the
-controller on the same side. Hand tracking is optional, and both panels remain fully usable with
-Touch controllers. The Android implementation does not currently assign locomotion, playback,
-grip, face-button, or thumbstick actions.
+The Android build assigns these controller and hand-tracking controls:
+
+| Action | Touch controllers | Hand tracking |
+|---|---|---|
+| Select a UI control | Aim at it and squeeze the index trigger past the halfway threshold. | Aim at it and pinch the index finger and thumb. |
+| Start and hold a mesh grab | Aim at the mesh and hold the grip control. | Aim at the mesh and hold an index-finger pinch. |
+| Move and rotate the mesh | Translate or rotate the controller while holding the grab. | Move or rotate the tracked hand while holding the pinch. |
+| Adjust grab distance | Move the right thumbstick up to move farther away or down to move closer. This works regardless of which controller started the grab. | No direct hand-only distance control; the right controller thumbstick remains usable when available. |
+| Two-actor transform | Aim both controller rays at the mesh and hold both grips, then move the controllers to translate, rotate, and uniformly scale it. | Aim both hand rays at the mesh and hold both pinches, then move the hands to translate, rotate, and uniformly scale it. |
+| Toggle UI visibility | Press X on the left controller. | Bring both valid, mutually facing palms together in a deliberate clap. |
+
+Uniform mesh scale is clamped to `0.01x` through `100x`, where `1x` is the original size. Both
+rays must hit the mesh before a two-actor transform begins. Two controllers or two hands can be
+used together, but a mixed controller-and-hand pair cannot enter two-actor mode. Releasing one
+actor re-baselines the remaining actor as a stable single grab; releasing both, or losing the
+required tracking pose, ends the corresponding grab.
+
+An actively tracked hand takes precedence over the controller on the same side. Hand tracking is
+optional, and the UI and mesh remain usable with Touch controllers when it is unavailable. Clap
+detection is disabled while the mesh is being manipulated to prevent an interaction from
+unexpectedly hiding the UI. Locomotion and playback controls remain unassigned.
+
+### Haptics
+
+Touch controllers provide short vibration cues when a controller successfully grabs or releases
+the mesh, when a second controller starts a two-controller transform, and when scaling first
+reaches either limit. Pressing X to toggle the UI also vibrates the left controller. Two-controller
+events are routed to the participating controllers rather than broadcast to every device.
+
+Hand-only interactions and clap-based UI toggles do not produce haptic feedback. Haptic failures
+are non-fatal: mesh manipulation and UI controls continue working if the runtime or active device
+does not provide the requested vibration output.
 
 ### Troubleshooting
 
@@ -280,7 +325,24 @@ If `adb devices` reports `unauthorized`, reconnect the cable and accept the debu
 the headset. Gradle errors about missing SDK, NDK, CMake, or API 32 components indicate that the
 corresponding package must be installed with the Android SDK Manager. If the picker reports that
 it cannot load the catalog, confirm that the configured host and port are reachable from the
-Quest and that the server exposes `/catalog.json`; `adb logcat` provides additional diagnostics.
+Quest and that the server exposes `/catalog.json`.
+
+If a mesh grab does not begin, wait until a decoded mesh frame is visible, aim directly through
+the visible mesh, and start a new grip or pinch; selection requires a fresh press whose ray hits
+the current depth-derived bounds. If hands are not available, confirm that hand tracking is
+enabled in the headset, the optional hand-tracking permission is granted, and both palms or aim
+poses are visible to the headset cameras. If controller interaction works without vibration,
+make sure the application is focused and test each Touch controller independently; unsupported
+haptics do not block input. For clap toggles, first separate both hands, face the palms toward one
+another, and bring them together deliberately while no mesh grab is active. Keep idle hands
+separated if unintended clap toggles occur.
+
+Use `adb logcat` to inspect native input, hand-tracking, OpenXR, haptic, and loading diagnostics
+while reproducing an issue:
+
+```bash
+adb logcat | grep -E 'TDGenPlayerApp|InputSystem|OpenXR|FrameLoader'
+```
 
 ## Linux desktop build
 
