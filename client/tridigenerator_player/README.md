@@ -243,8 +243,8 @@ a demo or test session:
    translation and rotation move and rotate the mesh without snapping.
 2. While either controller is holding the mesh, move the right thumbstick up and down and confirm
    that the mesh moves farther away and closer, respectively.
-3. Grab the mesh with both controllers, move the controllers together and apart, and confirm that
-   the mesh translates, rotates, and scales uniformly without exceeding `0.01x` or `100x`.
+3. Grab the mesh with both controllers and confirm that it translates and rotates but does not
+   scale while the default scale lock is enabled.
 4. Repeat the single- and two-hand interactions using index-finger pinches after switching to hand
    tracking.
 5. Release one actor during a two-actor grab and confirm that the remaining actor continues with a
@@ -260,6 +260,10 @@ a demo or test session:
    pinch. Confirm color, mask, depth, pose, and intrinsics remain frozen until selecting `▶`.
 10. Hide the UI and press A on the right controller to pause and resume. Restore the UI and confirm
     the icon matches playback state. Pause again, select another dataset, and confirm it resumes.
+11. Open `Mesh scale` from both the dataset and mask screens. Unlock scale, use `−`/`+`, and confirm
+    the numeric display changes logarithmically across `0.01×–100×`. Reset to `1×`, then confirm
+    controller and hand two-actor gestures update the displayed scale. Lock scale again and confirm
+    the gestures still translate and rotate without changing scale.
 
 ### Android permissions
 
@@ -327,13 +331,21 @@ The Android build assigns these controller and hand-tracking controls:
 | Start and hold a mesh grab | Aim at the mesh and hold the grip control. | Aim at the mesh and hold an index-finger pinch. |
 | Move and rotate the mesh | Translate or rotate the controller while holding the grab. | Move or rotate the tracked hand while holding the pinch. |
 | Adjust grab distance | Move the right thumbstick up to move farther away or down to move closer. This works regardless of which controller started the grab. | No direct hand-only distance control; the right controller thumbstick remains usable when available. |
-| Two-actor transform | Aim both controller rays at the mesh and hold both grips, then move the controllers to translate, rotate, and uniformly scale it. | Aim both hand rays at the mesh and hold both pinches, then move the hands to translate, rotate, and uniformly scale it. |
+| Two-actor transform | Aim both controller rays at the mesh and hold both grips, then move the controllers to translate and rotate it; unlock scale to also resize it uniformly. | Aim both hand rays at the mesh and hold both pinches; unlock scale to enable uniform resizing. |
+| Edit mesh scale | Open `Mesh scale`, unlock scale, then select `−` or `+`; Reset remains available while locked. | Use the same screen with aim and pinch. |
 | Toggle UI visibility | Press X on the left controller. | Bring both valid, mutually facing palms together in a deliberate clap. |
 | Pause or resume playback | Press A at any time, or select the centered `⏸`/`▶` control in the bottom bar while the UI is visible. | Aim at the bottom `⏸`/`▶` control and pinch while the UI is visible. |
 | Select color-matching tier | Open `Color matching`, aim at an available Disabled, Global, or Spatial row, and press the index trigger. | Open `Color matching`, aim at an available tier, and pinch the index finger and thumb. |
 | Edit color-matching settings | Select `Edit settings`, then use the `-`, value, and `+` controls. Select Save on the overview to persist the preview. | Use the same controls with an aim pinch; leaving the overview without Save restores the prior values. |
 
-Uniform mesh scale is clamped to `0.01x` through `100x`, where `1x` is the original size. Both
+Uniform mesh scale is clamped to `0.01×` through `100×`, where `1×` is the original size. It starts
+locked on every application launch. The `Mesh scale` screen displays the live numeric value and
+uses logarithmic steps of `0.025` decades (approximately 5.9 percent per press). Locking disables
+gesture and slider scaling but preserves two-actor translation and rotation; Reset remains an
+explicit override and sets the scale to `1×`. Scale and lock state remain session-local across
+dataset changes.
+
+Both
 rays must hit the mesh before a two-actor transform begins. Two controllers or two hands can be
 used together, but a mixed controller-and-hand pair cannot enter two-actor mode. Releasing one
 actor re-baselines the remaining actor as a stable single grab; releasing both, or losing the

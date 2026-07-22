@@ -8,4 +8,5 @@ public:
     void Shutdown(EntityManager& ecs);
     void Update(EntityManager& ecs, float deltaSeconds);
     bool IsManipulating(EntityManager& ecs) const;
+    void CancelManipulation(EntityManager& ecs);
 };

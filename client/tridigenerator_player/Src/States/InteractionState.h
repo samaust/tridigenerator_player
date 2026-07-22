@@ -32,5 +32,6 @@ struct InteractionState {
     OVR::Vector3f initialMidpoint{};
     OVR::Vector3f initialVector{};
     bool scaleLimitLatched{false};
+    bool scaleLockedAtBaseline{true};
     std::vector<HapticRequest> hapticRequests{};
 };

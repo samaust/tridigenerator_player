@@ -35,7 +35,7 @@ public:
     virtual ~TDGenPlayerApp();
 
 private:
-    enum class UiMode { Datasets, Masks, ColorMatching, ColorMatchingSettings };
+    enum class UiMode { Datasets, Masks, ColorMatching, ColorMatchingSettings, MeshScale };
 
     std::unique_ptr<EntityManager> entityManager_;
 
@@ -54,10 +54,13 @@ private:
     std::unique_ptr<OVRFW::TinyUI> playbackUi_;
     OVRFW::VRMenuObject* uiStatusLabel_ = nullptr;
     OVRFW::VRMenuObject* playbackButton_ = nullptr;
+    OVRFW::VRMenuObject* meshScaleValueLabel_ = nullptr;
+    OVRFW::VRMenuObject* meshScaleCurrentLabel_ = nullptr;
     std::array<bool, 256> maskToggleValues_{};
     UiMode pendingUiMode_ = UiMode::Datasets;
     UiMode currentUiMode_ = UiMode::Datasets;
     UiMode colorMatchingReturnMode_ = UiMode::Masks;
+    UiMode meshScaleReturnMode_ = UiMode::Masks;
     bool uiRebuildPending_ = false;
     bool colorMatchingUiSnapshotValid_ = false;
     ColorMatchingTier colorMatchingUiRequested_ = ColorMatchingTier::Spatial;
@@ -70,6 +73,9 @@ private:
     std::string colorMatchingSettingsDatasetId_;
     std::string colorMatchingSettingsMessage_;
     bool colorMatchingEditActive_ = false;
+    bool meshScaleLockUiValue_ = true;
+    bool meshScaleUiLockedSnapshot_ = true;
+    float meshScaleUiValueSnapshot_ = -1.0f;
     bool uiVisible_ = true;
     double lastUpdateSeconds_ = 0.0;
     EntityID objectEntity_ = 0;
@@ -82,6 +88,12 @@ private:
     void RefreshPlaybackControls();
     void BuildDatasetPicker();
     void BuildMaskSelector();
+    void BuildMeshScaleControls();
+    void OpenMeshScaleControls(UiMode returnMode);
+    void RefreshMeshScaleUi();
+    void SetMeshScale(float scale);
+    void StepMeshScale(int direction);
+    void ResetMeshScale();
     void BuildColorMatchingControls();
     void BuildColorMatchingSettingsControls();
     void OpenColorMatchingControls(UiMode returnMode);

@@ -11,6 +11,7 @@
 #include "../States/InteractionState.h"
 #include "../States/TransformState.h"
 #include "TransformSystem.h"
+#include "ScaleControl.h"
 
 namespace {
 constexpr float kStickDeadZone = 0.18f;
@@ -128,6 +129,15 @@ bool InteractionSystem::IsManipulating(EntityManager& ecs) const {
     return manipulating;
 }
 
+void InteractionSystem::CancelManipulation(EntityManager& ecs) {
+    ecs.ForEach<InteractionState>([](EntityID, InteractionState& state) {
+        state.mode = InteractionMode::Idle;
+        state.selectedEntity = INVALID_ENTITY;
+        state.actors = {};
+        state.scaleLimitLatched = false;
+    });
+}
+
 void InteractionSystem::Update(EntityManager& ecs, float deltaSeconds) {
     InputComponent* input = nullptr;
     InputState* inputState = nullptr;
@@ -182,6 +192,7 @@ void InteractionSystem::Update(EntityManager& ecs, float deltaSeconds) {
                                              state.actors[1].initialPose.Translation) * 0.5f;
                     state.initialVector = state.actors[1].initialPose.Translation -
                                           state.actors[0].initialPose.Translation;
+                    state.scaleLockedAtBaseline = interactable.scaleLocked;
                     if (state.initialVector.Length() >= kMinimumTwoHandDistance) {
                         QueueHaptic(state, HapticEvent::TwoHandStarted, first);
                         QueueHaptic(state, HapticEvent::TwoHandStarted, second);
@@ -221,12 +232,24 @@ void InteractionSystem::Update(EntityManager& ecs, float deltaSeconds) {
         const OVR::Vector3f firstPosition = ActorPose(*input, state.actors[0]).Translation;
         const OVR::Vector3f secondPosition = ActorPose(*input, state.actors[1]).Translation;
         const OVR::Vector3f currentVector = secondPosition - firstPosition;
+        if (ScaleControl::NeedsRebaseline(
+                state.scaleLockedAtBaseline, interactable.scaleLocked)) {
+            state.initialUserPose = transform.modelPose;
+            state.initialScale = transform.modelScale;
+            state.initialMidpoint = (firstPosition + secondPosition) * 0.5f;
+            state.initialVector = currentVector;
+            state.scaleLockedAtBaseline = interactable.scaleLocked;
+            state.scaleLimitLatched = false;
+            return;
+        }
         const float initialDistance = state.initialVector.Length();
         const float currentDistance = currentVector.Length();
         if (initialDistance < kMinimumTwoHandDistance || currentDistance < kMinimumTwoHandDistance) return;
         const float rawScale = state.initialScale.x * currentDistance / initialDistance;
-        const float scale = std::clamp(rawScale, interactable.minimumScale, interactable.maximumScale);
-        const bool clamped = scale != rawScale;
+        const float scale = ScaleControl::ResolveGestureScale(
+            rawScale, transform.modelScale.x, interactable.scaleLocked,
+            interactable.minimumScale, interactable.maximumScale);
+        const bool clamped = !interactable.scaleLocked && scale != rawScale;
         if (clamped && !state.scaleLimitLatched) {
             QueueHaptic(state, HapticEvent::ScaleLimitReached, state.actors[0]);
             QueueHaptic(state, HapticEvent::ScaleLimitReached, state.actors[1]);

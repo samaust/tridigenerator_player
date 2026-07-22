@@ -9,4 +9,5 @@ struct InteractableComponent {
     OVR::Vector3f localBoundsMax{0.5f, 0.5f, 0.5f};
     float minimumScale{0.01f};
     float maximumScale{100.0f};
+    bool scaleLocked{true};
 };

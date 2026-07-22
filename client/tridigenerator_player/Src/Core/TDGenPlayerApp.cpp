@@ -2,6 +2,8 @@
 #include <fstream>
 #include <iterator>
 #include <iostream>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -69,6 +71,7 @@
 #include "../Systems/EnvironmentDepthSystem.h"
 #include "../Systems/CameraLightEstimationSystem.h"
 #include "../Systems/UnlitGeometryRenderSystem.h"
+#include "../Systems/ScaleControl.h"
 
 // All physical units in OpenXR are in meters, but sometimes it's more useful
 // to think in cm, so this user defined literal converts from centimeters to meters
@@ -313,6 +316,7 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     unlitGeometryRenderSystem_->Update(*entityManager_, in);
 #if defined(__ANDROID__)
     RefreshColorMatchingUi();
+    RefreshMeshScaleUi();
 #endif
     if ((ui_ || playbackUi_) && uiVisible_) {
         if (ui_) ui_->HitTestDevices().clear();
@@ -347,6 +351,7 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
             if (nextMode == UiMode::Masks) BuildMaskSelector();
             else if (nextMode == UiMode::ColorMatching) BuildColorMatchingControls();
             else if (nextMode == UiMode::ColorMatchingSettings) BuildColorMatchingSettingsControls();
+            else if (nextMode == UiMode::MeshScale) BuildMeshScaleControls();
             else BuildDatasetPicker();
         }
     }
@@ -431,6 +436,8 @@ void TDGenPlayerApp::ShutdownUi() {
         ui_.reset();
     }
     uiStatusLabel_ = nullptr;
+    meshScaleValueLabel_ = nullptr;
+    meshScaleCurrentLabel_ = nullptr;
 }
 
 void TDGenPlayerApp::BuildPlaybackControls() {
@@ -487,9 +494,11 @@ void TDGenPlayerApp::BuildDatasetPicker() {
 #if defined(__ANDROID__)
     ui_->AddButton("Color matching", {0.0f, 0.31f, -1.5f}, {500.0f, 60.0f},
         [this]() { OpenColorMatchingControls(UiMode::Datasets); });
+    ui_->AddButton("Mesh scale", {0.0f, 0.22f, -1.5f}, {500.0f, 60.0f},
+        [this]() { OpenMeshScaleControls(UiMode::Datasets); });
 #endif
     auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
-    float y = 0.20f;
+    float y = 0.11f;
     for (const VipeCatalogEntry& entry : loader.catalog.datasets) {
         const std::string id = entry.id;
         ui_->AddButton(entry.displayName, {0.0f, y, -1.5f}, {500.0f, 70.0f},
@@ -521,13 +530,15 @@ void TDGenPlayerApp::BuildMaskSelector() {
 #if defined(__ANDROID__)
     ui_->AddButton("Color matching", {0.0f, 0.27f, -1.5f}, {620.0f, 60.0f},
         [this]() { OpenColorMatchingControls(UiMode::Masks); });
+    ui_->AddButton("Mesh scale", {0.0f, 0.17f, -1.5f}, {620.0f, 60.0f},
+        [this]() { OpenMeshScaleControls(UiMode::Masks); });
 #endif
 
     for (int id = 0; id < 256; ++id) {
         maskToggleValues_[static_cast<size_t>(id)] =
             render.maskVisibility_.IsVisible(static_cast<uint8_t>(id));
     }
-    float y = 0.16f;
+    float y = 0.06f;
     for (const MaskVisibilityEntry& entry : render.maskVisibility_.Entries()) {
         const uint8_t id = entry.id;
         const std::string suffix = std::to_string(static_cast<unsigned int>(id)) +
@@ -540,6 +551,105 @@ void TDGenPlayerApp::BuildMaskSelector() {
             });
         y -= 0.10f;
     }
+}
+
+void TDGenPlayerApp::BuildMeshScaleControls() {
+    ShutdownUi();
+    ui_ = std::make_unique<OVRFW::TinyUI>();
+    if (!ui_->Init(GetContext(), GetFileSys())) {
+        LOGE("Failed to initialize mesh scale UI");
+        ui_.reset();
+        return;
+    }
+    currentUiMode_ = UiMode::MeshScale;
+    auto& transform = entityManager_->GetComponent<TransformComponent>(objectEntity_);
+    auto& interactable = entityManager_->GetComponent<InteractableComponent>(objectEntity_);
+    meshScaleLockUiValue_ = interactable.scaleLocked;
+    meshScaleUiLockedSnapshot_ = interactable.scaleLocked;
+    meshScaleUiValueSnapshot_ = transform.modelScale.x;
+
+    const auto formatScale = [](float scale) {
+        std::ostringstream stream;
+        stream << std::fixed << std::setprecision(scale < 0.1f ? 4 : scale < 10.0f ? 3 : 2)
+               << scale << "×";
+        return stream.str();
+    };
+    const std::string value = formatScale(transform.modelScale.x);
+    ui_->AddLabel("Mesh scale", {0.0f, 0.48f, -1.5f}, {620.0f, 60.0f});
+    meshScaleCurrentLabel_ = ui_->AddLabel(
+        "Current scale: " + value, {0.0f, 0.38f, -1.5f}, {620.0f, 55.0f});
+    ui_->AddButton("Back", {0.0f, 0.28f, -1.5f}, {300.0f, 55.0f},
+        [this]() { RequestUiMode(meshScaleReturnMode_); });
+    ui_->AddToggleButton("Scale locked", "Scale unlocked", &meshScaleLockUiValue_,
+        {0.0f, 0.18f, -1.5f}, {500.0f, 55.0f}, [this]() {
+            auto& component = entityManager_->GetComponent<InteractableComponent>(objectEntity_);
+            component.scaleLocked = meshScaleLockUiValue_;
+            RequestUiMode(UiMode::MeshScale);
+        });
+
+    ui_->AddLabel("Scale", {-0.28f, 0.06f, -1.5f}, {160.0f, 50.0f});
+    if (interactable.scaleLocked) {
+        ui_->AddLabel("−", {-0.08f, 0.06f, -1.5f}, {60.0f, 50.0f});
+        meshScaleValueLabel_ = ui_->AddLabel(value, {0.10f, 0.06f, -1.5f}, {150.0f, 50.0f});
+        ui_->AddLabel("+", {0.28f, 0.06f, -1.5f}, {60.0f, 50.0f});
+    } else {
+        ui_->AddButton("−", {-0.08f, 0.06f, -1.5f}, {60.0f, 50.0f},
+            [this]() { StepMeshScale(-1); });
+        meshScaleValueLabel_ = ui_->AddLabel(value, {0.10f, 0.06f, -1.5f}, {150.0f, 50.0f});
+        ui_->AddButton("+", {0.28f, 0.06f, -1.5f}, {60.0f, 50.0f},
+            [this]() { StepMeshScale(1); });
+    }
+    ui_->AddButton("Reset to 1×", {0.0f, -0.07f, -1.5f}, {500.0f, 55.0f},
+        [this]() { ResetMeshScale(); });
+}
+
+void TDGenPlayerApp::OpenMeshScaleControls(UiMode returnMode) {
+    meshScaleReturnMode_ = returnMode;
+    RequestUiMode(UiMode::MeshScale);
+}
+
+void TDGenPlayerApp::SetMeshScale(float scale) {
+    auto& transform = entityManager_->GetComponent<TransformComponent>(objectEntity_);
+    auto& transformState = entityManager_->GetComponent<TransformState>(objectEntity_);
+    const auto& interactable = entityManager_->GetComponent<InteractableComponent>(objectEntity_);
+    const float clamped = ScaleControl::Clamp(
+        scale, interactable.minimumScale, interactable.maximumScale);
+    interactionSystem_->CancelManipulation(*entityManager_);
+    TransformSystem::SetScale(transform, transformState, {clamped, clamped, clamped});
+    RefreshMeshScaleUi();
+}
+
+void TDGenPlayerApp::StepMeshScale(int direction) {
+    const auto& interactable = entityManager_->GetComponent<InteractableComponent>(objectEntity_);
+    const auto& transform = entityManager_->GetComponent<TransformComponent>(objectEntity_);
+    const float scale = ScaleControl::StepLogarithmically(
+        transform.modelScale.x, direction, interactable.scaleLocked,
+        interactable.minimumScale, interactable.maximumScale);
+    if (!interactable.scaleLocked) SetMeshScale(scale);
+}
+
+void TDGenPlayerApp::ResetMeshScale() {
+    SetMeshScale(1.0f);
+}
+
+void TDGenPlayerApp::RefreshMeshScaleUi() {
+    if (currentUiMode_ != UiMode::MeshScale || uiRebuildPending_) return;
+    const auto& interactable = entityManager_->GetComponent<InteractableComponent>(objectEntity_);
+    const auto& transform = entityManager_->GetComponent<TransformComponent>(objectEntity_);
+    if (interactable.scaleLocked != meshScaleUiLockedSnapshot_) {
+        RequestUiMode(UiMode::MeshScale);
+        return;
+    }
+    if (transform.modelScale.x == meshScaleUiValueSnapshot_) return;
+    meshScaleUiValueSnapshot_ = transform.modelScale.x;
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(
+        transform.modelScale.x < 0.1f ? 4 : transform.modelScale.x < 10.0f ? 3 : 2)
+           << transform.modelScale.x << "×";
+    const std::string value = stream.str();
+    if (meshScaleCurrentLabel_) meshScaleCurrentLabel_->SetText(
+        "Current scale: %s", value.c_str());
+    if (meshScaleValueLabel_) meshScaleValueLabel_->SetText("%s", value.c_str());
 }
 
 void TDGenPlayerApp::BuildColorMatchingControls() {
