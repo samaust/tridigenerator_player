@@ -1,7 +1,9 @@
 #pragma once
 
+#include "ColorMatchingControl.h"
+
 struct CameraLightEstimationComponent {
-    bool enabled = true;
+    ColorMatchingTier requestedTier = ColorMatchingTier::Spatial;
     bool diagnosticOverlay = false;
     float matchingStrength = 1.0f;
     float updateRateHz = 10.0f;

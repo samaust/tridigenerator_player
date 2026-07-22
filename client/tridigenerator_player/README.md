@@ -42,8 +42,6 @@ and Systems implemented under `Src/` to help navigation and documentation.
 | `SceneSystem` | `SceneSystem.cpp` / `SceneSystem.h` | Scene graph updates and entity lifecycle management. |
 | `TransformSystem` | `TransformSystem.cpp` / `TransformSystem.h` | Applies and updates entity transforms and pose hierarchies. |
 | `UnlitGeometryRenderSystem` | `UnlitGeometryRenderSystem.cpp` / `UnlitGeometryRenderSystem.h` | Renders unlit geometry using YUV + alpha + depth textures with double-buffering. |
-| 
-| ```
 
 **Documentation**
 
@@ -234,6 +232,9 @@ a demo or test session:
    or restores the current UI without resetting its screen or selections.
 7. Confirm that grab, release, two-controller, scale-limit, and X-button UI events vibrate the
    expected left or right controller.
+8. Open `Color matching` from both the dataset and mask screens. Select Disabled, Global, and
+   Spatial with a controller trigger and a hand pinch; confirm the status shows both the selected
+   and currently active tier and that unavailable tiers cannot be selected.
 
 ### Android permissions
 
@@ -302,6 +303,7 @@ The Android build assigns these controller and hand-tracking controls:
 | Adjust grab distance | Move the right thumbstick up to move farther away or down to move closer. This works regardless of which controller started the grab. | No direct hand-only distance control; the right controller thumbstick remains usable when available. |
 | Two-actor transform | Aim both controller rays at the mesh and hold both grips, then move the controllers to translate, rotate, and uniformly scale it. | Aim both hand rays at the mesh and hold both pinches, then move the hands to translate, rotate, and uniformly scale it. |
 | Toggle UI visibility | Press X on the left controller. | Bring both valid, mutually facing palms together in a deliberate clap. |
+| Select color-matching tier | Open `Color matching`, aim at an available Disabled, Global, or Spatial row, and press the index trigger. | Open `Color matching`, aim at an available tier, and pinch the index finger and thumb. |
 
 Uniform mesh scale is clamped to `0.01x` through `100x`, where `1x` is the original size. Both
 rays must hit the mesh before a two-actor transform begins. Two controllers or two hands can be
@@ -313,6 +315,12 @@ An actively tracked hand takes precedence over the controller on the same side. 
 optional, and the UI and mesh remain usable with Touch controllers when it is unavailable. Clap
 detection is disabled while the mesh is being manipulated to prevent an interaction from
 unexpectedly hiding the UI. Locomotion and playback controls remain unassigned.
+
+The color-matching screen is reachable from both the dataset and mask screens. Disabled is always
+available; Global and Spatial are non-interactive while their camera or environment-depth
+prerequisites are being checked or are unavailable. Spatial remains selected during transient depth
+loss and reports Global as the active fallback, but a conclusively unsupported selected tier is
+automatically downgraded.
 
 ### Haptics
 

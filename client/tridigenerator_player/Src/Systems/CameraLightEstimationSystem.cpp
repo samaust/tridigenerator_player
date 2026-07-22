@@ -221,6 +221,8 @@ struct CameraLightEstimationPlatformState {
     bool calibrationValid = false;
     bool captureRunning = false;
     bool startAttempted = false;
+    bool cameraCapabilityKnown = false;
+    bool cameraAvailable = false;
 };
 
 #if defined(__ANDROID__)
@@ -281,10 +283,16 @@ void ConfigureCapture(CameraLightEstimationPlatformState* p) {
 }
 
 void OnCameraDisconnected(void* context, ACameraDevice*) {
-    static_cast<CameraLightEstimationPlatformState*>(context)->captureRunning = false;
+    auto* platform = static_cast<CameraLightEstimationPlatformState*>(context);
+    platform->captureRunning = false;
+    platform->cameraCapabilityKnown = true;
+    platform->cameraAvailable = false;
 }
 void OnCameraError(void* context, ACameraDevice*, int error) {
-    static_cast<CameraLightEstimationPlatformState*>(context)->captureRunning = false;
+    auto* platform = static_cast<CameraLightEstimationPlatformState*>(context);
+    platform->captureRunning = false;
+    platform->cameraCapabilityKnown = true;
+    platform->cameraAvailable = false;
     LOGE("Headset camera error %d", error);
 }
 
@@ -378,7 +386,7 @@ bool StartCamera(CameraLightEstimationPlatformState& p) {
     const camera_status_t status = ACameraManager_openCamera(p.manager, p.cameraId.c_str(), &callbacks, &p.device);
     if (status == ACAMERA_OK) ConfigureCapture(&p);
     LOGI("Selected left passthrough camera %s (%dx%d)", p.cameraId.c_str(), selectedWidth, selectedHeight);
-    return status == ACAMERA_OK;
+    return status == ACAMERA_OK && p.captureRunning;
 }
 } // namespace
 #endif
@@ -408,6 +416,43 @@ void CameraLightEstimationSystem::Update(
     ecs.ForEachMulti<CameraLightEstimationComponent, CameraLightEstimationState>(
         [&](EntityID, CameraLightEstimationComponent& component, CameraLightEstimationState& state) {
             const double now = NowSeconds();
+            const bool spatialPrerequisitesSupported =
+                coreComponent && coreState && coreComponent->supportsDepth &&
+                coreComponent->supportsTimeConversion &&
+                coreState->XrConvertTimespecTimeToTimeKHR &&
+                coreState->viewSpace != XR_NULL_HANDLE && depth && depth->IsInitialized && transform;
+#if defined(__ANDROID__)
+            if (state.platform && state.platform->cameraCapabilityKnown) {
+                state.globalAvailability = state.platform->cameraAvailable
+                    ? TierAvailability::Available : TierAvailability::Unavailable;
+            } else {
+                state.globalAvailability = TierAvailability::Checking;
+            }
+#else
+            state.globalAvailability = TierAvailability::Unavailable;
+#endif
+            if (!spatialPrerequisitesSupported ||
+                state.globalAvailability == TierAvailability::Unavailable) {
+                state.spatialAvailability = TierAvailability::Unavailable;
+            } else if (state.globalAvailability == TierAvailability::Checking) {
+                state.spatialAvailability = TierAvailability::Checking;
+            } else {
+                state.spatialAvailability = TierAvailability::Available;
+            }
+
+            const ColorMatchingTier requestedBeforeDowngrade = component.requestedTier;
+            component.requestedTier = DowngradeUnavailableTier(
+                component.requestedTier, state.globalAvailability, state.spatialAvailability);
+            if (component.requestedTier != requestedBeforeDowngrade) {
+                LOGW("Color matching tier auto-downgraded from %s to %s",
+                    ColorMatchingTierName(requestedBeforeDowngrade),
+                    ColorMatchingTierName(component.requestedTier));
+            }
+            if (component.requestedTier != state.loggedRequestedTier) {
+                LOGI("Color matching requested tier: %s",
+                    ColorMatchingTierName(component.requestedTier));
+                state.loggedRequestedTier = component.requestedTier;
+            }
             if (state.tier != state.loggedTier) {
                 LOGI("Color matching tier: %s",
                      state.tier == LightEstimateTier::Spatial ? "spatial" :
@@ -418,18 +463,36 @@ void CameraLightEstimationSystem::Update(
                 state.tier = LightEstimateTier::Unavailable;
             }
 #if defined(__ANDROID__)
-            if (!focused && state.platform->manager) {
-                StopCamera(*state.platform);
-                state.platform->startAttempted = false;
-            } else if (focused && component.enabled && !state.platform->manager && !state.platform->startAttempted) {
-                state.platform->startAttempted = true;
-                if (!StartCamera(*state.platform)) StopCamera(*state.platform);
+            if (state.platform) {
+                if ((!focused || !ShouldCaptureForColorMatching(component.requestedTier)) &&
+                    state.platform->manager) {
+                    StopCamera(*state.platform);
+                    state.platform->startAttempted = false;
+                } else if (focused && ShouldCaptureForColorMatching(component.requestedTier) &&
+                    !state.platform->manager && !state.platform->startAttempted) {
+                    state.platform->startAttempted = true;
+                    const bool started = StartCamera(*state.platform);
+                    state.platform->cameraCapabilityKnown = true;
+                    state.platform->cameraAvailable = started;
+                    state.globalAvailability = started
+                        ? TierAvailability::Available : TierAvailability::Unavailable;
+                    if (!started) StopCamera(*state.platform);
+                }
             }
 #endif
+            if (!ShouldCaptureForColorMatching(component.requestedTier)) {
+                state.tier = LightEstimateTier::Unavailable;
+            } else if (component.requestedTier == ColorMatchingTier::Global &&
+                       state.tier == LightEstimateTier::Spatial) {
+                state.tier = LightEstimateTier::Global;
+            }
             state.tierBlend += (static_cast<int>(state.tier) > 0 ? 1.0f : -1.0f) *
                     std::min(1.0f, in.DeltaSeconds / 0.5f);
             state.tierBlend = std::clamp(state.tierBlend, 0.0f, 1.0f);
-            if (!component.enabled || !focused || !state.platform) { state.tier = LightEstimateTier::Unavailable; return; }
+            if (!ShouldCaptureForColorMatching(component.requestedTier) || !focused || !state.platform) {
+                state.tier = LightEstimateTier::Unavailable;
+                return;
+            }
             CameraFrame frame;
             {
                 std::lock_guard<std::mutex> lock(state.platform->mutex);
@@ -473,6 +536,8 @@ void CameraLightEstimationSystem::Update(
                 state.globalLight = state.globalLight * component.temporalSmoothing + target * (1.0f-component.temporalSmoothing);
                 state.tier = LightEstimateTier::Global; state.lastEstimateSeconds = now;
             }
+
+            if (!AllowsSpatialColorMatching(component.requestedTier)) return;
 
             if (!coreComponent || !coreState || !coreComponent->supportsTimeConversion ||
                 !coreState->XrConvertTimespecTimeToTimeKHR || coreState->viewSpace == XR_NULL_HANDLE ||

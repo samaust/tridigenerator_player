@@ -15,6 +15,10 @@ Color matching has two progressively stricter tiers:
 Missing camera permission or unavailable XR features do not prevent playback. The renderer falls
 back from Spatial to Global, or fades matching out when no estimate is available.
 
+The Android UI exposes these as the requested tiers `Disabled`, `Global`, and `Spatial`. The
+requested tier is a quality cap, while `LightEstimateTier` reports what the estimator is currently
+achieving. Spatial may therefore be selected while the active result temporarily reads Global.
+
 ## Pipeline
 
 ```text
@@ -87,7 +91,7 @@ configuration:
 
 | Field | Default | Purpose |
 |---|---:|---|
-| `enabled` | `true` | Enables camera capture and estimation while the app is focused. |
+| `requestedTier` | `Spatial` | Selects Disabled, Global, or Spatial as the maximum estimation tier. |
 | `diagnosticOverlay` | `false` | Reserved; no overlay currently consumes this field. |
 | `matchingStrength` | `1.0` | Multiplies the final fade amount in the render shader. |
 | `updateRateHz` | `10.0` | Maximum spatial compute dispatch rate. Global estimation is not rate-limited by this value. |
@@ -121,6 +125,9 @@ The system lifecycle is wired in [`TDGenPlayerApp`](Src/Core/TDGenPlayerApp.cpp)
 
 Losing XR focus stops the camera and clears the one-attempt guard. Regaining focus permits a new
 start attempt. Within one continuously focused session, a failed start is not retried.
+
+Selecting Disabled also stops capture, but retains the last known camera capability so the UI can
+offer Global and Spatial again. Selecting Global restarts capture but skips spatial dispatches.
 
 ## Camera selection and frame capture
 
@@ -290,6 +297,24 @@ occlusion path may subsequently alter fragment alpha and depth, but not its matc
 
 ## Tier transitions and degradation
 
+### Android controls
+
+The dataset and mask screens each provide a `Color matching` button. It opens a dedicated screen
+that can be operated with the existing Touch-controller aim and index trigger or hand aim and index
+pinch. The screen shows the selected tier, active tier, and one row for Disabled, Global, and
+Spatial. The selected tier and unavailable tiers are labels rather than hit-testable buttons.
+
+Disabled is always selectable. Global remains in `Checking` until calibrated camera startup either
+succeeds or conclusively fails. Spatial is selectable only when Global capability, timestamp
+conversion, initialized environment depth, view space, and an object transform are available.
+Temporary stale frames or individual depth-acquisition failures change the active result but do
+not remove an otherwise supported tier from the UI.
+
+When a selected capability conclusively becomes unavailable, selection automatically downgrades to
+the highest lower available tier: Spatial becomes Global when spatial prerequisites are unsupported,
+and either camera-backed tier becomes Disabled when camera startup or capture fails. The initial
+selection is Spatial and is not persisted across application launches.
+
 `lastEstimateSeconds` is refreshed by either a successful Global calculation or a Spatial dispatch.
 If it becomes older than `estimateHoldSeconds`, the tier changes to Unavailable. `tierBlend` moves
 toward one while either estimate tier is available and toward zero while unavailable, taking
@@ -328,7 +353,7 @@ on-device validation.
 ## Known limitations
 
 - `diagnosticOverlay` is declared but not implemented.
-- Matching parameters have no runtime UI.
+- The UI selects the tier but does not expose numeric matching parameters.
 - Headset camera YUV is always interpreted as limited range.
 - Global estimation runs for every accepted frame; `updateRateHz` limits only Spatial dispatches.
 - The compute shader samples environment-depth array layer zero rather than combining both views.

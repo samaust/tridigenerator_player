@@ -4,6 +4,7 @@
 #include <memory>
 
 #include "OVR_Math.h"
+#include "../Components/ColorMatchingControl.h"
 
 struct CameraLightEstimationPlatformState;
 
@@ -35,6 +36,9 @@ struct CameraLightEstimationState {
 
     LightEstimateTier tier = LightEstimateTier::Unavailable;
     LightEstimateTier loggedTier = LightEstimateTier::Unavailable;
+    ColorMatchingTier loggedRequestedTier = ColorMatchingTier::Spatial;
+    TierAvailability globalAvailability = TierAvailability::Checking;
+    TierAvailability spatialAvailability = TierAvailability::Checking;
     float tierBlend = 0.0f;
     double lastEstimateSeconds = 0.0;
     double lastDispatchSeconds = 0.0;

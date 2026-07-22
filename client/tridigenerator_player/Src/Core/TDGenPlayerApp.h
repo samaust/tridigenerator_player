@@ -19,6 +19,7 @@
 #include "../Systems/CameraLightEstimationSystem.h"
 #include "../Systems/UnlitGeometryRenderSystem.h"
 #include "../States/InteractionState.h"
+#include "../Components/ColorMatchingControl.h"
 
 namespace OVRFW {
 class TinyUI;
@@ -33,7 +34,7 @@ public:
     virtual ~TDGenPlayerApp();
 
 private:
-    enum class UiMode { Datasets, Masks };
+    enum class UiMode { Datasets, Masks, ColorMatching };
 
     std::unique_ptr<EntityManager> entityManager_;
 
@@ -52,7 +53,14 @@ private:
     OVRFW::VRMenuObject* uiStatusLabel_ = nullptr;
     std::array<bool, 256> maskToggleValues_{};
     UiMode pendingUiMode_ = UiMode::Datasets;
+    UiMode currentUiMode_ = UiMode::Datasets;
+    UiMode colorMatchingReturnMode_ = UiMode::Masks;
     bool uiRebuildPending_ = false;
+    bool colorMatchingUiSnapshotValid_ = false;
+    ColorMatchingTier colorMatchingUiRequested_ = ColorMatchingTier::Spatial;
+    LightEstimateTier colorMatchingUiActive_ = LightEstimateTier::Unavailable;
+    TierAvailability colorMatchingUiGlobal_ = TierAvailability::Checking;
+    TierAvailability colorMatchingUiSpatial_ = TierAvailability::Checking;
     bool uiVisible_ = true;
     double lastUpdateSeconds_ = 0.0;
     EntityID objectEntity_ = 0;
@@ -61,6 +69,10 @@ private:
     void ShutdownUi();
     void BuildDatasetPicker();
     void BuildMaskSelector();
+    void BuildColorMatchingControls();
+    void OpenColorMatchingControls(UiMode returnMode);
+    void SelectColorMatchingTier(ColorMatchingTier tier);
+    void RefreshColorMatchingUi();
     void RequestUiMode(UiMode mode);
     void SelectDataset(const std::string& datasetId);
     void DispatchHaptic(HapticEvent event, uint8_t controllerMask);
