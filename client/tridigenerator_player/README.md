@@ -47,6 +47,9 @@ and Systems implemented under `Src/` to help navigation and documentation.
 
 **Documentation**
 
+See [Color matching implementation](COLOR_MATCHING.md) for the Android headset-camera color and
+exposure pipeline, including its Global and Spatial estimation tiers and GPU shaders.
+
 The project includes a Doxygen configuration file located at `client/tridigenerator_player/Doxyfile`.
 To (re)generate the HTML documentation using that file, run the following from the repository root:
 
@@ -248,6 +251,9 @@ manifest also requires VR head tracking and OpenGL ES 3.1, declares hand trackin
 and enables cleartext HTTP traffic for development servers. Scene and headset-camera access are
 the permissions explicitly requested by `MainActivity`; accept scene access to start the native
 player, and grant headset-camera access if color matching is wanted.
+
+For the permission, camera-capture, environment-depth, estimation, and shader data flow, see
+[Color matching implementation](COLOR_MATCHING.md).
 
 ### ViPE data server
 
