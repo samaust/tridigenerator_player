@@ -20,8 +20,12 @@ package io.github.samaust.tridigenerator_player;
 
 import android.os.Bundle;
 import android.util.Log;
+import android.content.Context;
+import android.content.SharedPreferences;
 
 public class MainNativeActivity extends android.app.NativeActivity {
+    private static final String COLOR_SETTINGS_PREFERENCES = "color_matching_settings";
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         Log.d(MainActivity.TAG, "MainNativeActivity.onCreate() called");
@@ -32,6 +36,23 @@ public class MainNativeActivity extends android.app.NativeActivity {
     public void onNativeFinish() {
         Log.d(MainActivity.TAG, "MainNativeActivity finish called from native app.");
         finishAndRemoveTask();
+    }
+
+    public String loadColorMatchingSettings(String datasetId) {
+        return getSharedPreferences(COLOR_SETTINGS_PREFERENCES, Context.MODE_PRIVATE)
+            .getString(datasetId, null);
+    }
+
+    public boolean saveColorMatchingSettings(String datasetId, String json) {
+        SharedPreferences preferences =
+            getSharedPreferences(COLOR_SETTINGS_PREFERENCES, Context.MODE_PRIVATE);
+        return preferences.edit().putString(datasetId, json).commit();
+    }
+
+    public boolean deleteColorMatchingSettings(String datasetId) {
+        SharedPreferences preferences =
+            getSharedPreferences(COLOR_SETTINGS_PREFERENCES, Context.MODE_PRIVATE);
+        return preferences.edit().remove(datasetId).commit();
     }
 
     @Override

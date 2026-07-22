@@ -63,6 +63,12 @@ if(UNIX AND NOT ANDROID)
         add_executable(color_matching_control_tests Tests/ColorMatchingControlTests.cpp)
         target_include_directories(color_matching_control_tests PRIVATE Src)
         add_test(NAME color_matching_control_tests COMMAND color_matching_control_tests)
+        add_executable(color_matching_settings_tests
+            Tests/ColorMatchingSettingsTests.cpp
+            Src/Components/ColorMatchingSettings.cpp)
+        target_include_directories(color_matching_settings_tests PRIVATE Src)
+        target_link_libraries(color_matching_settings_tests PRIVATE PkgConfig::JSONCPP)
+        add_test(NAME color_matching_settings_tests COMMAND color_matching_settings_tests)
         add_executable(color_reference_tests Tests/ColorReferenceTests.cpp)
         target_include_directories(color_reference_tests PRIVATE Src)
         add_test(NAME color_reference_tests COMMAND color_reference_tests)

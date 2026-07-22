@@ -326,6 +326,7 @@ The Android build assigns these controller and hand-tracking controls:
 | Two-actor transform | Aim both controller rays at the mesh and hold both grips, then move the controllers to translate, rotate, and uniformly scale it. | Aim both hand rays at the mesh and hold both pinches, then move the hands to translate, rotate, and uniformly scale it. |
 | Toggle UI visibility | Press X on the left controller. | Bring both valid, mutually facing palms together in a deliberate clap. |
 | Select color-matching tier | Open `Color matching`, aim at an available Disabled, Global, or Spatial row, and press the index trigger. | Open `Color matching`, aim at an available tier, and pinch the index finger and thumb. |
+| Edit color-matching settings | Select `Edit settings`, then use the `-`, value, and `+` controls. Select Save on the overview to persist the preview. | Use the same controls with an aim pinch; leaving the overview without Save restores the prior values. |
 
 Uniform mesh scale is clamped to `0.01x` through `100x`, where `1x` is the original size. Both
 rays must hit the mesh before a two-actor transform begins. Two controllers or two hands can be
@@ -343,6 +344,13 @@ available; Global and Spatial are non-interactive while their camera or environm
 prerequisites are being checked or are unavailable. Spatial remains selected during transient depth
 loss and reports Global as the active fallback, but a conclusively unsupported selected tier is
 automatically downgraded.
+
+The overview can edit strength, smoothing, tint bounds, and exposure bounds. Changes are previewed
+live. `Save` stores the tier and numeric settings for the current catalog dataset ID in Android
+private storage; switching datasets or restarting restores that dataset's values. `Reset defaults`
+previews the canonical values and Spatial tier, but does not persist them until Save is selected.
+Backing out of the overview discards unsaved changes. Runtime capability downgrades do not overwrite
+the saved requested tier.
 
 ### Haptics
 

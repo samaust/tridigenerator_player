@@ -20,6 +20,7 @@
 #include "../Systems/UnlitGeometryRenderSystem.h"
 #include "../States/InteractionState.h"
 #include "../Components/ColorMatchingControl.h"
+#include "../Components/ColorMatchingSettings.h"
 
 namespace OVRFW {
 class TinyUI;
@@ -34,7 +35,7 @@ public:
     virtual ~TDGenPlayerApp();
 
 private:
-    enum class UiMode { Datasets, Masks, ColorMatching };
+    enum class UiMode { Datasets, Masks, ColorMatching, ColorMatchingSettings };
 
     std::unique_ptr<EntityManager> entityManager_;
 
@@ -61,6 +62,12 @@ private:
     LightEstimateTier colorMatchingUiActive_ = LightEstimateTier::Unavailable;
     TierAvailability colorMatchingUiGlobal_ = TierAvailability::Checking;
     TierAvailability colorMatchingUiSpatial_ = TierAvailability::Checking;
+    ColorMatchingSettings colorMatchingSaved_;
+    ColorMatchingSettings colorMatchingDraft_;
+    ColorMatchingSettings colorMatchingPreviewed_;
+    std::string colorMatchingSettingsDatasetId_;
+    std::string colorMatchingSettingsMessage_;
+    bool colorMatchingEditActive_ = false;
     bool uiVisible_ = true;
     double lastUpdateSeconds_ = 0.0;
     EntityID objectEntity_ = 0;
@@ -70,8 +77,16 @@ private:
     void BuildDatasetPicker();
     void BuildMaskSelector();
     void BuildColorMatchingControls();
+    void BuildColorMatchingSettingsControls();
     void OpenColorMatchingControls(UiMode returnMode);
     void SelectColorMatchingTier(ColorMatchingTier tier);
+    void PreviewColorMatchingDraft();
+    void SaveColorMatchingDraft();
+    void ResetColorMatchingDraft();
+    void CancelColorMatchingEdits();
+    void LoadColorMatchingSettingsForDataset();
+    bool StoreColorMatchingSettings(const std::string& datasetId, const std::string& json);
+    std::string ReadColorMatchingSettings(const std::string& datasetId);
     void RefreshColorMatchingUi();
     void RequestUiMode(UiMode mode);
     void SelectDataset(const std::string& datasetId);

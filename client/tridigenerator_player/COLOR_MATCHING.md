@@ -321,6 +321,27 @@ that can be operated with the existing Touch-controller aim and index trigger or
 pinch. The screen shows the selected tier, active tier, and one row for Disabled, Global, and
 Spatial. The selected tier and unavailable tiers are labels rather than hit-testable buttons.
 
+The overview also provides `Edit settings`, `Save`, and `Reset defaults`. The settings screen uses
+TinyUI `-` and `+` controls for matching strength, temporal smoothing, and the minimum/maximum tint
+and exposure gains. Changes preview immediately. Returning from the settings screen keeps the draft;
+leaving the color-matching overview without saving restores the last saved values. Reset previews
+the canonical defaults, including Spatial, and requires Save before it is persisted.
+
+Saved settings are versioned JSON in Android private `SharedPreferences`, keyed by the catalog
+dataset ID. They survive application restarts and are restored after initial loading and every
+successful dataset switch. Each dataset therefore retains an independent tier and visual tuning.
+Invalid or unsupported saved JSON is logged and ignored in favor of defaults. A capability-based
+tier downgrade affects runtime state only and does not rewrite the saved requested tier.
+
+| UI setting | Range | Step | Default |
+|---|---:|---:|---:|
+| Matching strength | `0.0–1.0` | `0.05` | `1.0` |
+| Temporal smoothing | `0.0–0.95` | `0.05` | `0.85` |
+| Minimum tint | `0.25–1.0` | `0.05` | `0.7` |
+| Maximum tint | `1.0–3.0` | `0.05` | `1.4` |
+| Minimum exposure | `0.1–1.0` | `0.05` | `0.35` |
+| Maximum exposure | `1.0–4.0` | `0.05` | `2.0` |
+
 Disabled is always selectable. Global remains in `Checking` until calibrated camera startup either
 succeeds or conclusively fails. Spatial is selectable only when Global capability, timestamp
 conversion, initialized environment depth, view space, and an object transform are available.
@@ -329,8 +350,8 @@ not remove an otherwise supported tier from the UI.
 
 When a selected capability conclusively becomes unavailable, selection automatically downgrades to
 the highest lower available tier: Spatial becomes Global when spatial prerequisites are unsupported,
-and either camera-backed tier becomes Disabled when camera startup or capture fails. The initial
-selection is Spatial and is not persisted across application launches.
+and either camera-backed tier becomes Disabled when camera startup or capture fails. A dataset with
+no saved settings starts from Spatial; saved requested tiers are restored across launches.
 
 `lastEstimateSeconds` is refreshed by either a successful Global calculation or a Spatial dispatch.
 If it becomes older than `estimateHoldSeconds`, the tier changes to Unavailable. `tierBlend` moves
@@ -371,7 +392,8 @@ on-device validation.
 ## Known limitations
 
 - `diagnosticOverlay` is declared but not implemented.
-- The UI selects the tier but does not expose numeric matching parameters.
+- Camera timing, frame-age, estimate-hold, and diagnostic parameters remain internal rather than
+  being exposed by the settings UI.
 - Headset camera YUV is always interpreted as limited range.
 - Global estimation runs for every accepted frame; `updateRateHz` limits only Spatial dispatches.
 - The compute shader samples environment-depth array layer zero rather than combining both views.

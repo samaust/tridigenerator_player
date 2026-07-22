@@ -7,6 +7,10 @@
 #include <unordered_map>
 #include <vector>
 
+#if defined(__ANDROID__)
+#include <jni.h>
+#endif
+
 #include <GLES3/gl3.h>
 #include <glm/glm.hpp>
 #include <openxr/openxr.h>
@@ -45,6 +49,7 @@
 #include "../Components/RenderComponent.h"
 #include "../Components/UnlitGeometryRenderComponent.h"
 #include "../Components/CameraLightEstimationComponent.h"
+#include "../Components/ColorMatchingSettings.h"
 
 #include "../States/TransformState.h"
 #include "../States/FrameLoaderState.h"
@@ -214,6 +219,9 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     unlitGeometryRenderSystem_->Init(*entityManager_);
 
     auto& initialLoader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+#if defined(__ANDROID__)
+    LoadColorMatchingSettingsForDataset();
+#endif
     if (!initialLoader.selectedDatasetId.empty() && initialLoader.errorMessage.empty()) {
         auto& render = entityManager_->GetComponent<UnlitGeometryRenderComponent>(objectEntity_);
         render.maskVisibility_.Reset(initialLoader.dataset.maskLabels);
@@ -317,11 +325,15 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
             }
         });
         ui_->Update(in);
+#if defined(__ANDROID__)
+        PreviewColorMatchingDraft();
+#endif
         if (uiRebuildPending_) {
             const UiMode nextMode = pendingUiMode_;
             uiRebuildPending_ = false;
             if (nextMode == UiMode::Masks) BuildMaskSelector();
             else if (nextMode == UiMode::ColorMatching) BuildColorMatchingControls();
+            else if (nextMode == UiMode::ColorMatchingSettings) BuildColorMatchingSettingsControls();
             else BuildDatasetPicker();
         }
     }
@@ -497,7 +509,9 @@ void TDGenPlayerApp::BuildColorMatchingControls() {
         return;
     }
     colorMatchingUiSnapshotValid_ = true;
-    colorMatchingUiRequested_ = component->requestedTier;
+    const ColorMatchingTier selectedTier = colorMatchingEditActive_
+        ? colorMatchingDraft_.requestedTier : component->requestedTier;
+    colorMatchingUiRequested_ = selectedTier;
     colorMatchingUiActive_ = state->tier;
     colorMatchingUiGlobal_ = state->globalAvailability;
     colorMatchingUiSpatial_ = state->spatialAvailability;
@@ -505,15 +519,27 @@ void TDGenPlayerApp::BuildColorMatchingControls() {
     ui_->AddLabel("Color matching", {0.0f, 0.48f, -1.5f}, {620.0f, 60.0f});
     const char* active = state->tier == LightEstimateTier::Spatial ? "Spatial" :
         state->tier == LightEstimateTier::Global ? "Global" : "Unavailable";
-    const std::string status = std::string("Selected: ") +
-        ColorMatchingTierName(component->requestedTier) + " | Active: " + active;
+    std::string status = std::string("Selected: ") +
+        ColorMatchingTierName(selectedTier) + " | Active: " + active;
+    if (colorMatchingEditActive_ && colorMatchingDraft_ != colorMatchingSaved_) {
+        status += " | Unsaved";
+    }
     uiStatusLabel_ = ui_->AddLabel(status, {0.0f, 0.38f, -1.5f}, {620.0f, 55.0f});
-    ui_->AddButton("Back", {0.0f, 0.27f, -1.5f}, {620.0f, 55.0f},
-        [this]() { RequestUiMode(colorMatchingReturnMode_); });
+    ui_->AddButton("Back", {0.0f, 0.29f, -1.5f}, {300.0f, 50.0f},
+        [this]() { CancelColorMatchingEdits(); RequestUiMode(colorMatchingReturnMode_); });
+    ui_->AddButton("Edit settings", {0.0f, 0.21f, -1.5f}, {620.0f, 50.0f},
+        [this]() { RequestUiMode(UiMode::ColorMatchingSettings); });
+    ui_->AddButton("Save", {0.0f, 0.13f, -1.5f}, {300.0f, 50.0f},
+        [this]() { SaveColorMatchingDraft(); });
+    ui_->AddButton("Reset defaults", {0.0f, 0.05f, -1.5f}, {400.0f, 50.0f},
+        [this]() { ResetColorMatchingDraft(); });
+    if (!colorMatchingSettingsMessage_.empty()) {
+        ui_->AddLabel(colorMatchingSettingsMessage_, {0.0f, -0.03f, -1.5f}, {620.0f, 45.0f});
+    }
 
     const auto addTierRow = [&](ColorMatchingTier tier, TierAvailability availability, float y) {
         const std::string name = ColorMatchingTierName(tier);
-        if (component->requestedTier == tier) {
+        if (selectedTier == tier) {
             ui_->AddLabel(name + " (Selected)", {0.0f, y, -1.5f}, {620.0f, 60.0f});
         } else if (!IsTierSelectable(
                        tier, state->globalAvailability, state->spatialAvailability)) {
@@ -524,13 +550,49 @@ void TDGenPlayerApp::BuildColorMatchingControls() {
                 [this, tier]() { SelectColorMatchingTier(tier); });
         }
     };
-    addTierRow(ColorMatchingTier::Disabled, TierAvailability::Available, 0.15f);
-    addTierRow(ColorMatchingTier::Global, state->globalAvailability, 0.04f);
-    addTierRow(ColorMatchingTier::Spatial, state->spatialAvailability, -0.07f);
+    addTierRow(ColorMatchingTier::Disabled, TierAvailability::Available, -0.12f);
+    addTierRow(ColorMatchingTier::Global, state->globalAvailability, -0.21f);
+    addTierRow(ColorMatchingTier::Spatial, state->spatialAvailability, -0.30f);
+}
+
+void TDGenPlayerApp::BuildColorMatchingSettingsControls() {
+    ShutdownUi();
+    ui_ = std::make_unique<OVRFW::TinyUI>();
+    if (!ui_->Init(GetContext(), GetFileSys())) {
+        LOGE("Failed to initialize color matching settings UI");
+        ui_.reset();
+        return;
+    }
+    currentUiMode_ = UiMode::ColorMatchingSettings;
+    ui_->AddLabel("Color matching settings", {0.0f, 0.48f, -1.5f}, {620.0f, 55.0f});
+    ui_->AddLabel("Dataset: " + colorMatchingSettingsDatasetId_,
+        {0.0f, 0.40f, -1.5f}, {620.0f, 45.0f});
+    ui_->AddButton("Back to color matching", {0.0f, 0.32f, -1.5f}, {620.0f, 48.0f},
+        [this]() { RequestUiMode(UiMode::ColorMatching); });
+    ui_->AddSlider("Strength", { -0.30f, 0.21f, -1.5f},
+        &colorMatchingDraft_.matchingStrength, 1.0f, 0.05f, 0.0f, 1.0f);
+    ui_->AddSlider("Smoothing", {-0.30f, 0.11f, -1.5f},
+        &colorMatchingDraft_.temporalSmoothing, 0.85f, 0.05f, 0.0f, 0.95f);
+    ui_->AddSlider("Min tint", {-0.30f, 0.01f, -1.5f},
+        &colorMatchingDraft_.minTint, 0.7f, 0.05f, 0.25f, 1.0f);
+    ui_->AddSlider("Max tint", {-0.30f, -0.09f, -1.5f},
+        &colorMatchingDraft_.maxTint, 1.4f, 0.05f, 1.0f, 3.0f);
+    ui_->AddSlider("Min exposure", {-0.30f, -0.19f, -1.5f},
+        &colorMatchingDraft_.minExposure, 0.35f, 0.05f, 0.1f, 1.0f);
+    ui_->AddSlider("Max exposure", {-0.30f, -0.29f, -1.5f},
+        &colorMatchingDraft_.maxExposure, 2.0f, 0.05f, 1.0f, 4.0f);
 }
 
 void TDGenPlayerApp::OpenColorMatchingControls(UiMode returnMode) {
     colorMatchingReturnMode_ = returnMode;
+    const auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+    if (colorMatchingSettingsDatasetId_ != loader.selectedDatasetId) {
+        LoadColorMatchingSettingsForDataset();
+    }
+    colorMatchingDraft_ = colorMatchingSaved_;
+    colorMatchingPreviewed_ = colorMatchingDraft_;
+    colorMatchingEditActive_ = true;
+    colorMatchingSettingsMessage_.clear();
     RequestUiMode(UiMode::ColorMatching);
 }
 
@@ -538,7 +600,9 @@ void TDGenPlayerApp::SelectColorMatchingTier(ColorMatchingTier tier) {
     entityManager_->ForEachMulti<CameraLightEstimationComponent, CameraLightEstimationState>(
         [&](EntityID, CameraLightEstimationComponent& component, CameraLightEstimationState& state) {
             if (!IsTierSelectable(tier, state.globalAvailability, state.spatialAvailability)) return;
-            component.requestedTier = tier;
+            colorMatchingDraft_.requestedTier = tier;
+            static_cast<ColorMatchingSettings&>(component) = colorMatchingDraft_;
+            colorMatchingPreviewed_ = colorMatchingDraft_;
         });
     RequestUiMode(UiMode::ColorMatching);
 }
@@ -548,11 +612,11 @@ void TDGenPlayerApp::RefreshColorMatchingUi() {
     entityManager_->ForEachMulti<CameraLightEstimationComponent, CameraLightEstimationState>(
         [&](EntityID, CameraLightEstimationComponent& component, CameraLightEstimationState& state) {
             if (!colorMatchingUiSnapshotValid_ ||
-                component.requestedTier != colorMatchingUiRequested_ ||
+                colorMatchingDraft_.requestedTier != colorMatchingUiRequested_ ||
                 state.tier != colorMatchingUiActive_ ||
                 state.globalAvailability != colorMatchingUiGlobal_ ||
                 state.spatialAvailability != colorMatchingUiSpatial_) {
-                colorMatchingUiRequested_ = component.requestedTier;
+                colorMatchingUiRequested_ = colorMatchingDraft_.requestedTier;
                 colorMatchingUiActive_ = state.tier;
                 colorMatchingUiGlobal_ = state.globalAvailability;
                 colorMatchingUiSpatial_ = state.spatialAvailability;
@@ -562,17 +626,169 @@ void TDGenPlayerApp::RefreshColorMatchingUi() {
         });
 }
 
+void TDGenPlayerApp::PreviewColorMatchingDraft() {
+    if (!colorMatchingEditActive_ ||
+        (currentUiMode_ != UiMode::ColorMatching &&
+         currentUiMode_ != UiMode::ColorMatchingSettings) ||
+        colorMatchingDraft_ == colorMatchingPreviewed_) return;
+    std::string error;
+    if (!ValidateColorMatchingSettings(colorMatchingDraft_, error)) {
+        colorMatchingSettingsMessage_ = "Invalid settings: " + error;
+        return;
+    }
+    entityManager_->ForEach<CameraLightEstimationComponent>(
+        [&](EntityID, CameraLightEstimationComponent& component) {
+            static_cast<ColorMatchingSettings&>(component) = colorMatchingDraft_;
+        });
+    colorMatchingPreviewed_ = colorMatchingDraft_;
+}
+
+void TDGenPlayerApp::SaveColorMatchingDraft() {
+    PreviewColorMatchingDraft();
+    std::string error;
+    if (!ValidateColorMatchingSettings(colorMatchingDraft_, error)) {
+        colorMatchingSettingsMessage_ = "Save failed: " + error;
+    } else if (colorMatchingSettingsDatasetId_.empty()) {
+        colorMatchingSettingsMessage_ = "Save failed: no dataset selected";
+    } else if (!StoreColorMatchingSettings(
+                   colorMatchingSettingsDatasetId_, SerializeColorMatchingSettings(colorMatchingDraft_))) {
+        colorMatchingSettingsMessage_ = "Save failed: Android storage error";
+    } else {
+        colorMatchingSaved_ = colorMatchingDraft_;
+        colorMatchingSettingsMessage_ = "Saved for " + colorMatchingSettingsDatasetId_;
+        LOGI("Saved color matching settings for dataset %s",
+            colorMatchingSettingsDatasetId_.c_str());
+    }
+    RequestUiMode(UiMode::ColorMatching);
+}
+
+void TDGenPlayerApp::ResetColorMatchingDraft() {
+    colorMatchingDraft_ = ColorMatchingSettings{};
+    colorMatchingSettingsMessage_ = "Defaults previewed; select Save to keep them";
+    PreviewColorMatchingDraft();
+    RequestUiMode(UiMode::ColorMatching);
+}
+
+void TDGenPlayerApp::CancelColorMatchingEdits() {
+    if (!colorMatchingEditActive_) return;
+    if (colorMatchingDraft_ != colorMatchingSaved_) {
+        entityManager_->ForEach<CameraLightEstimationComponent>(
+            [&](EntityID, CameraLightEstimationComponent& component) {
+                static_cast<ColorMatchingSettings&>(component) = colorMatchingSaved_;
+            });
+    }
+    colorMatchingDraft_ = colorMatchingSaved_;
+    colorMatchingPreviewed_ = colorMatchingSaved_;
+    colorMatchingEditActive_ = false;
+    colorMatchingSettingsMessage_.clear();
+}
+
 void TDGenPlayerApp::RequestUiMode(UiMode mode) {
     pendingUiMode_ = mode;
     uiRebuildPending_ = true;
 }
 
+void TDGenPlayerApp::LoadColorMatchingSettingsForDataset() {
+#if defined(__ANDROID__)
+    const auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+    colorMatchingSettingsDatasetId_ = loader.selectedDatasetId;
+    ColorMatchingSettings loaded;
+    const std::string stored = colorMatchingSettingsDatasetId_.empty()
+        ? std::string() : ReadColorMatchingSettings(colorMatchingSettingsDatasetId_);
+    if (!stored.empty()) {
+        std::string error;
+        if (!ParseColorMatchingSettings(stored, loaded, error)) {
+            LOGW("Ignoring invalid color matching settings for dataset %s: %s",
+                colorMatchingSettingsDatasetId_.c_str(), error.c_str());
+            loaded = ColorMatchingSettings{};
+        } else {
+            LOGI("Loaded color matching settings for dataset %s",
+                colorMatchingSettingsDatasetId_.c_str());
+        }
+    }
+    colorMatchingSaved_ = loaded;
+    colorMatchingDraft_ = loaded;
+    colorMatchingPreviewed_ = loaded;
+    colorMatchingEditActive_ = false;
+    colorMatchingSettingsMessage_.clear();
+    entityManager_->ForEach<CameraLightEstimationComponent>(
+        [&](EntityID, CameraLightEstimationComponent& component) {
+            static_cast<ColorMatchingSettings&>(component) = loaded;
+        });
+#endif
+}
+
+std::string TDGenPlayerApp::ReadColorMatchingSettings(const std::string& datasetId) {
+#if defined(__ANDROID__)
+    const xrJava* java = GetContext();
+    if (!java || !java->Env || !java->ActivityObject) return {};
+    JNIEnv* env = java->Env;
+    jclass activityClass = env->GetObjectClass(java->ActivityObject);
+    jmethodID method = env->GetMethodID(
+        activityClass, "loadColorMatchingSettings", "(Ljava/lang/String;)Ljava/lang/String;");
+    jstring key = env->NewStringUTF(datasetId.c_str());
+    jstring value = method ? static_cast<jstring>(
+        env->CallObjectMethod(java->ActivityObject, method, key)) : nullptr;
+    std::string result;
+    if (value) {
+        const char* text = env->GetStringUTFChars(value, nullptr);
+        if (text) result = text;
+        if (text) env->ReleaseStringUTFChars(value, text);
+        env->DeleteLocalRef(value);
+    }
+    env->DeleteLocalRef(key);
+    env->DeleteLocalRef(activityClass);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return {};
+    }
+    return result;
+#else
+    (void)datasetId;
+    return {};
+#endif
+}
+
+bool TDGenPlayerApp::StoreColorMatchingSettings(
+        const std::string& datasetId, const std::string& json) {
+#if defined(__ANDROID__)
+    const xrJava* java = GetContext();
+    if (!java || !java->Env || !java->ActivityObject) return false;
+    JNIEnv* env = java->Env;
+    jclass activityClass = env->GetObjectClass(java->ActivityObject);
+    jmethodID method = env->GetMethodID(
+        activityClass, "saveColorMatchingSettings", "(Ljava/lang/String;Ljava/lang/String;)Z");
+    jstring key = env->NewStringUTF(datasetId.c_str());
+    jstring value = env->NewStringUTF(json.c_str());
+    const bool saved = method && env->CallBooleanMethod(
+        java->ActivityObject, method, key, value) == JNI_TRUE;
+    env->DeleteLocalRef(value);
+    env->DeleteLocalRef(key);
+    env->DeleteLocalRef(activityClass);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return false;
+    }
+    return saved;
+#else
+    (void)datasetId;
+    (void)json;
+    return false;
+#endif
+}
+
 void TDGenPlayerApp::SelectDataset(const std::string& datasetId) {
+    CancelColorMatchingEdits();
     auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
     auto& loaderState = entityManager_->GetComponent<FrameLoaderState>(objectEntity_);
     unlitGeometryRenderSystem_->Shutdown(*entityManager_);
     const bool selected = frameLoaderSystem_->SelectDataset(datasetId, loader, loaderState);
     if (selected) {
+#if defined(__ANDROID__)
+        LoadColorMatchingSettingsForDataset();
+#endif
         auto& render = entityManager_->GetComponent<UnlitGeometryRenderComponent>(objectEntity_);
         render.maskVisibility_.Reset(loader.dataset.maskLabels);
         unlitGeometryRenderSystem_->Init(*entityManager_);
