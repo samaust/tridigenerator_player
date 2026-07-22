@@ -66,7 +66,9 @@ uniform sampler2D u_texV;
 	uniform highp sampler2DArray u_environmentDepthTexture;
 	uniform highp vec2 u_environmentDepthTexelSize;
 	uniform highp sampler3D u_lightField;
+	uniform highp sampler2D u_datasetColorReference;
 	uniform highp mat4 u_lightParams;
+	uniform highp vec4 u_matchingLimits; // min tint, max tint, min exposure, max exposure
 
 varying lowp vec2 oTexCoord;
 varying lowp vec4 oColor;
@@ -124,7 +126,14 @@ void main()
 	    }
 	}
 	highp float matchAmount = clamp(u_lightParams[2].w * u_lightParams[3].x, 0.0, 1.0);
-	rgb *= mix(vec3(1.0), estimatedLight.rgb * estimatedLight.a, matchAmount);
+	highp vec4 datasetReference = texelFetch(u_datasetColorReference, ivec2(int(maskId), 0), 0);
+	highp vec3 chromaGain = clamp(
+	    estimatedLight.rgb / max(datasetReference.rgb, vec3(0.001)),
+	    vec3(u_matchingLimits.x), vec3(u_matchingLimits.y));
+	highp float luminanceGain = clamp(
+	    estimatedLight.a / max(datasetReference.a, 0.001),
+	    u_matchingLimits.z, u_matchingLimits.w);
+	rgb *= mix(vec3(1.0), chromaGain * luminanceGain, matchAmount);
 
 	// Environment Depth
 	if (u_hasEnvironmentDepth == 0) {

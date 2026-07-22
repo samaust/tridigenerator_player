@@ -11,6 +11,19 @@ struct VipeFrameMetadata {
     std::array<float, 16> cameraToWorld{}; // row-major OpenCV convention
 };
 
+struct VipeColorReference {
+    std::array<float, 3> chromaticity{};
+    float logAverageLuminance = 0.0f;
+    uint64_t sampleCount = 0;
+};
+
+struct VipeDatasetColorReferences {
+    std::string colorSpace;
+    std::string aggregation;
+    VipeColorReference global;
+    std::unordered_map<uint8_t, VipeColorReference> masks;
+};
+
 struct VipeDataset {
     int schemaVersion = 0;
     std::string sequence;
@@ -26,6 +39,9 @@ struct VipeDataset {
     std::array<float, 3> orientationOffsetDegrees{};
     std::vector<VipeFrameMetadata> frames;
     std::unordered_map<uint8_t, std::string> maskLabels;
+    VipeDatasetColorReferences colorReferences;
+
+    bool HasColorReference() const { return schemaVersion >= 2; }
 };
 
 struct VipeCatalogEntry {

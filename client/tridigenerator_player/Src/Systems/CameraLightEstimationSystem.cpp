@@ -14,6 +14,7 @@
 #include "../Components/CameraLightEstimationComponent.h"
 #include "../Components/CoreComponent.h"
 #include "../Components/TransformComponent.h"
+#include "../Components/FrameLoaderComponent.h"
 #define LOG_TAG "CameraLightEstimation"
 #include "../Core/Logging.h"
 #include "../States/CoreState.h"
@@ -84,10 +85,6 @@ uniform highp vec2 u_imageSize;
 uniform highp vec3 u_gridMinimum;
 uniform highp vec3 u_gridExtent;
 uniform highp vec4 u_globalLight;
-uniform highp float u_minExposure;
-uniform highp float u_maxExposure;
-uniform highp float u_minTint;
-uniform highp float u_maxTint;
 uniform highp float u_temporalSmoothing;
 uniform lowp int u_hasPrevious;
 
@@ -148,10 +145,7 @@ void main() {
     }
     vec3 mean = sum / weightSum;
     float lum = max(dot(mean, vec3(0.2126, 0.7152, 0.0722)), 0.001);
-    float average = max((mean.r + mean.g + mean.b) / 3.0, 0.001);
-    vec3 tint = clamp(mean / average, vec3(u_minTint), vec3(u_maxTint));
-    float exposure = clamp(0.18 / lum, u_minExposure, u_maxExposure);
-    vec4 estimate = vec4(tint, exposure);
+    vec4 estimate = vec4(mean / lum, lum);
     if (u_hasPrevious != 0) estimate = mix(estimate, imageLoad(u_output, id), u_temporalSmoothing);
     imageStore(u_output, id, estimate);
 }
@@ -410,9 +404,11 @@ void CameraLightEstimationSystem::Update(
         EntityManager& ecs, const OVRFW::ovrApplFrameIn& in, bool focused) {
     CoreComponent* coreComponent = nullptr; CoreState* coreState = nullptr;
     EnvironmentDepthState* depth = nullptr; TransformState* transform = nullptr;
+    FrameLoaderComponent* loader = nullptr;
     ecs.ForEachMulti<CoreComponent, CoreState>([&](EntityID, CoreComponent& c, CoreState& s) { coreComponent=&c; coreState=&s; });
     ecs.ForEach<EnvironmentDepthState>([&](EntityID, EnvironmentDepthState& d) { depth=&d; });
     ecs.ForEach<TransformState>([&](EntityID, TransformState& t) { transform=&t; });
+    ecs.ForEach<FrameLoaderComponent>([&](EntityID, FrameLoaderComponent& f) { loader=&f; });
     ecs.ForEachMulti<CameraLightEstimationComponent, CameraLightEstimationState>(
         [&](EntityID, CameraLightEstimationComponent& component, CameraLightEstimationState& state) {
             const double now = NowSeconds();
@@ -422,7 +418,10 @@ void CameraLightEstimationSystem::Update(
                 coreState->XrConvertTimespecTimeToTimeKHR &&
                 coreState->viewSpace != XR_NULL_HANDLE && depth && depth->IsInitialized && transform;
 #if defined(__ANDROID__)
-            if (state.platform && state.platform->cameraCapabilityKnown) {
+            const bool datasetReferenceAvailable = loader && loader->dataset.HasColorReference();
+            if (!datasetReferenceAvailable) {
+                state.globalAvailability = TierAvailability::Unavailable;
+            } else if (state.platform && state.platform->cameraCapabilityKnown) {
                 state.globalAvailability = state.platform->cameraAvailable
                     ? TierAvailability::Available : TierAvailability::Unavailable;
             } else {
@@ -527,12 +526,10 @@ void CameraLightEstimationSystem::Update(
             if (!logLuminance.empty() && colorCount) {
                 const float lum = std::exp(CameraLightMath::TrimmedMean(logLuminance));
                 const OVR::Vector3f mean = colorSum / static_cast<float>(colorCount);
-                const float average = std::max((mean.x+mean.y+mean.z)/3.0f, 0.001f);
+                const float meanLuminance = std::max(
+                    0.2126f*mean.x + 0.7152f*mean.y + 0.0722f*mean.z, 0.001f);
                 OVR::Vector4f target(
-                    CameraLightMath::ClampGain(mean.x/average, component.minTint, component.maxTint),
-                    CameraLightMath::ClampGain(mean.y/average, component.minTint, component.maxTint),
-                    CameraLightMath::ClampGain(mean.z/average, component.minTint, component.maxTint),
-                    CameraLightMath::ClampGain(0.18f/std::max(lum,0.001f), component.minExposure, component.maxExposure));
+                    mean.x/meanLuminance, mean.y/meanLuminance, mean.z/meanLuminance, lum);
                 state.globalLight = state.globalLight * component.temporalSmoothing + target * (1.0f-component.temporalSmoothing);
                 state.tier = LightEstimateTier::Global; state.lastEstimateSeconds = now;
             }
@@ -579,8 +576,6 @@ void CameraLightEstimationSystem::Update(
             glUniform3f(glGetUniformLocation(state.computeProgram,"u_gridMinimum"),state.gridMinimum.x,state.gridMinimum.y,state.gridMinimum.z);
             glUniform3f(glGetUniformLocation(state.computeProgram,"u_gridExtent"),state.gridExtent.x,state.gridExtent.y,state.gridExtent.z);
             glUniform4f(glGetUniformLocation(state.computeProgram,"u_globalLight"),state.globalLight.x,state.globalLight.y,state.globalLight.z,state.globalLight.w);
-            glUniform1f(glGetUniformLocation(state.computeProgram,"u_minExposure"),component.minExposure); glUniform1f(glGetUniformLocation(state.computeProgram,"u_maxExposure"),component.maxExposure);
-            glUniform1f(glGetUniformLocation(state.computeProgram,"u_minTint"),component.minTint); glUniform1f(glGetUniformLocation(state.computeProgram,"u_maxTint"),component.maxTint);
             glUniform1f(glGetUniformLocation(state.computeProgram,"u_temporalSmoothing"),component.temporalSmoothing);
             glUniform1i(glGetUniformLocation(state.computeProgram,"u_hasPrevious"),state.texturesReady ? 1 : 0);
             glDispatchCompute(4,3,4); glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT|GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);

@@ -188,23 +188,35 @@ L = 0.2126 R + 0.7152 G + 0.0722 B
 ```
 
 Samples with `L <= 0.005` or `L >= 0.98` are discarded to reduce the influence of black and
-saturated regions. Valid luminances are accumulated in log space. `TrimmedMean()` removes the
-lowest and highest 10 percent before the mean is exponentiated, producing a robust geometric mean.
+saturated regions. Valid camera luminances are accumulated in log space. `TrimmedMean()` removes
+the lowest and highest 10 percent before the mean is exponentiated, producing a robust geometric
+mean.
 
-The target exposure maps that mean to 18-percent gray:
+## Dataset references calculated during preprocessing
+
+[`load_vipe_results_encode_av1_ffv1_png_libsvtav1.py`](../../preprocess/load_vipe_results_encode_av1_ffv1_png_libsvtav1.py)
+decodes synchronized RGB, mask, and depth frames before writing the manifest. It uses only pixels
+with finite positive depth and linear luminance in `(0.005, 0.98)`. Across the complete sequence it
+accumulates arithmetic mean RGB and geometric mean luminance globally and for every uint8 mask ID:
 
 ```text
-exposure = clamp(0.18 / max(L, 0.001), minExposure, maxExposure)
+datasetChromaticity = meanLinearRGB / dot(meanLinearRGB, [0.2126, 0.7152, 0.0722])
+datasetLuminance = exp(mean(log(pixelLuminance)))
 ```
 
-Tint is the arithmetic mean RGB normalized by its average channel:
+Schema-v2 manifests require the global reference. A mask reference is emitted after at least 1,024
+accepted samples; a missing mask reference falls back to the global value. Schema-v1 datasets play
+normally but make Global and Spatial unavailable.
+
+The captured scene uses the same representation rather than an inverse 18-percent-gray exposure:
 
 ```text
-channelAverage = max((R + G + B) / 3, 0.001)
-tint = clamp(meanRGB / channelAverage, minTint, maxTint)
+sceneChromaticity = meanRGB / dot(meanRGB, [0.2126, 0.7152, 0.0722])
+sceneLuminance = geometricMeanLuminance
 ```
 
-The target is stored as `(tint.r, tint.g, tint.b, exposure)` and smoothed on the CPU:
+The target is stored as `(chromaticity.r, chromaticity.g, chromaticity.b, luminance)` and smoothed
+on the CPU:
 
 ```text
 globalLight = previous * temporalSmoothing
@@ -253,9 +265,9 @@ one invocation for every voxel. Each invocation:
    weight = exp(-distanceSquared / 1.125)  (sigma = 0.75 m)
    ```
 
-If total weight is below `0.05`, the voxel receives `globalLight`. Otherwise the shader derives tint
-and exposure from the weighted mean, using the same bounds as Global. Unlike the CPU estimator, the
-spatial exposure uses ordinary weighted mean luminance rather than a trimmed geometric mean.
+If total weight is below `0.05`, the voxel receives `globalLight`. Otherwise the shader derives
+unit-luminance chromaticity and luminance from the weighted mean. Unlike the CPU estimator, the
+spatial result uses ordinary weighted mean luminance rather than a trimmed geometric mean.
 
 After the first dispatch, each new voxel estimate is mixed with its previous value using
 `temporalSmoothing`. A texture-fetch and shader-image memory barrier makes writes visible to the
@@ -268,13 +280,15 @@ fragment shader. Successful dispatch changes the tier to Spatial.
 
 | Matrix row | Values |
 |---|---|
-| 0 | Global tint RGB and global exposure |
+| 0 | Global scene chromaticity RGB and scene luminance |
 | 1 | Grid minimum XYZ and numeric tier |
 | 2 | Inverse grid extent XYZ and `tierBlend` |
 | 3 | `matchingStrength` and unused values |
 
-When available, the light-field texture is bound through `TEX_LIGHT_FIELD`, declared in
-[`UnlitGeometryRenderComponent.h`](Src/Components/UnlitGeometryRenderComponent.h).
+When available, the light-field texture is bound through `TEX_LIGHT_FIELD`. A nearest-filtered
+`256 x 1` `GL_RGBA16F` lookup is bound through `TEX_DATASET_REFERENCE`; each texel contains the
+corresponding mask's dataset chromaticity and luminance, or the global fallback. Both are declared
+in [`UnlitGeometryRenderComponent.h`](Src/Components/UnlitGeometryRenderComponent.h).
 
 The final correction is implemented by the unlit geometry fragment shader in
 [`UnlitGeometryRenderShaders.h`](Src/Shaders/UnlitGeometryRenderShaders.h). The shader first selects
@@ -289,7 +303,10 @@ the Global estimate. It then applies:
 ```text
 matchAmount = clamp(tierBlend * matchingStrength, 0, 1)
 correctedRGB = videoRGB
-             * mix(1, estimatedTint * estimatedExposure, matchAmount)
+             * mix(1,
+                   clamp(sceneChromaticity / datasetChromaticity, minTint, maxTint)
+                   * clamp(sceneLuminance / datasetLuminance, minExposure, maxExposure),
+                   matchAmount)
 ```
 
 This multiplication occurs in linear RGB before environment-depth occlusion is evaluated. The
@@ -329,6 +346,7 @@ The renderer behaves as follows:
 - Estimate missing or expired: fade toward the unmodified video color.
 - `matchingStrength == 0`: continue estimation but apply no visible correction.
 - Camera permission denied or camera unavailable: continue playback without matching.
+- Dataset has no schema-v2 reference: Global and Spatial are unavailable; playback continues.
 
 Tier changes are logged by `CameraLightEstimationSystem` as `unavailable`, `global`, or `spatial`.
 Camera selection, capture startup, calibration failure, shader compilation/linking, disconnection,

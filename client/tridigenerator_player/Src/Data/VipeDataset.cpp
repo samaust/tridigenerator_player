@@ -30,6 +30,26 @@ bool ReadMatrix(const Json::Value& value, std::array<float, 16>& output) {
     return true;
 }
 
+bool ReadColorReference(const Json::Value& value, VipeColorReference& output) {
+    if (!value.isObject() || !value["chromaticity"].isArray() ||
+        value["chromaticity"].size() != 3 || !value["sample_count"].isUInt64() ||
+        value["sample_count"].asUInt64() == 0 ||
+        !ReadFiniteFloat(value["log_average_luminance"], output.logAverageLuminance) ||
+        output.logAverageLuminance <= 0.0f) {
+        return false;
+    }
+    for (Json::ArrayIndex i = 0; i < 3; ++i) {
+        if (!ReadFiniteFloat(value["chromaticity"][i], output.chromaticity[i]) ||
+            output.chromaticity[i] <= 0.0f) {
+            return false;
+        }
+    }
+    output.sampleCount = value["sample_count"].asUInt64();
+    const float luminance = 0.2126f * output.chromaticity[0] +
+        0.7152f * output.chromaticity[1] + 0.0722f * output.chromaticity[2];
+    return std::abs(luminance - 1.0f) <= 0.02f;
+}
+
 std::array<float, 16> Multiply(
     const std::array<float, 16>& a,
     const std::array<float, 16>& b) {
@@ -97,11 +117,12 @@ bool ParseVipeDataset(const std::string& jsonText, VipeDataset& dataset, std::st
         return false;
     }
     VipeDataset parsed;
-    if (!root["schema_version"].isInt() || root["schema_version"].asInt() != 1) {
-        error = "Only ViPE manifest schema_version 1 is supported";
+    if (!root["schema_version"].isInt() ||
+        (root["schema_version"].asInt() != 1 && root["schema_version"].asInt() != 2)) {
+        error = "Only ViPE manifest schema_version 1 and 2 are supported";
         return false;
     }
-    parsed.schemaVersion = 1;
+    parsed.schemaVersion = root["schema_version"].asInt();
     if (!root["sequence"].isString() || root["sequence"].asString().empty() ||
         !root["file"].isString() || root["file"].asString().empty()) {
         error = "Manifest requires non-empty sequence and file strings";
@@ -235,6 +256,33 @@ bool ParseVipeDataset(const std::string& jsonText, VipeDataset& dataset, std::st
                 parsed.maskLabels.emplace(static_cast<uint8_t>(id), labels[key].asString());
             } catch (const std::exception&) {
                 error = "Mask labels must map uint8 string keys to string values";
+                return false;
+            }
+        }
+    }
+    if (parsed.schemaVersion == 2) {
+        const Json::Value& references = root["color_reference"];
+        if (!references.isObject() || references["color_space"].asString() != "linear_srgb" ||
+            references["aggregation"].asString() != "sequence" ||
+            !ReadColorReference(references["global"], parsed.colorReferences.global) ||
+            !references["masks"].isObject()) {
+            error = "Schema version 2 requires valid sequence-aggregated linear_srgb color_reference metadata";
+            return false;
+        }
+        parsed.colorReferences.colorSpace = "linear_srgb";
+        parsed.colorReferences.aggregation = "sequence";
+        for (const std::string& key : references["masks"].getMemberNames()) {
+            try {
+                size_t consumed = 0;
+                const int id = std::stoi(key, &consumed);
+                VipeColorReference reference;
+                if (consumed != key.size() || id < 0 || id > 255 ||
+                    !ReadColorReference(references["masks"][key], reference)) {
+                    throw std::invalid_argument("invalid mask color reference");
+                }
+                parsed.colorReferences.masks.emplace(static_cast<uint8_t>(id), reference);
+            } catch (const std::exception&) {
+                error = "Color reference masks must map uint8 string keys to valid references";
                 return false;
             }
         }

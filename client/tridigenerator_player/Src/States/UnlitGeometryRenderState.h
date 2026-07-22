@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <string>
 
 #include "OVR_Math.h"
 
@@ -31,4 +32,8 @@ struct UnlitGeometryRenderState {
     OVR::Vector2f environmentDepthTexelSize_ = OVR::Vector2f(0.0f, 0.0f);
     OVR::Vector4f occlusionParams_ = OVR::Vector4f(1.0f, 0.01f, 0.0025f, 0.0f);
     OVR::Matrix4f lightParams_;
+    OVR::Vector4f matchingLimits_ = OVR::Vector4f(0.7f, 1.4f, 0.35f, 2.0f);
+    OVRFW::GlTexture datasetReferenceTexture_;
+    std::string datasetReferenceSequence_;
+    int datasetReferenceSchemaVersion_ = 0;
 };

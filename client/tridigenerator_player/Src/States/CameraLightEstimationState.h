@@ -28,7 +28,8 @@ struct CameraLightEstimationState {
 
     OVR::Vector3f gridMinimum = {-2.0f, -1.5f, -2.0f};
     OVR::Vector3f gridExtent = {4.0f, 3.0f, 4.0f};
-    OVR::Vector4f globalLight = {1.0f, 1.0f, 1.0f, 1.0f};
+    // Captured-scene chromaticity (linear RGB, unit luminance) and luminance.
+    OVR::Vector4f globalLight = {1.0f, 1.0f, 1.0f, 0.18f};
     OVR::Matrix4f localFromCamera;
     OVR::Matrix4f cameraFromLocal;
     OVR::Vector4f cameraIntrinsics = {1.0f, 1.0f, 0.0f, 0.0f};

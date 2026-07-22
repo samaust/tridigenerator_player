@@ -41,6 +41,7 @@ int main() {
     Expect(dataset.maskLabels.at(0) == "background", "background mask label");
     Expect(dataset.maskLabels.at(2) == "animal", "animal mask label");
     Expect(dataset.maskLabels.at(3) == "pet", "pet mask label");
+    Expect(!dataset.HasColorReference(), "schema-v1 dataset has no color reference");
 
     if (!dataset.frames.empty()) {
         const auto identity = RelativeOpenGlCameraPose(
@@ -76,6 +77,26 @@ int main() {
     if (position != std::string::npos) mismatched.replace(position, needle.size(), "\"frame_count\": 121");
     error.clear();
     Expect(!ParseVipeDataset(mismatched, invalid, error), "mismatched frame metadata rejected");
+
+    std::string versionTwo = ReadFile(VIPE_TEST_MANIFEST);
+    const size_t schemaPosition = versionTwo.find("\"schema_version\": 1");
+    if (schemaPosition != std::string::npos) versionTwo.replace(
+        schemaPosition, std::string("\"schema_version\": 1").size(), "\"schema_version\": 2");
+    const size_t finalBrace = versionTwo.find_last_of('}');
+    if (finalBrace != std::string::npos) versionTwo.insert(finalBrace,
+        R"(,"color_reference":{"color_space":"linear_srgb","aggregation":"sequence","global":{"chromaticity":[1.0,1.0,1.0],"log_average_luminance":0.25,"sample_count":4096},"masks":{"2":{"chromaticity":[1.2,0.95,0.85],"log_average_luminance":0.2,"sample_count":2048}}}})");
+    error.clear();
+    Expect(ParseVipeDataset(versionTwo, invalid, error), error.c_str());
+    Expect(invalid.HasColorReference(), "schema-v2 dataset has color reference");
+    Expect(invalid.colorReferences.masks.size() == 1, "per-mask color reference parsed");
+
+    std::string missingReference = versionTwo;
+    const size_t referencePosition = missingReference.find(",\"color_reference\"");
+    if (referencePosition != std::string::npos) missingReference.erase(
+        referencePosition, missingReference.find_last_of('}') - referencePosition);
+    error.clear();
+    Expect(!ParseVipeDataset(missingReference, invalid, error),
+        "schema-v2 dataset without color reference rejected");
 
     return failures == 0 ? 0 : 1;
 }

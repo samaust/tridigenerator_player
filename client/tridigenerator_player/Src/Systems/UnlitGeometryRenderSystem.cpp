@@ -55,6 +55,7 @@
 #include "../States/TransformState.h"
 #include "../States/FrameLoaderState.h"
 #include "../Data/VipeDataset.h"
+#include "../Data/ColorReference.h"
 
 using OVR::Matrix4f;
 using OVR::Posef;
@@ -120,6 +121,8 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
                 {"u_environmentDepthTexelSize", OVRFW::ovrProgramParmType::FLOAT_VECTOR2},
                 {"u_lightField", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
                 {"u_lightParams", OVRFW::ovrProgramParmType::FLOAT_MATRIX4},
+                {"u_datasetColorReference", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
+                {"u_matchingLimits", OVRFW::ovrProgramParmType::FLOAT_VECTOR4},
                 {"u_maskVisibility[0]", OVRFW::ovrProgramParmType::INT},
         };
 
@@ -150,8 +153,8 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
             OVRFW::ovrGraphicsCommand &gc = ugrS.surfaceDefs_[i].graphicsCommand;
             gc.Program = ugrS.ProgramLimited_;
             gc.BindUniformTextures();
-            gc.UniformData[16].Data = ugrC.maskVisibility_.ShaderValues();
-            gc.UniformData[16].Count = 256;
+            gc.UniformData[18].Data = ugrC.maskVisibility_.ShaderValues();
+            gc.UniformData[18].Count = 256;
 
             /// gpu state needs alpha blending
             gc.GpuState.depthEnable = gc.GpuState.depthMaskEnable = true;
@@ -186,6 +189,7 @@ void UnlitGeometryRenderSystem::Shutdown(EntityManager& ecs) {
         }
         OVRFW::GlProgram::Free(ugrS.ProgramLimited_);
         OVRFW::GlProgram::Free(ugrS.ProgramFullRange_);
+        OVRFW::FreeTexture(ugrS.datasetReferenceTexture_);
         ugrS.ProgramLimited_ = {};
         ugrS.ProgramFullRange_ = {};
         ugrS.currentSurfaceSet_ = 0;
@@ -231,6 +235,27 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                  UnlitGeometryRenderComponent &ugrC,
                  UnlitGeometryRenderState &ugrS) {
         UpdateEnvironmentDepthUniforms(ugrC, ugrS, environmentDepthState);
+        if (ugrS.datasetReferenceSequence_ != flC.dataset.sequence ||
+            ugrS.datasetReferenceSchemaVersion_ != flC.dataset.schemaVersion) {
+            OVRFW::FreeTexture(ugrS.datasetReferenceTexture_);
+            const ColorReferenceLookup lookup = BuildColorReferenceLookup(flC.dataset);
+            glGenTextures(1, &ugrS.datasetReferenceTexture_.texture);
+            ugrS.datasetReferenceTexture_.target = GL_TEXTURE_2D;
+            ugrS.datasetReferenceTexture_.Width = 256;
+            ugrS.datasetReferenceTexture_.Height = 1;
+            glBindTexture(GL_TEXTURE_2D, ugrS.datasetReferenceTexture_.texture);
+            glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA16F, 256, 1);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 256, 1, GL_RGBA, GL_FLOAT, lookup.data());
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            ugrS.datasetReferenceSequence_ = flC.dataset.sequence;
+            ugrS.datasetReferenceSchemaVersion_ = flC.dataset.schemaVersion;
+            LOGI("Dataset %s color reference: schema=%d masks=%zu",
+                flC.dataset.sequence.c_str(), flC.dataset.schemaVersion,
+                flC.dataset.colorReferences.masks.size());
+        }
         const OVR::Vector4f global = lightState ? lightState->globalLight : OVR::Vector4f(1.0f);
         const OVR::Vector3f minimum = lightState ? lightState->gridMinimum : OVR::Vector3f(0.0f);
         const OVR::Vector3f inverseExtent = lightState ? OVR::Vector3f(
@@ -240,9 +265,15 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
             minimum.x, minimum.y, minimum.z, lightState ? static_cast<float>(lightState->tier) : 0.0f,
             inverseExtent.x, inverseExtent.y, inverseExtent.z, lightState ? lightState->tierBlend : 0.0f,
             lightComponent ? lightComponent->matchingStrength : 0.0f, 0.0f, 0.0f, 0.0f);
+        ugrS.matchingLimits_ = lightComponent ? OVR::Vector4f(
+            lightComponent->minTint, lightComponent->maxTint,
+            lightComponent->minExposure, lightComponent->maxExposure) :
+            OVR::Vector4f(1.0f, 1.0f, 1.0f, 1.0f);
         for (int surface=0; surface<2; ++surface) {
             auto& gc = ugrS.surfaceDefs_[surface].graphicsCommand;
             gc.UniformData[15].Data = &ugrS.lightParams_;
+            gc.UniformData[17].Data = &ugrS.matchingLimits_;
+            gc.Textures[TEX_DATASET_REFERENCE] = ugrS.datasetReferenceTexture_;
             if (lightState && lightState->texturesReady) {
                 gc.Textures[TEX_LIGHT_FIELD] = OVRFW::GlTexture(
                     lightState->lightFieldTexture, GL_TEXTURE_3D,

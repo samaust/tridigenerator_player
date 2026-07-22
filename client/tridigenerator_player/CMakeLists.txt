@@ -63,6 +63,9 @@ if(UNIX AND NOT ANDROID)
         add_executable(color_matching_control_tests Tests/ColorMatchingControlTests.cpp)
         target_include_directories(color_matching_control_tests PRIVATE Src)
         add_test(NAME color_matching_control_tests COMMAND color_matching_control_tests)
+        add_executable(color_reference_tests Tests/ColorReferenceTests.cpp)
+        target_include_directories(color_reference_tests PRIVATE Src)
+        add_test(NAME color_reference_tests COMMAND color_reference_tests)
         add_executable(mask_visibility_tests
             Tests/MaskVisibilityTests.cpp
             Src/Data/MaskVisibility.cpp)

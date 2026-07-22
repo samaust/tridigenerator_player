@@ -27,6 +27,11 @@ import zipfile
 
 import numpy as np
 
+MIN_COLOR_LUMINANCE = 0.005
+MAX_COLOR_LUMINANCE = 0.98
+MIN_MASK_COLOR_SAMPLES = 1024
+LUMINANCE_WEIGHTS = np.array([0.2126, 0.7152, 0.0722], dtype=np.float64)
+
 
 class VipeEncodingError(RuntimeError):
     """Raised when ViPE artifacts cannot be encoded safely."""
@@ -175,6 +180,112 @@ def decode_mask(data: bytes, name: str, cv2) -> np.ndarray:
             f"Mask {name} must be single-channel uint8, got shape={mask.shape}, dtype={mask.dtype}"
         )
     return mask
+
+
+def srgb_to_linear(values: np.ndarray) -> np.ndarray:
+    """Convert normalized sRGB values to linear sRGB."""
+    values = np.clip(values, 0.0, 1.0)
+    return np.where(
+        values <= 0.04045,
+        values / 12.92,
+        np.power((values + 0.055) / 1.055, 2.4),
+    )
+
+
+def _finish_color_reference(rgb_sum: np.ndarray, log_luminance_sum: float, count: int) -> dict:
+    if count <= 0:
+        raise VipeEncodingError("Dataset contains no valid pixels for a global color reference")
+    mean_rgb = rgb_sum / count
+    mean_luminance = float(np.dot(mean_rgb, LUMINANCE_WEIGHTS))
+    if not math.isfinite(mean_luminance) or mean_luminance <= 0.0:
+        raise VipeEncodingError("Dataset color reference has invalid mean luminance")
+    chromaticity = mean_rgb / mean_luminance
+    log_average = math.exp(log_luminance_sum / count)
+    if not np.all(np.isfinite(chromaticity)) or not math.isfinite(log_average) or log_average <= 0:
+        raise VipeEncodingError("Dataset color reference contains non-finite values")
+    return {
+        "chromaticity": [float(value) for value in chromaticity],
+        "log_average_luminance": float(log_average),
+        "sample_count": int(count),
+    }
+
+
+def accumulate_color_frame(rgb_srgb: np.ndarray, mask: np.ndarray, depth: np.ndarray):
+    """Return additive global/per-mask statistics for one synchronized frame."""
+    rgb = srgb_to_linear(rgb_srgb.astype(np.float64))
+    luminance = np.tensordot(rgb, LUMINANCE_WEIGHTS, axes=([2], [0]))
+    valid = (np.isfinite(depth) & (depth > 0.0) & np.isfinite(luminance) &
+             (luminance > MIN_COLOR_LUMINANCE) &
+             (luminance < MAX_COLOR_LUMINANCE))
+    valid_rgb = rgb[valid]
+    valid_luminance = luminance[valid]
+    valid_masks = mask[valid]
+    per_mask = {}
+    for mask_id in np.unique(valid_masks):
+        selected = valid_masks == mask_id
+        selected_luminance = valid_luminance[selected]
+        per_mask[int(mask_id)] = (
+            valid_rgb[selected].sum(axis=0, dtype=np.float64),
+            float(np.log(selected_luminance).sum(dtype=np.float64)),
+            int(selected_luminance.size),
+        )
+    return (
+        valid_rgb.sum(axis=0, dtype=np.float64),
+        float(np.log(valid_luminance).sum(dtype=np.float64)),
+        int(valid_luminance.size),
+        per_mask,
+    )
+
+
+def calculate_color_references(info: dict, cv2, Imath, OpenEXR) -> dict:
+    """Aggregate global and reliable per-mask linear-color references."""
+    capture = cv2.VideoCapture(str(info["paths"]["rgb"]))
+    if not capture.isOpened():
+        raise VipeEncodingError(f"Failed to decode RGB video: {info['paths']['rgb']}")
+    global_rgb = np.zeros(3, dtype=np.float64)
+    global_log_luminance = 0.0
+    global_count = 0
+    mask_rgb = np.zeros((256, 3), dtype=np.float64)
+    mask_log_luminance = np.zeros(256, dtype=np.float64)
+    mask_counts = np.zeros(256, dtype=np.uint64)
+    try:
+        with zipfile.ZipFile(info["paths"]["mask"]) as masks, \
+             zipfile.ZipFile(info["paths"]["depth"]) as depths:
+            for frame_index, ((_, mask_name), (_, depth_name)) in enumerate(
+                    zip(info["mask_entries"], info["depth_entries"])):
+                ok, bgr = capture.read()
+                if not ok:
+                    raise VipeEncodingError(f"Failed to decode RGB frame {frame_index}")
+                mask = decode_mask(masks.read(mask_name), mask_name, cv2)
+                depth = read_exr_member(depths, depth_name, OpenEXR, Imath)
+                if bgr.shape[:2] != mask.shape or depth.shape != mask.shape:
+                    raise VipeEncodingError(f"Color-reference inputs differ in shape at frame {frame_index}")
+                frame_rgb, frame_log_luminance, count, per_mask = accumulate_color_frame(
+                    bgr[..., ::-1].astype(np.float64) / 255.0, mask, depth)
+                global_rgb += frame_rgb
+                global_log_luminance += frame_log_luminance
+                global_count += count
+                for mask_id, (rgb_sum, log_sum, mask_count) in per_mask.items():
+                    mask_rgb[mask_id] += rgb_sum
+                    mask_log_luminance[mask_id] += log_sum
+                    mask_counts[mask_id] += mask_count
+        if capture.read()[0]:
+            raise VipeEncodingError("RGB video contains more frames than mask and depth archives")
+    finally:
+        capture.release()
+
+    references = {
+        "color_space": "linear_srgb",
+        "aggregation": "sequence",
+        "global": _finish_color_reference(global_rgb, global_log_luminance, global_count),
+        "masks": {},
+    }
+    for mask_id, count_value in enumerate(mask_counts):
+        count = int(count_value)
+        if count >= MIN_MASK_COLOR_SAMPLES:
+            references["masks"][str(mask_id)] = _finish_color_reference(
+                mask_rgb[mask_id], float(mask_log_luminance[mask_id]), count)
+    return references
 
 
 def parse_camera_models(path: Path, expected_indices: list[int]) -> list[str]:
@@ -454,10 +565,12 @@ def verify_output(ffprobe: str, output_path: Path, info: dict) -> None:
             raise VipeEncodingError(f"Stream {stream.get('index')} has incorrect frame count")
 
 
-def make_manifest(sequence: str, output_path: Path, info: dict, depth_info: dict) -> dict:
+def make_manifest(
+        sequence: str, output_path: Path, info: dict, depth_info: dict,
+        color_references: dict) -> dict:
     video = info["video"]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "file": output_path.name,
         "sequence": sequence,
         "frame_count": video["frame_count"],
@@ -496,6 +609,7 @@ def make_manifest(sequence: str, output_path: Path, info: dict, depth_info: dict
             "values": info["intrinsics"].tolist(),
         },
         "mask_labels": info["labels"],
+        "color_reference": color_references,
     }
 
 
@@ -539,6 +653,7 @@ def main() -> int:
         print(f"Inspecting ViPE sequence {sequence!r}...")
         info = inspect_artifacts(root, sequence, ffprobe)
         depth_info = validate_images(info, cv2, Imath, OpenEXR)
+        color_references = calculate_color_references(info, cv2, Imath, OpenEXR)
         print(
             f"Encoding {info['video']['frame_count']} frames at {info['video']['rate']} fps; "
             f"depth range ends at {depth_info['max_depth_metres']:.6g} m"
@@ -548,7 +663,7 @@ def main() -> int:
             args.svt_preset, args.svt_crf,
         )
         verify_output(ffprobe, output_path, info)
-        manifest = make_manifest(sequence, output_path, info, depth_info)
+        manifest = make_manifest(sequence, output_path, info, depth_info, color_references)
         temporary_manifest = manifest_path.with_name(f".{manifest_path.name}.partial")
         temporary_manifest.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         os.replace(temporary_manifest, manifest_path)
