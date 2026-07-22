@@ -51,7 +51,9 @@ private:
     std::unique_ptr<CameraLightEstimationSystem> cameraLightEstimationSystem_;
     std::unique_ptr<UnlitGeometryRenderSystem> unlitGeometryRenderSystem_;
     std::unique_ptr<OVRFW::TinyUI> ui_;
+    std::unique_ptr<OVRFW::TinyUI> playbackUi_;
     OVRFW::VRMenuObject* uiStatusLabel_ = nullptr;
+    OVRFW::VRMenuObject* playbackButton_ = nullptr;
     std::array<bool, 256> maskToggleValues_{};
     UiMode pendingUiMode_ = UiMode::Datasets;
     UiMode currentUiMode_ = UiMode::Datasets;
@@ -74,6 +76,10 @@ private:
     XrAction hapticAction_ = XR_NULL_HANDLE;
 
     void ShutdownUi();
+    void BuildPlaybackControls();
+    void ShutdownPlaybackControls();
+    void TogglePlayback();
+    void RefreshPlaybackControls();
     void BuildDatasetPicker();
     void BuildMaskSelector();
     void BuildColorMatchingControls();

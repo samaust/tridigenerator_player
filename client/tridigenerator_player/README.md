@@ -256,6 +256,10 @@ a demo or test session:
 8. Open `Color matching` from both the dataset and mask screens. Select Disabled, Global, and
    Spatial with a controller trigger and a hand pinch; confirm the status shows both the selected
    and currently active tier and that unavailable tiers cannot be selected.
+9. Select the centered `⏸` control in the bottom playback bar with a controller trigger and a hand
+   pinch. Confirm color, mask, depth, pose, and intrinsics remain frozen until selecting `▶`.
+10. Hide the UI and press A on the right controller to pause and resume. Restore the UI and confirm
+    the icon matches playback state. Pause again, select another dataset, and confirm it resumes.
 
 ### Android permissions
 
@@ -325,6 +329,7 @@ The Android build assigns these controller and hand-tracking controls:
 | Adjust grab distance | Move the right thumbstick up to move farther away or down to move closer. This works regardless of which controller started the grab. | No direct hand-only distance control; the right controller thumbstick remains usable when available. |
 | Two-actor transform | Aim both controller rays at the mesh and hold both grips, then move the controllers to translate, rotate, and uniformly scale it. | Aim both hand rays at the mesh and hold both pinches, then move the hands to translate, rotate, and uniformly scale it. |
 | Toggle UI visibility | Press X on the left controller. | Bring both valid, mutually facing palms together in a deliberate clap. |
+| Pause or resume playback | Press A at any time, or select the centered `⏸`/`▶` control in the bottom bar while the UI is visible. | Aim at the bottom `⏸`/`▶` control and pinch while the UI is visible. |
 | Select color-matching tier | Open `Color matching`, aim at an available Disabled, Global, or Spatial row, and press the index trigger. | Open `Color matching`, aim at an available tier, and pinch the index finger and thumb. |
 | Edit color-matching settings | Select `Edit settings`, then use the `-`, value, and `+` controls. Select Save on the overview to persist the preview. | Use the same controls with an aim pinch; leaving the overview without Save restores the prior values. |
 
@@ -337,7 +342,13 @@ required tracking pose, ends the corresponding grab.
 An actively tracked hand takes precedence over the controller on the same side. Hand tracking is
 optional, and the UI and mesh remain usable with Touch controllers when it is unavailable. Clap
 detection is disabled while the mesh is being manipulated to prevent an interaction from
-unexpectedly hiding the UI. Locomotion and playback controls remain unassigned.
+unexpectedly hiding the UI. Locomotion controls remain unassigned.
+
+The wide playback bar appears at the bottom of every Android UI screen. It shows `⏸` while the
+video is playing and `▶` while paused; the icon describes the action that selecting it performs.
+Pausing freezes the synchronized color, mask, depth, pose, and intrinsics frame while the OpenXR
+render loop and tracking continue. Pressing A works even when the UI and playback bar are hidden.
+A successful dataset change always starts the newly selected video playing.
 
 The color-matching screen is reachable from both the dataset and mask screens. Disabled is always
 available; Global and Spatial are non-interactive while their camera or environment-depth

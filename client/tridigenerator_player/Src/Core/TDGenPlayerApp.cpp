@@ -229,6 +229,9 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     } else {
         BuildDatasetPicker();
     }
+#if defined(__ANDROID__)
+    BuildPlaybackControls();
+#endif
 
     return true;
 }
@@ -275,9 +278,15 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 
     coreSystem_->Update(*entityManager_);
     sceneSystem_->Update(*entityManager_);
+    inputSystem_->Update(*entityManager_, in);
+    entityManager_->ForEach<InputComponent>([&](EntityID, InputComponent& input) {
+        if (Focused && input.rightAPressedThisFrame) {
+            TogglePlayback();
+            input.rightAPressedThisFrame = false;
+        }
+    });
     frameLoaderSystem_->Update(*entityManager_, nowSeconds);
     audioSystem_->Update(*entityManager_);
-    inputSystem_->Update(*entityManager_, in);
     const float deltaSeconds = lastUpdateSeconds_ > 0.0
             ? static_cast<float>(std::clamp(nowSeconds - lastUpdateSeconds_, 0.0, 0.1))
             : 0.0f;
@@ -305,26 +314,30 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 #if defined(__ANDROID__)
     RefreshColorMatchingUi();
 #endif
-    if (ui_ && uiVisible_) {
-        ui_->HitTestDevices().clear();
+    if ((ui_ || playbackUi_) && uiVisible_) {
+        if (ui_) ui_->HitTestDevices().clear();
+        if (playbackUi_) playbackUi_->HitTestDevices().clear();
         entityManager_->ForEach<InputComponent>([&](EntityID, InputComponent& input) {
             for (size_t handIndex = 0; handIndex < input.hands.size(); ++handIndex) {
                 const HandInput& hand = input.hands[handIndex];
                 const ControllerInput& controller = input.controllers[handIndex];
                 if (hand.active && hand.aimValid) {
-                    ui_->AddHitTestRay(
-                            hand.aimPose,
-                            hand.indexPinching,
-                            static_cast<int>(handIndex));
+                    if (ui_) ui_->AddHitTestRay(
+                        hand.aimPose, hand.indexPinching, static_cast<int>(handIndex));
+                    if (playbackUi_) playbackUi_->AddHitTestRay(
+                        hand.aimPose, hand.indexPinching, static_cast<int>(handIndex));
                 } else if (controller.tracked) {
-                    ui_->AddHitTestRay(
-                            controller.aimPose,
-                            controller.indexTrigger > 0.5f,
-                            static_cast<int>(handIndex));
+                    if (ui_) ui_->AddHitTestRay(
+                        controller.aimPose, controller.indexTrigger > 0.5f,
+                        static_cast<int>(handIndex));
+                    if (playbackUi_) playbackUi_->AddHitTestRay(
+                        controller.aimPose, controller.indexTrigger > 0.5f,
+                        static_cast<int>(handIndex));
                 }
             }
         });
-        ui_->Update(in);
+        if (ui_) ui_->Update(in);
+        if (playbackUi_) playbackUi_->Update(in);
 #if defined(__ANDROID__)
         PreviewColorMatchingDraft();
 #endif
@@ -344,6 +357,9 @@ void TDGenPlayerApp::AppRenderFrame(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrR
     OVRFW::XrApp::AppRenderFrame(in, out);
     if (ui_ && uiVisible_) {
         ui_->Render(in, out);
+    }
+    if (playbackUi_ && uiVisible_) {
+        playbackUi_->Render(in, out);
     }
 }
 
@@ -372,6 +388,7 @@ void TDGenPlayerApp::SessionEnd()
 
 void TDGenPlayerApp::AppShutdown(const xrJava *context)
 {
+    ShutdownPlaybackControls();
     ShutdownUi();
     // Explicitly destroy the systems and entity manager.
     // This is good practice to control the shutdown order.
@@ -414,6 +431,47 @@ void TDGenPlayerApp::ShutdownUi() {
         ui_.reset();
     }
     uiStatusLabel_ = nullptr;
+}
+
+void TDGenPlayerApp::BuildPlaybackControls() {
+#if defined(__ANDROID__)
+    ShutdownPlaybackControls();
+    playbackUi_ = std::make_unique<OVRFW::TinyUI>();
+    if (!playbackUi_->Init(GetContext(), GetFileSys())) {
+        LOGE("Failed to initialize playback controls UI");
+        playbackUi_.reset();
+        return;
+    }
+    playbackUi_->AddLabel("", {0.0f, -0.48f, -1.52f}, {900.0f, 70.0f});
+    playbackButton_ = playbackUi_->AddButton(
+        "⏸", {0.0f, -0.48f, -1.49f}, {120.0f, 54.0f},
+        [this]() { TogglePlayback(); });
+    RefreshPlaybackControls();
+#endif
+}
+
+void TDGenPlayerApp::ShutdownPlaybackControls() {
+    if (playbackUi_) {
+        playbackUi_->Shutdown();
+        playbackUi_.reset();
+    }
+    playbackButton_ = nullptr;
+}
+
+void TDGenPlayerApp::TogglePlayback() {
+    if (!frameLoaderSystem_ || !entityManager_ || objectEntity_ == 0) return;
+    auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+    auto& state = entityManager_->GetComponent<FrameLoaderState>(objectEntity_);
+    using clock = std::chrono::steady_clock;
+    const double now = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+    frameLoaderSystem_->TogglePaused(now, loader, state);
+    RefreshPlaybackControls();
+}
+
+void TDGenPlayerApp::RefreshPlaybackControls() {
+    if (!playbackButton_ || !entityManager_ || objectEntity_ == 0) return;
+    const auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+    playbackButton_->SetText(loader.paused ? "▶" : "⏸");
 }
 
 void TDGenPlayerApp::BuildDatasetPicker() {
@@ -786,6 +844,10 @@ void TDGenPlayerApp::SelectDataset(const std::string& datasetId) {
     unlitGeometryRenderSystem_->Shutdown(*entityManager_);
     const bool selected = frameLoaderSystem_->SelectDataset(datasetId, loader, loaderState);
     if (selected) {
+        using clock = std::chrono::steady_clock;
+        const double now = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+        frameLoaderSystem_->SetPaused(false, now, loader, loaderState);
+        RefreshPlaybackControls();
 #if defined(__ANDROID__)
         LoadColorMatchingSettingsForDataset();
 #endif

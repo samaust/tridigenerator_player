@@ -13,6 +13,9 @@ public:
     void StopBackgroundWriter(FrameLoaderComponent& flC,
                               FrameLoaderState& flS);
     void SetFPS(double newFps, FrameLoaderComponent& flC, FrameLoaderState& flS);
+    void SetPaused(bool paused, double nowSeconds,
+                   FrameLoaderComponent& flC, FrameLoaderState& flS);
+    void TogglePaused(double nowSeconds, FrameLoaderComponent& flC, FrameLoaderState& flS);
     bool SelectDataset(
         const std::string& datasetId,
         FrameLoaderComponent& flC,

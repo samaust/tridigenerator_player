@@ -30,6 +30,7 @@
 #include "../Components/FrameLoaderComponent.h"
 #include "../States/FrameLoaderState.h"
 #include "../Data/VipeDataset.h"
+#include "../Data/PlaybackControl.h"
 
 static constexpr int RING_SIZE = 8;
 
@@ -138,7 +139,9 @@ void FrameLoaderSystem::Update(EntityManager& ecs, double nowSeconds) {
                      FrameLoaderState &flS) {
         // Save framePtr to component state for use in rendering
         // based on fps and newReadTime
-        SwapNextFrame(nowSeconds,flC, flS);
+        if (ShouldConsumePlaybackFrame(flC.paused)) {
+            SwapNextFrame(nowSeconds,flC, flS);
+        }
     });
 }
 
@@ -260,6 +263,15 @@ bool FrameLoaderSystem::SelectDataset(
         flC.errorMessage = "Dataset is not present in catalog: " + datasetId;
         return false;
     }
+    const std::string previousSelectedDatasetId = flC.selectedDatasetId;
+    const std::string previousManifestLocation = flC.manifestLocation;
+    const std::string previousVideoLocation = flC.videoLocation;
+    const std::string previousFile = flC.file;
+    const int previousWidth = flC.width;
+    const int previousHeight = flC.height;
+    const double previousFps = flC.fps;
+    const float previousDepthScaleFactor = flC.depthScaleFactor;
+    const VipeDataset previousDataset = flC.dataset;
     StopBackgroundWriter(flC, flS);
     for (FrameSlot& slot : flS.ring) {
         slot.ready.store(false, std::memory_order_release);
@@ -280,6 +292,20 @@ bool FrameLoaderSystem::SelectDataset(
     flC.manifestLocation = selected->manifest;
 #endif
     if (!LoadManifest(flC, flS)) {
+        const std::string selectionError = flC.errorMessage;
+        flC.selectedDatasetId = previousSelectedDatasetId;
+        flC.manifestLocation = previousManifestLocation;
+        flC.videoLocation = previousVideoLocation;
+        flC.file = previousFile;
+        flC.width = previousWidth;
+        flC.height = previousHeight;
+        flC.fps = previousFps;
+        flC.depthScaleFactor = previousDepthScaleFactor;
+        flC.dataset = previousDataset;
+        flC.errorMessage = selectionError;
+        if (!previousSelectedDatasetId.empty() && !previousVideoLocation.empty()) {
+            StartBackgroundWriter(flC, flS);
+        }
         return false;
     }
     StartBackgroundWriter(flC, flS);
@@ -551,6 +577,23 @@ void FrameLoaderSystem::SetFPS(double newFps, FrameLoaderComponent& flC, FrameLo
     std::lock_guard<std::mutex> lk(flS.timingMutex);
     using clock = std::chrono::steady_clock;
     flS.nextReadTime = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+}
+
+void FrameLoaderSystem::SetPaused(
+        bool paused, double nowSeconds,
+        FrameLoaderComponent& flC, FrameLoaderState& flS) {
+    const bool wasPaused = flC.paused;
+    if (wasPaused == paused) return;
+    flC.paused = paused;
+    std::lock_guard<std::mutex> lock(flS.timingMutex);
+    flS.nextReadTime = PlaybackDeadlineAfterPauseChange(
+        wasPaused, paused, nowSeconds, flS.nextReadTime);
+    LOGI("Video playback %s", paused ? "paused" : "resumed");
+}
+
+void FrameLoaderSystem::TogglePaused(
+        double nowSeconds, FrameLoaderComponent& flC, FrameLoaderState& flS) {
+    SetPaused(!flC.paused, nowSeconds, flC, flS);
 }
 
 /**

@@ -8,6 +8,7 @@
 #include "../Components/InputComponent.h"
 #include "../States/CoreState.h"
 #include "../States/InputState.h"
+#include "../Data/PlaybackControl.h"
 
 #define LOG_TAG "InputSystem"
 #include "../Core/Logging.h"
@@ -180,9 +181,10 @@ void InputSystem::Update(EntityManager& ecs, const OVRFW::ovrApplFrameIn& in) {
         input.lastButtons = in.LastFrameAllButtons;
         input.touches = in.AllTouches;
         input.lastTouches = in.LastFrameAllTouches;
-        input.leftXPressedThisFrame =
-                (input.buttons & OVRFW::ovrApplFrameIn::kButtonX) != 0 &&
-                (input.lastButtons & OVRFW::ovrApplFrameIn::kButtonX) == 0;
+        input.leftXPressedThisFrame = ButtonPressedThisFrame(
+            input.buttons, input.lastButtons, OVRFW::ovrApplFrameIn::kButtonX);
+        input.rightAPressedThisFrame = ButtonPressedThisFrame(
+            input.buttons, input.lastButtons, OVRFW::ovrApplFrameIn::kButtonA);
         input.uiToggleRequested = input.leftXPressedThisFrame;
 
         input.controllers[InputComponent::Left] = {

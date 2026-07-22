@@ -43,5 +43,6 @@ struct InputComponent {
     uint32_t touches{0};
     uint32_t lastTouches{0};
     bool leftXPressedThisFrame{false};
+    bool rightAPressedThisFrame{false};
     bool uiToggleRequested{false};
 };
