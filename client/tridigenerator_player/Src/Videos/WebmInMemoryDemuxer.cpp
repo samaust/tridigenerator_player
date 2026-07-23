@@ -130,6 +130,12 @@ WebmInMemoryDemuxer::~WebmInMemoryDemuxer() {
         dav1d_close(&dav1dCtx_);
         dav1dCtx_ = nullptr;
     }
+    avcodec_free_context(&alphaCodecCtx_);
+    avcodec_free_context(&depthCodecCtx_);
+    avcodec_free_context(&audioCodecCtx_);
+    sws_freeContext(swsCtx_);
+    swsCtx_ = nullptr;
+    swr_free(&swrCtx_);
 
     if (fmtCtx_) {
         avformat_close_input(&fmtCtx_);
@@ -187,6 +193,7 @@ bool WebmInMemoryDemuxer::init(std::string* error) {
         colorStreamIndex_ = -1;
         alphaStreamIndex_ = -1;
         depthStreamIndex_ = -1;
+        audioStreamIndex_ = -1;
 
         for (unsigned i = 0; i < fmtCtx_->nb_streams; ++i) {
             AVStream* stream = fmtCtx_->streams[i];
@@ -204,6 +211,9 @@ bool WebmInMemoryDemuxer::init(std::string* error) {
                     depthStreamIndex_ = (int)i;
                     LOGI("Found FFV1 depth stream (gray16be) at index %d", i);
                 }
+            } else if (cp->codec_type == AVMEDIA_TYPE_AUDIO && audioStreamIndex_ == -1) {
+                audioStreamIndex_ = static_cast<int>(i);
+                LOGI("Found optional audio stream at index %d", i);
             }
         }
 
@@ -243,6 +253,38 @@ bool WebmInMemoryDemuxer::init(std::string* error) {
         );
         if (!swsCtx_) throw std::runtime_error("Could not initialize SwsContext");
 
+        if (audioStreamIndex_ >= 0) {
+            AVStream* audioStream = fmtCtx_->streams[audioStreamIndex_];
+            const AVCodec* audioCodec = avcodec_find_decoder(audioStream->codecpar->codec_id);
+            if (!audioCodec) {
+                LOGI("No decoder for optional audio stream; continuing silently");
+                audioStreamIndex_ = -1;
+            } else {
+                audioCodecCtx_ = avcodec_alloc_context3(audioCodec);
+                if (!audioCodecCtx_) throw std::bad_alloc();
+                throw_if_ffmpeg_err(
+                    avcodec_parameters_to_context(audioCodecCtx_, audioStream->codecpar),
+                    "audio avcodec_parameters_to_context");
+                throw_if_ffmpeg_err(
+                    avcodec_open2(audioCodecCtx_, audioCodec, nullptr),
+                    "audio avcodec_open2");
+                AVChannelLayout outputLayout;
+                av_channel_layout_default(&outputLayout, 2);
+                const int resamplerResult = swr_alloc_set_opts2(
+                    &swrCtx_,
+                    &outputLayout, AV_SAMPLE_FMT_FLT, audioOutputSampleRate_,
+                    &audioCodecCtx_->ch_layout, audioCodecCtx_->sample_fmt,
+                    audioCodecCtx_->sample_rate, 0, nullptr);
+                av_channel_layout_uninit(&outputLayout);
+                if (resamplerResult < 0 || !swrCtx_ || swr_init(swrCtx_) < 0) {
+                    LOGI("Could not initialize optional audio resampler; continuing silently");
+                    swr_free(&swrCtx_);
+                    avcodec_free_context(&audioCodecCtx_);
+                    audioStreamIndex_ = -1;
+                }
+            }
+        }
+
         // Set main timebase/width/height from the color stream
         AVStream* vst = fmtCtx_->streams[colorStreamIndex_];
         timeBase_ = vst->time_base;
@@ -259,6 +301,12 @@ bool WebmInMemoryDemuxer::init(std::string* error) {
         if (error) *error = ex.what();
         // cleanup partial state
         if (dav1dCtx_) { dav1d_close(&dav1dCtx_); dav1dCtx_ = nullptr; }
+        avcodec_free_context(&alphaCodecCtx_);
+        avcodec_free_context(&depthCodecCtx_);
+        avcodec_free_context(&audioCodecCtx_);
+        sws_freeContext(swsCtx_);
+        swsCtx_ = nullptr;
+        swr_free(&swrCtx_);
         if (fmtCtx_) { avformat_close_input(&fmtCtx_); fmtCtx_ = nullptr; }
         if (avioCtx_) {
             if (avioCtx_->buffer) av_free(avioCtx_->buffer);
@@ -289,7 +337,59 @@ bool WebmInMemoryDemuxer::seek_to_start() {
 
     flush_decoders();
     nextFrameIndex_ = 0;
+    pendingAudio_.clear();
+    if (audioCodecCtx_) avcodec_flush_buffers(audioCodecCtx_);
+    if (swrCtx_) {
+        swr_close(swrCtx_);
+        swr_init(swrCtx_);
+    }
     return true;
+}
+
+std::vector<AudioPcmBlock> WebmInMemoryDemuxer::take_audio_blocks() {
+    std::vector<AudioPcmBlock> result;
+    result.swap(pendingAudio_);
+    return result;
+}
+
+void WebmInMemoryDemuxer::drain_audio_frames() {
+    if (!audioCodecCtx_ || !swrCtx_) return;
+    AVFrame* frame = av_frame_alloc();
+    if (!frame) return;
+    while (avcodec_receive_frame(audioCodecCtx_, frame) == 0) {
+        const int outputFrames = static_cast<int>(av_rescale_rnd(
+            swr_get_delay(swrCtx_, audioCodecCtx_->sample_rate) + frame->nb_samples,
+            audioOutputSampleRate_, audioCodecCtx_->sample_rate, AV_ROUND_UP));
+        AudioPcmBlock block;
+        block.sampleRate = audioOutputSampleRate_;
+        block.channels = 2;
+        block.samples.resize(static_cast<size_t>(outputFrames) * 2);
+        uint8_t* output[] = {
+            reinterpret_cast<uint8_t*>(block.samples.data())
+        };
+        const int converted = swr_convert(
+            swrCtx_, output, outputFrames,
+            const_cast<const uint8_t**>(frame->extended_data), frame->nb_samples);
+        if (converted > 0) {
+            block.samples.resize(static_cast<size_t>(converted) * 2);
+            int64_t pts = frame->best_effort_timestamp;
+            if (pts == AV_NOPTS_VALUE) pts = frame->pts;
+            const AVRational timeBase = fmtCtx_->streams[audioStreamIndex_]->time_base;
+            block.timestampUs = pts == AV_NOPTS_VALUE
+                ? 0
+                : av_rescale_q(pts, timeBase, AVRational{1, 1000000});
+            pendingAudio_.push_back(std::move(block));
+        }
+        av_frame_unref(frame);
+    }
+    av_frame_free(&frame);
+}
+
+void WebmInMemoryDemuxer::decode_audio_packet(const AVPacket* pkt) {
+    if (!audioCodecCtx_) return;
+    if (avcodec_send_packet(audioCodecCtx_, pkt) >= 0) {
+        drain_audio_frames();
+    }
 }
 
 // ---------- read packet (wrapper) ----------
@@ -595,6 +695,8 @@ bool WebmInMemoryDemuxer::decode_next_frame(VideoFrame& outFrame) {
             avcodec_send_packet(alphaCodecCtx_, &pkt);
         } else if (pkt.stream_index == depthStreamIndex_) {
             avcodec_send_packet(depthCodecCtx_, &pkt);
+        } else if (pkt.stream_index == audioStreamIndex_) {
+            decode_audio_packet(&pkt);
         }
 
         av_packet_unref(&pkt);
@@ -615,6 +717,9 @@ bool WebmInMemoryDemuxer::decode_next_frame(VideoFrame& outFrame) {
 // ---------- flush / reset ----------
 void WebmInMemoryDemuxer::flush_decoders() {
     if (dav1dCtx_) dav1d_flush(dav1dCtx_);
+    if (alphaCodecCtx_) avcodec_flush_buffers(alphaCodecCtx_);
+    if (depthCodecCtx_) avcodec_flush_buffers(depthCodecCtx_);
+    if (audioCodecCtx_) avcodec_flush_buffers(audioCodecCtx_);
     // FFmpeg codec contexts aren't used here (we use raw packets + dav1d directly),
     // but to be safe we can drop any internal buffers by seeking to current position.
     // avcodec_flush_buffers() would be used if we had an AVCodecContext open.

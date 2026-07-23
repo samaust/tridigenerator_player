@@ -40,6 +40,11 @@ struct VipeDataset {
     std::vector<VipeFrameMetadata> frames;
     std::unordered_map<uint8_t, std::string> maskLabels;
     VipeDatasetColorReferences colorReferences;
+    bool hasAudio = false;
+    int audioStreamIndex = -1;
+    std::string audioCodec;
+    int audioSampleRate = 0;
+    int audioChannels = 0;
 
     bool HasColorReference() const { return schemaVersion >= 2; }
 };

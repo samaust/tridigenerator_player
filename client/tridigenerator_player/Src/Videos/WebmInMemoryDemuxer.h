@@ -8,6 +8,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
 #include <libavutil/avutil.h>
 #include <libavutil/pixfmt.h>
 }
@@ -17,7 +18,7 @@ extern "C" {
 #include <dav1d/picture.h>
 
 #include "Render/VideoFrame.h"
-
+#include "AudioPcmBlock.h"
 
 /**
  * @class WebmInMemoryDemuxer
@@ -66,6 +67,9 @@ public:
      */
     int width() const { return width_; }
     int height() const { return height_; }
+    bool has_audio() const { return audioStreamIndex_ >= 0 && audioCodecCtx_ != nullptr; }
+    int audio_sample_rate() const { return audioOutputSampleRate_; }
+    std::vector<AudioPcmBlock> take_audio_blocks();
 
 private:
     // Core initialization steps
@@ -83,6 +87,8 @@ private:
 
     // Convert Dav1dPicture → tightly packed YUV420 buffers
     bool copy_picture_planes(const Dav1dPicture* pic, VideoFrame& outFrame);
+    void decode_audio_packet(const AVPacket* pkt);
+    void drain_audio_frames();
 
     // Reset decoder state (for seeking)
     void flush_decoders();
@@ -98,6 +104,7 @@ private:
     int colorStreamIndex_ = -1;
     int alphaStreamIndex_ = -1;
     int depthStreamIndex_ = -1;
+    int audioStreamIndex_ = -1;
 
     // --- DECODER CONTEXTS ---
     // dav1d for AV1 color stream
@@ -106,7 +113,11 @@ private:
     AVCodecContext* alphaCodecCtx_ = nullptr;
     // FFmpeg AVCodec for PNG depth stream
     AVCodecContext* depthCodecCtx_ = nullptr;
+    AVCodecContext* audioCodecCtx_ = nullptr;
     SwsContext* swsCtx_ = nullptr;
+    SwrContext* swrCtx_ = nullptr;
+    int audioOutputSampleRate_ = 48000;
+    std::vector<AudioPcmBlock> pendingAudio_;
 
     // Video parameters
     int width_ = 0;

@@ -168,6 +168,22 @@ bool ParseVipeDataset(const std::string& jsonText, VipeDataset& dataset, std::st
         error = "Manifest stream contract must be AV1 color, FFV1 gray mask, and PNG gray16be depth";
         return false;
     }
+    const Json::Value& audio = streams["audio"];
+    if (!audio.isNull()) {
+        if (!audio.isObject() || !audio["index"].isInt() ||
+            audio["index"].asInt() != 3 || !audio["codec"].isString() ||
+            audio["codec"].asString().empty() || !audio["sample_rate"].isInt() ||
+            audio["sample_rate"].asInt() <= 0 || !audio["channels"].isInt() ||
+            audio["channels"].asInt() <= 0) {
+            error = "Manifest audio stream requires index 3, codec, sample_rate, and channels";
+            return false;
+        }
+        parsed.hasAudio = true;
+        parsed.audioStreamIndex = audio["index"].asInt();
+        parsed.audioCodec = audio["codec"].asString();
+        parsed.audioSampleRate = audio["sample_rate"].asInt();
+        parsed.audioChannels = audio["channels"].asInt();
+    }
 
     const Json::Value& depth = root["depth"];
     if (!depth.isObject() || depth["encoding"].asString() != "uint16_linear" ||

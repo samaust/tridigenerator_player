@@ -42,6 +42,24 @@ int main() {
     Expect(dataset.maskLabels.at(2) == "animal", "animal mask label");
     Expect(dataset.maskLabels.at(3) == "pet", "pet mask label");
     Expect(!dataset.HasColorReference(), "schema-v1 dataset has no color reference");
+    Expect(!dataset.hasAudio, "legacy manifest remains valid without audio");
+
+    std::string withAudio = ReadFile(VIPE_TEST_MANIFEST);
+    const std::string depthStream = "\"pixel_format\": \"gray16be\"\n    }";
+    const size_t depthStreamPosition = withAudio.find(depthStream);
+    if (depthStreamPosition != std::string::npos) {
+        withAudio.insert(
+            depthStreamPosition + depthStream.size(),
+            R"(,
+    "audio": {"index": 3, "codec": "aac", "sample_rate": 44100, "channels": 2})");
+    }
+    VipeDataset audioDataset;
+    error.clear();
+    Expect(ParseVipeDataset(withAudio, audioDataset, error), error.c_str());
+    Expect(audioDataset.hasAudio && audioDataset.audioStreamIndex == 3,
+        "optional audio stream parsed");
+    Expect(audioDataset.audioCodec == "aac" && audioDataset.audioSampleRate == 44100 &&
+        audioDataset.audioChannels == 2, "audio properties parsed");
 
     if (!dataset.frames.empty()) {
         const auto identity = RelativeOpenGlCameraPose(

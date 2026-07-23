@@ -10,6 +10,7 @@ if(UNIX AND NOT ANDROID)
     pkg_check_modules(AVCODEC REQUIRED IMPORTED_TARGET libavcodec)
     pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil)
     pkg_check_modules(SWSCALE REQUIRED IMPORTED_TARGET libswscale)
+    pkg_check_modules(SWRESAMPLE REQUIRED IMPORTED_TARGET libswresample)
     pkg_check_modules(DAV1D REQUIRED IMPORTED_TARGET dav1d)
     pkg_check_modules(JSONCPP REQUIRED IMPORTED_TARGET jsoncpp)
 
@@ -31,6 +32,7 @@ if(UNIX AND NOT ANDROID)
         OpenGL::GL X11::X11 pthread
         PkgConfig::OPENXR PkgConfig::AVFORMAT PkgConfig::AVCODEC
         PkgConfig::AVUTIL PkgConfig::SWSCALE PkgConfig::DAV1D PkgConfig::JSONCPP)
+    target_link_libraries(${PROJECT_NAME} PRIVATE PkgConfig::SWRESAMPLE)
     if(BUILD_TESTING)
         add_executable(vipe_dataset_tests
             Tests/VipeDatasetTests.cpp
@@ -49,7 +51,7 @@ if(UNIX AND NOT ANDROID)
             VIPE_TEST_VIDEO="${CMAKE_SOURCE_DIR}/../vipe_encoded/dog-example.mkv")
         target_link_libraries(vipe_decoder_tests PRIVATE
             PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL
-            PkgConfig::SWSCALE PkgConfig::DAV1D)
+            PkgConfig::SWSCALE PkgConfig::SWRESAMPLE PkgConfig::DAV1D)
         add_test(NAME vipe_decoder_tests COMMAND vipe_decoder_tests)
         add_executable(linux_stereo_tests
             Tests/LinuxStereoTests.cpp
@@ -129,6 +131,7 @@ if(ANDROID)
     # Link libraries (only link files that actually exist)
     set(ANDROID_LINK_LIBS
             android
+            aaudio
             camera2ndk
             CURL::libcurl
             EGL

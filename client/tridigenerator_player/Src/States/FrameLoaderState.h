@@ -6,8 +6,10 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <deque>
 
 #include "Render/VideoFrame.h"
+#include "../Videos/AudioPcmBlock.h"
 
 // Ring buffer slot
 struct FrameSlot {
@@ -66,6 +68,17 @@ struct FrameLoaderState {
     double nextReadTime = 0.0; // seconds (monotonic) when next frame should be consumed
     std::mutex timingMutex;    // protects nextReadTime updates
 
+    // Optional decoded stereo audio. The writer fills this queue and the
+    // Android AAudio callback consumes it.
+    std::deque<AudioPcmBlock> audioQueue;
+    std::mutex audioMutex;
+    size_t audioSampleOffset = 0;
+    std::atomic<bool> audioAvailable{false};
+    std::atomic<bool> audioStarted{false};
+    std::atomic<int64_t> audioPlayedFrames{0};
+    std::atomic<int64_t> audioEpochUs{0};
+    std::atomic<int> audioSampleRate{48000};
+
     VideoFrame** framePtr = nullptr;
     std::atomic<bool> frameReady{false};
 
@@ -82,10 +95,17 @@ struct FrameLoaderState {
             ring(std::move(other.ring)),
     writerThread(std::move(other.writerThread)),
     nextReadTime(other.nextReadTime),
+    audioQueue(std::move(other.audioQueue)),
+    audioSampleOffset(other.audioSampleOffset),
     framePtr(other.framePtr) {
         // Manually move atomic values
         writeIdx.store(other.writeIdx.load());
         readIdx.store(other.readIdx.load());
+        audioAvailable.store(other.audioAvailable.load());
+        audioStarted.store(other.audioStarted.load());
+        audioPlayedFrames.store(other.audioPlayedFrames.load());
+        audioEpochUs.store(other.audioEpochUs.load());
+        audioSampleRate.store(other.audioSampleRate.load());
         // Mutexes and CVs are not moved; they are default-constructed in the new object.
         // `other` is now in a valid but unspecified state.
         other.framePtr = nullptr;
@@ -99,11 +119,18 @@ struct FrameLoaderState {
             ring = std::move(other.ring);
             writerThread = std::move(other.writerThread);
             nextReadTime = other.nextReadTime;
+            audioQueue = std::move(other.audioQueue);
+            audioSampleOffset = other.audioSampleOffset;
             framePtr = other.framePtr;
 
             // Manually move atomic values
             writeIdx.store(other.writeIdx.load());
             readIdx.store(other.readIdx.load());
+            audioAvailable.store(other.audioAvailable.load());
+            audioStarted.store(other.audioStarted.load());
+            audioPlayedFrames.store(other.audioPlayedFrames.load());
+            audioEpochUs.store(other.audioEpochUs.load());
+            audioSampleRate.store(other.audioSampleRate.load());
 
             // Leave the source object in a valid state
             other.framePtr = nullptr;
@@ -120,6 +147,8 @@ inline void swap(FrameLoaderState& a, FrameLoaderState& b) noexcept {
     swap(a.framePool, b.framePool);
     swap(a.ring, b.ring);
     swap(a.nextReadTime, b.nextReadTime);
+    swap(a.audioQueue, b.audioQueue);
+    swap(a.audioSampleOffset, b.audioSampleOffset);
     swap(a.framePtr, b.framePtr);
 
     // --- Manually swap atomic members ---
@@ -132,6 +161,27 @@ inline void swap(FrameLoaderState& a, FrameLoaderState& b) noexcept {
     int readIdxB = b.readIdx.load();
     a.readIdx.store(readIdxB);
     b.readIdx.store(readIdxA);
+
+    bool audioAvailableA = a.audioAvailable.load();
+    bool audioAvailableB = b.audioAvailable.load();
+    a.audioAvailable.store(audioAvailableB);
+    b.audioAvailable.store(audioAvailableA);
+    bool audioStartedA = a.audioStarted.load();
+    bool audioStartedB = b.audioStarted.load();
+    a.audioStarted.store(audioStartedB);
+    b.audioStarted.store(audioStartedA);
+    int64_t audioPlayedA = a.audioPlayedFrames.load();
+    int64_t audioPlayedB = b.audioPlayedFrames.load();
+    a.audioPlayedFrames.store(audioPlayedB);
+    b.audioPlayedFrames.store(audioPlayedA);
+    int64_t audioEpochA = a.audioEpochUs.load();
+    int64_t audioEpochB = b.audioEpochUs.load();
+    a.audioEpochUs.store(audioEpochB);
+    b.audioEpochUs.store(audioEpochA);
+    int audioRateA = a.audioSampleRate.load();
+    int audioRateB = b.audioSampleRate.load();
+    a.audioSampleRate.store(audioRateB);
+    b.audioSampleRate.store(audioRateA);
 
     // --- DO NOT SWAP THREAD, MUTEXES, OR CONDITION VARIABLES ---
     // a.writerThread, b.writerThread

@@ -68,24 +68,26 @@ directory.
 
 ### Matroska stream contract
 
-The Matroska file contains exactly three synchronized video streams:
+The Matroska file contains exactly three synchronized video streams and may
+also contain the source video's first audio stream:
 
 | Index | Content | Codec | Pixel format | Value |
 |---:|---|---|---|---|
 | 0 | Color | AV1 | `yuv420p` | 8-bit YUV 4:2:0 color. |
 | 1 | Mask | FFV1 | `gray` | 8-bit label or visibility value. |
 | 2 | Depth | PNG | `gray16be` | Big-endian unsigned 16-bit linear depth. |
+| 3 (optional) | Audio | Source codec | Source format | Head-locked source audio. |
 
 All three streams must use the manifest's `width`, `height`, and rational `frame_rate`, and each
 must contain `frame_count` frames. For each output frame, the player decodes one color, mask, and
-depth frame as a synchronized set. Audio and additional video streams are not part of the
-stream contract.
+depth frame as a synchronized set. Audio is optional; datasets without it remain valid and
+play silently. Additional video streams are not part of the stream contract.
 
 Inspect an encoded file with:
 
 ```bash
 ffprobe -v error -count_frames \
-  -show_entries stream=index,codec_name,pix_fmt,width,height,avg_frame_rate,nb_read_frames \
+  -show_entries stream=index,codec_name,codec_type,pix_fmt,width,height,avg_frame_rate,nb_read_frames,sample_rate,channels \
   -of compact=p=0:nk=0 vipe_encoded/dog-example.mkv
 ```
 
@@ -113,7 +115,8 @@ This single-frame example shows the complete structure accepted by the player:
   "streams": {
     "color": {"index": 0, "codec": "av1", "pixel_format": "yuv420p"},
     "mask": {"index": 1, "codec": "ffv1", "pixel_format": "gray"},
-    "depth": {"index": 2, "codec": "png", "pixel_format": "gray16be"}
+    "depth": {"index": 2, "codec": "png", "pixel_format": "gray16be"},
+    "audio": {"index": 3, "codec": "aac", "sample_rate": 44100, "channels": 2}
   },
   "depth": {
     "encoding": "uint16_linear",

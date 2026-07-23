@@ -33,6 +33,17 @@
 #include "../Data/PlaybackControl.h"
 
 static constexpr int RING_SIZE = 8;
+static constexpr size_t MAX_AUDIO_SAMPLES = 48000 * 2 * 2;
+
+static void ResetAudioState(FrameLoaderState& state) {
+    std::lock_guard<std::mutex> lock(state.audioMutex);
+    state.audioQueue.clear();
+    state.audioSampleOffset = 0;
+    state.audioAvailable.store(false, std::memory_order_release);
+    state.audioStarted.store(false, std::memory_order_release);
+    state.audioPlayedFrames.store(0, std::memory_order_release);
+    state.audioEpochUs.store(0, std::memory_order_release);
+}
 
 // ---------- writeBinary / writeString helpers for curl ----------
 /**
@@ -191,6 +202,7 @@ bool FrameLoaderSystem::LoadManifest(FrameLoaderComponent& flC,
     // reset indices
     flS.writeIdx.store(0);
     flS.readIdx.store(0);
+    ResetAudioState(flS);
 
     // initialize nextReadTime to now (consumer will read immediately)
     {
@@ -273,6 +285,7 @@ bool FrameLoaderSystem::SelectDataset(
     const float previousDepthScaleFactor = flC.depthScaleFactor;
     const VipeDataset previousDataset = flC.dataset;
     StopBackgroundWriter(flC, flS);
+    ResetAudioState(flS);
     for (FrameSlot& slot : flS.ring) {
         slot.ready.store(false, std::memory_order_release);
         slot.frame = nullptr;
@@ -380,6 +393,8 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
         return;
     }
     LOGI("Demuxer initialized: video %dx%d", demuxer.width(), demuxer.height());
+    flS.audioAvailable.store(demuxer.has_audio(), std::memory_order_release);
+    flS.audioSampleRate.store(demuxer.audio_sample_rate(), std::memory_order_release);
 
     while (flC.writerRunning.load(std::memory_order_relaxed)) {
         // Wait until there is at least one free slot (or stop)
@@ -433,7 +448,31 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
                         flC.writerRunning.store(false, std::memory_order_release);
                         break;
                     }
+                    ResetAudioState(flS);
+                    flS.audioAvailable.store(demuxer.has_audio(), std::memory_order_release);
                     continue;
+                }
+
+                std::vector<AudioPcmBlock> audio = demuxer.take_audio_blocks();
+                if (!audio.empty()) {
+                    std::lock_guard<std::mutex> audioLock(flS.audioMutex);
+                    size_t queuedSamples = 0;
+                    for (const AudioPcmBlock& block : flS.audioQueue) {
+                        queuedSamples += block.samples.size();
+                    }
+                    for (AudioPcmBlock& block : audio) {
+                        if (flS.audioQueue.empty() && queuedSamples == 0 &&
+                            flS.audioPlayedFrames.load(std::memory_order_acquire) == 0) {
+                            flS.audioEpochUs.store(block.timestampUs, std::memory_order_release);
+                        }
+                        queuedSamples += block.samples.size();
+                        flS.audioQueue.push_back(std::move(block));
+                    }
+                    while (queuedSamples > MAX_AUDIO_SAMPLES && flS.audioQueue.size() > 1) {
+                        queuedSamples -= flS.audioQueue.front().samples.size();
+                        flS.audioQueue.pop_front();
+                        flS.audioSampleOffset = 0;
+                    }
                 }
 
                 // LOGI("Writer decoded frame ts=%" PRId64 "\n", frame.ts_us);
@@ -618,7 +657,10 @@ bool FrameLoaderSystem::SwapNextFrame(
     if (localFps <= 0) localFps = 1;
     double period = 1.0 / double(localFps);
 
-    {
+    const bool useAudioClock =
+        flS.audioAvailable.load(std::memory_order_acquire) &&
+        flS.audioStarted.load(std::memory_order_acquire);
+    if (!useAudioClock) {
         std::lock_guard<std::mutex> lk(flS.timingMutex);
         if (nowSeconds < flS.nextReadTime) {
             return false; // Not time to show the next frame yet.
@@ -633,7 +675,26 @@ bool FrameLoaderSystem::SwapNextFrame(
 
     // Check if the next slot to be read has data ready from the writer.
     int currentReadSlot = flS.readIdx.load(std::memory_order_acquire);
-    if (!flS.ring[currentReadSlot].ready.load(std::memory_order_acquire)) {
+    if (useAudioClock) {
+        const int sampleRate = std::max(1, flS.audioSampleRate.load(std::memory_order_acquire));
+        const int64_t audioTimeUs =
+            flS.audioEpochUs.load(std::memory_order_acquire) +
+            flS.audioPlayedFrames.load(std::memory_order_acquire) * 1000000LL / sampleRate;
+        const int64_t lateThresholdUs = static_cast<int64_t>(period * 1000000.0);
+        while (flS.ring[currentReadSlot].ready.load(std::memory_order_acquire)) {
+            const VideoFrame* candidate = flS.ring[currentReadSlot].frame;
+            if (!candidate || candidate->ts_us >= audioTimeUs - lateThresholdUs) break;
+            flS.ring[currentReadSlot].ready.store(false, std::memory_order_release);
+            currentReadSlot = (currentReadSlot + 1) % RING_SIZE;
+            flS.readIdx.store(currentReadSlot, std::memory_order_release);
+            flS.writerCv.notify_one();
+        }
+        if (!flS.ring[currentReadSlot].ready.load(std::memory_order_acquire)) return false;
+        const VideoFrame* candidate = flS.ring[currentReadSlot].frame;
+        if (candidate && candidate->ts_us > audioTimeUs + static_cast<int64_t>(period * 500000.0)) {
+            return false;
+        }
+    } else if (!flS.ring[currentReadSlot].ready.load(std::memory_order_acquire)) {
         // The writer hasn't produced a new frame for us yet.
         return false;
     }

@@ -117,18 +117,19 @@ def probe_source(ffprobe: str, path: Path) -> dict:
         [
             ffprobe,
             "-v", "error",
-            "-select_streams", "v:0",
             "-count_frames",
             "-show_entries",
-            "stream=width,height,avg_frame_rate,r_frame_rate,nb_read_frames,nb_frames",
+            "stream=index,codec_name,codec_type,width,height,avg_frame_rate,r_frame_rate,"
+            "nb_read_frames,nb_frames,sample_rate,channels,duration",
             "-of", "json",
             str(path),
         ]
     )
     streams = probe.get("streams", [])
-    if len(streams) != 1:
-        raise VipeEncodingError(f"Expected one video stream in {path}, found {len(streams)}")
-    stream = streams[0]
+    video_streams = [item for item in streams if item.get("codec_type") == "video"]
+    if not video_streams:
+        raise VipeEncodingError(f"Expected a video stream in {path}")
+    stream = video_streams[0]
     rate_text = stream.get("avg_frame_rate") or stream.get("r_frame_rate")
     try:
         rate_num, rate_den = (int(value) for value in rate_text.split("/"))
@@ -141,7 +142,7 @@ def probe_source(ffprobe: str, path: Path) -> dict:
         frame_count = int(count_text)
     except (TypeError, ValueError) as exc:
         raise VipeEncodingError(f"Could not determine frame count for {path}") from exc
-    return {
+    result = {
         "width": int(stream["width"]),
         "height": int(stream["height"]),
         "frame_count": frame_count,
@@ -149,6 +150,25 @@ def probe_source(ffprobe: str, path: Path) -> dict:
         "rate_den": rate_den,
         "rate": f"{rate_num}/{rate_den}",
     }
+    audio_streams = [item for item in streams if item.get("codec_type") == "audio"]
+    if audio_streams:
+        audio = audio_streams[0]
+        try:
+            result["audio"] = {
+                "codec": str(audio["codec_name"]),
+                "sample_rate": int(audio["sample_rate"]),
+                "channels": int(audio["channels"]),
+                "duration": (
+                    float(audio["duration"]) if audio.get("duration") is not None else None
+                ),
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            raise VipeEncodingError(
+                f"Could not determine audio properties for {path}"
+            ) from exc
+    else:
+        result["audio"] = None
+    return result
 
 
 def read_exr_member(archive, name: str, OpenEXR, Imath) -> np.ndarray:
@@ -474,7 +494,9 @@ def encode_video(
     depth_read, depth_write = os.pipe()
     video = info["video"]
     temporary_output = output_path.with_name(f".{output_path.name}.partial")
+    temporary_video = output_path.with_name(f".{output_path.name}.video.partial")
     temporary_output.unlink(missing_ok=True)
+    temporary_video.unlink(missing_ok=True)
     command = [
         ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
         "-i", str(info["paths"]["rgb"]),
@@ -493,7 +515,7 @@ def encode_video(
         "-frames:v:1", str(video["frame_count"]),
         "-frames:v:2", str(video["frame_count"]),
         "-f", "matroska",
-        str(temporary_output),
+        str(temporary_video),
     ]
     errors: queue.Queue = queue.Queue()
     with tempfile.NamedTemporaryFile(mode="w+b", suffix=".ffmpeg.log") as log:
@@ -530,20 +552,52 @@ def encode_video(
     while not errors.empty():
         producer_errors.append(errors.get())
     if return_code != 0 or producer_errors:
+        temporary_video.unlink(missing_ok=True)
         temporary_output.unlink(missing_ok=True)
         details = [f"FFmpeg exited with status {return_code}"]
         details.extend(f"Producer failed: {error}" for error in producer_errors)
         if ffmpeg_log:
             details.append(ffmpeg_log)
         raise VipeEncodingError("\n".join(details))
-    os.replace(temporary_output, output_path)
+    if video.get("audio") is None:
+        os.replace(temporary_video, output_path)
+        return
+
+    remux_command = [
+        ffmpeg, "-hide_banner", "-loglevel", "warning", "-y",
+        "-i", str(temporary_video),
+        "-i", str(info["paths"]["rgb"]),
+        "-map", "0:v:0", "-map", "0:v:1", "-map", "0:v:2",
+        "-map", "1:a:0",
+        "-c", "copy",
+        "-metadata:s:v:0", "title=COLOR",
+        "-metadata:s:v:1", "title=MASK",
+        "-metadata:s:v:2", "title=DEPTH",
+        "-metadata:s:a:0", "title=AUDIO",
+        "-sn", "-f", "matroska", str(temporary_output),
+    ]
+    try:
+        subprocess.run(
+            remux_command, check=True, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, text=True,
+        )
+        os.replace(temporary_output, output_path)
+    except subprocess.CalledProcessError as exc:
+        temporary_output.unlink(missing_ok=True)
+        raise VipeEncodingError(
+            f"Audio remux failed ({' '.join(remux_command)}):\n{exc.stderr.strip()}"
+        ) from exc
+    finally:
+        temporary_video.unlink(missing_ok=True)
 
 
 def verify_output(ffprobe: str, output_path: Path, info: dict) -> None:
     probe = run_json(
         [
             ffprobe, "-v", "error", "-count_frames",
-            "-show_entries", "stream=index,codec_name,codec_type,pix_fmt,width,height,nb_read_frames",
+            "-show_entries",
+            "stream=index,codec_name,codec_type,pix_fmt,width,height,nb_read_frames,"
+            "sample_rate,channels,duration",
             "-of", "json", str(output_path),
         ]
     )
@@ -563,12 +617,61 @@ def verify_output(ffprobe: str, output_path: Path, info: dict) -> None:
             raise VipeEncodingError(f"Stream {stream.get('index')} has incorrect dimensions")
         if int(stream.get("nb_read_frames", -1)) != info["video"]["frame_count"]:
             raise VipeEncodingError(f"Stream {stream.get('index')} has incorrect frame count")
+    audio_streams = [
+        stream for stream in probe.get("streams", []) if stream.get("codec_type") == "audio"
+    ]
+    source_audio = info["video"].get("audio")
+    if source_audio is None:
+        if audio_streams:
+            raise VipeEncodingError("Encoded output unexpectedly contains audio")
+        return
+    if len(audio_streams) != 1:
+        raise VipeEncodingError(
+            f"Encoded output has {len(audio_streams)} audio streams, expected 1"
+        )
+    audio = audio_streams[0]
+    actual = (
+        audio.get("codec_name"),
+        int(audio.get("sample_rate", -1)),
+        int(audio.get("channels", -1)),
+    )
+    expected_audio = (
+        source_audio["codec"],
+        source_audio["sample_rate"],
+        source_audio["channels"],
+    )
+    if actual != expected_audio:
+        raise VipeEncodingError(
+            f"Encoded audio is {actual}, expected {expected_audio}"
+        )
+    source_duration = source_audio.get("duration")
+    output_duration = audio.get("duration")
+    if source_duration is not None and output_duration is not None:
+        tolerance = max(0.05, info["video"]["rate_den"] / info["video"]["rate_num"])
+        if abs(float(output_duration) - source_duration) > tolerance:
+            raise VipeEncodingError(
+                "Encoded audio duration differs from the source by more than "
+                f"{tolerance:.6g} seconds"
+            )
 
 
 def make_manifest(
         sequence: str, output_path: Path, info: dict, depth_info: dict,
         color_references: dict) -> dict:
     video = info["video"]
+    streams = {
+        "color": {"index": 0, "codec": "av1", "pixel_format": "yuv420p"},
+        "mask": {"index": 1, "codec": "ffv1", "pixel_format": "gray"},
+        "depth": {"index": 2, "codec": "png", "pixel_format": "gray16be"},
+    }
+    audio = video.get("audio")
+    if audio is not None:
+        streams["audio"] = {
+            "index": 3,
+            "codec": audio["codec"],
+            "sample_rate": audio["sample_rate"],
+            "channels": audio["channels"],
+        }
     return {
         "schema_version": 2,
         "file": output_path.name,
@@ -579,11 +682,7 @@ def make_manifest(
         "fps": video["rate_num"] / video["rate_den"],
         "frame_rate": {"numerator": video["rate_num"], "denominator": video["rate_den"]},
         "orientation_offset_degrees": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
-        "streams": {
-            "color": {"index": 0, "codec": "av1", "pixel_format": "yuv420p"},
-            "mask": {"index": 1, "codec": "ffv1", "pixel_format": "gray"},
-            "depth": {"index": 2, "codec": "png", "pixel_format": "gray16be"},
-        },
+        "streams": streams,
         "depth": {
             "encoding": "uint16_linear",
             "units": "metres",
