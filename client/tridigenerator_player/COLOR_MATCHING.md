@@ -194,7 +194,8 @@ mean.
 
 ## Dataset references calculated during preprocessing
 
-[`load_vipe_results_encode_av1_ffv1_png_libsvtav1.py`](../../preprocess/load_vipe_results_encode_av1_ffv1_png_libsvtav1.py)
+[`load_vipe_results_encode_av1_ffv1_png_libsvtav1.py`](../../../tridigenerator_web/backend/postprocess/load_vipe_results_encode_av1_ffv1_png_libsvtav1.py),
+now maintained by `tridigenerator_web`,
 decodes synchronized RGB, mask, and depth frames before writing the manifest. It uses only pixels
 with finite positive depth and linear luminance in `(0.005, 0.98)`. Across the complete sequence it
 accumulates arithmetic mean RGB and geometric mean luminance globally and for every uint8 mask ID:
