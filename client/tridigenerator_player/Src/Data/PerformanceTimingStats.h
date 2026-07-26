@@ -26,6 +26,8 @@ enum class PerformanceSubsystem : std::size_t {
     DepthConvertCopy,
     DemuxAudio,
     VideoDecode,
+    TextureStaging,
+    HardwareColorConversion,
     TextureUpload,
     Rendering,
     OtherUpdate,

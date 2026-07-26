@@ -813,6 +813,8 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
         "Geometry compact    --     N/A\n"
         "Index upload        --     N/A\n"
         "Video decode        --     N/A\n"
+        "Upload stage        --     N/A\n"
+        "HW color submit     --     N/A\n"
         "Texture upload      --      --\n"
         "Rendering           --      --\n"
         "Other update        --     N/A",
@@ -825,6 +827,7 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
         " Depth codec/copy: --/--  --/--\n"
         " Demux/audio: --/--\n"
         "Producer: -- fps  ring --/--  starve --\n"
+        "HW upload pending/drop: --/--\n"
         "Cells K/R/M: --/--/--  EBO: --\n"
         "Camera: --\n"
         "cb/proc/super/drop: --/--/--/--\n"
@@ -884,6 +887,8 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
     uint32_t rejectedCells = 0;
     uint32_t mixedCells = 0;
     size_t compactIndexBytes = 0;
+    size_t pendingHardwareColorUploads = 0;
+    uint64_t droppedHardwareColorUploads = 0;
     bool usingDynamicIndices = false;
     bool playbackPaused = false;
     double sourceFps = 0.0;
@@ -938,6 +943,11 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
                 mixedCells = state.mixedCellCount_;
                 compactIndexBytes = state.compactIndexBytes_;
                 usingDynamicIndices = state.usingDynamicIndices_;
+                droppedHardwareColorUploads =
+                    state.hardwareColorDroppedFrames_;
+                for (const auto& lease : state.hardwareColorLeases_) {
+                    if (lease.owner) ++pendingHardwareColorUploads;
+                }
             });
     }
     const char* cameraPath =
@@ -1017,6 +1027,12 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
          << "  " << gpu(PerformanceSubsystem::IndexUpload, false) << "\n"
          << "Video decode    " << cpu(PerformanceSubsystem::VideoDecode)
          << "  " << gpu(PerformanceSubsystem::VideoDecode, false) << "\n"
+         << "Upload stage    " << cpu(PerformanceSubsystem::TextureStaging)
+         << "  " << gpu(PerformanceSubsystem::TextureStaging, false) << "\n"
+         << "HW color submit "
+         << cpu(PerformanceSubsystem::HardwareColorConversion)
+         << "  " << gpu(PerformanceSubsystem::HardwareColorConversion, false)
+         << "\n"
          << "Texture upload  " << cpu(PerformanceSubsystem::TextureUpload)
          << "  " << gpu(PerformanceSubsystem::TextureUpload, true) << "\n"
          << "Rendering       " << cpu(PerformanceSubsystem::Rendering)
@@ -1049,6 +1065,9 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
          << producerFps << " fps  ring "
          << ringOccupancy << "/" << ringLowWater
          << " cur/low  starve " << ringStarvations << "\n"
+         << "HW upload pending/drop: "
+         << pendingHardwareColorUploads << "/"
+         << droppedHardwareColorUploads << "\n"
          << "Cells K/R/M: "
          << retainedCells << "/" << rejectedCells << "/" << mixedCells
          << "  EBO: "

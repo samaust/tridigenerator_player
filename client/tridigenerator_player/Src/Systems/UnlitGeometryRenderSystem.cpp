@@ -79,24 +79,102 @@ using OVR::Vector4f;
 namespace {
 
 #if defined(__ANDROID__)
-bool ConvertHardwareColorImage(
-        const std::shared_ptr<void>& owner,
-        const OVRFW::GlTexture& destination) {
-    if (!owner) return false;
-    const auto getNativeClientBuffer =
-        reinterpret_cast<PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC>(
-            eglGetProcAddress("eglGetNativeClientBufferANDROID"));
-    const auto imageTargetTexture =
-        reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(
-            eglGetProcAddress("glEGLImageTargetTexture2DOES"));
-    const auto createImage =
-        reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(
-            eglGetProcAddress("eglCreateImageKHR"));
+bool ResolveHardwareColorFunctions(UnlitGeometryRenderState& state) {
+    if (state.getNativeClientBufferProc_ != nullptr) return true;
+    state.getNativeClientBufferProc_ =
+        reinterpret_cast<void*>(eglGetProcAddress("eglGetNativeClientBufferANDROID"));
+    state.imageTargetTextureProc_ =
+        reinterpret_cast<void*>(eglGetProcAddress("glEGLImageTargetTexture2DOES"));
+    state.createImageProc_ =
+        reinterpret_cast<void*>(eglGetProcAddress("eglCreateImageKHR"));
+    state.destroyImageProc_ =
+        reinterpret_cast<void*>(eglGetProcAddress("eglDestroyImageKHR"));
+    return state.getNativeClientBufferProc_ &&
+        state.imageTargetTextureProc_ &&
+        state.createImageProc_ &&
+        state.destroyImageProc_;
+}
+
+bool RetireHardwareColorLease(
+        UnlitGeometryRenderState& state,
+        size_t slot,
+        bool force) {
+    auto& lease = state.hardwareColorLeases_[slot];
+    if (!lease.owner) return true;
+    const GLsync fence = reinterpret_cast<GLsync>(lease.fence);
+    if (!force) {
+        if (fence == nullptr) return false;
+        const GLenum result = glClientWaitSync(fence, 0, 0);
+        if (result != GL_ALREADY_SIGNALED &&
+            result != GL_CONDITION_SATISFIED) {
+            return false;
+        }
+    }
+    if (fence != nullptr) glDeleteSync(fence);
     const auto destroyImage =
         reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
-            eglGetProcAddress("eglDestroyImageKHR"));
-    if (!getNativeClientBuffer || !imageTargetTexture ||
-        !createImage || !destroyImage) return false;
+            state.destroyImageProc_);
+    if (destroyImage && lease.display && lease.image) {
+        destroyImage(
+            reinterpret_cast<EGLDisplay>(lease.display),
+            reinterpret_cast<EGLImageKHR>(lease.image));
+    }
+    lease = {};
+    return true;
+}
+
+void RetireCompletedHardwareColorUploads(
+        UnlitGeometryRenderState& state) {
+    for (size_t slot = 0; slot < state.hardwareColorLeases_.size(); ++slot) {
+        RetireHardwareColorLease(state, slot, false);
+    }
+}
+
+void ShutdownHardwareColorConversion(
+        UnlitGeometryRenderState& state) {
+    bool hasPendingLease = false;
+    for (const auto& lease : state.hardwareColorLeases_) {
+        hasPendingLease = hasPendingLease || lease.owner != nullptr;
+    }
+    if (hasPendingLease) glFinish();
+    for (size_t slot = 0; slot < state.hardwareColorLeases_.size(); ++slot) {
+        RetireHardwareColorLease(state, slot, true);
+    }
+    glDeleteProgram(state.hardwareColorProgram_);
+    glDeleteFramebuffers(1, &state.hardwareColorFramebuffer_);
+    glDeleteTextures(1, &state.hardwareColorExternalTexture_);
+    glDeleteVertexArrays(1, &state.hardwareColorVertexArray_);
+    state.hardwareColorProgram_ = 0;
+    state.hardwareColorFramebuffer_ = 0;
+    state.hardwareColorExternalTexture_ = 0;
+    state.hardwareColorVertexArray_ = 0;
+    state.getNativeClientBufferProc_ = nullptr;
+    state.imageTargetTextureProc_ = nullptr;
+    state.createImageProc_ = nullptr;
+    state.destroyImageProc_ = nullptr;
+    state.hardwareColorDroppedFrames_ = 0;
+}
+
+bool ConvertHardwareColorImage(
+        std::shared_ptr<void>& owner,
+        const OVRFW::GlTexture& destination,
+        size_t destinationSlot,
+        UnlitGeometryRenderState& state) {
+    if (!owner) return false;
+    if (!ResolveHardwareColorFunctions(state)) return false;
+    if (!RetireHardwareColorLease(state, destinationSlot, false)) {
+        ++state.hardwareColorDroppedFrames_;
+        return false;
+    }
+    const auto getNativeClientBuffer =
+        reinterpret_cast<PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC>(
+            state.getNativeClientBufferProc_);
+    const auto imageTargetTexture =
+        reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(
+            state.imageTargetTextureProc_);
+    const auto createImage =
+        reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(
+            state.createImageProc_);
     AHardwareBuffer* hardwareBuffer = nullptr;
     if (AImage_getHardwareBuffer(
             static_cast<AImage*>(owner.get()), &hardwareBuffer) != AMEDIA_OK ||
@@ -114,11 +192,7 @@ bool ConvertHardwareColorImage(
         clientBuffer, attributes);
     if (image == EGL_NO_IMAGE_KHR) return false;
 
-    static GLuint program = 0;
-    static GLuint framebuffer = 0;
-    static GLuint externalTexture = 0;
-    static GLuint vertexArray = 0;
-    if (program == 0) {
+    if (state.hardwareColorProgram_ == 0) {
         const char* vertexSource =
             "#version 300 es\n"
             "out vec2 uv;\n"
@@ -147,34 +221,39 @@ bool ConvertHardwareColorImage(
         const GLuint vertex = compile(GL_VERTEX_SHADER, vertexSource);
         const GLuint fragment = compile(GL_FRAGMENT_SHADER, fragmentSource);
         if (!vertex || !fragment) {
-            destroyImage(display, image);
+            reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
+                state.destroyImageProc_)(display, image);
             return false;
         }
-        program = glCreateProgram();
-        glAttachShader(program, vertex);
-        glAttachShader(program, fragment);
-        glLinkProgram(program);
+        state.hardwareColorProgram_ = glCreateProgram();
+        glAttachShader(state.hardwareColorProgram_, vertex);
+        glAttachShader(state.hardwareColorProgram_, fragment);
+        glLinkProgram(state.hardwareColorProgram_);
         glDeleteShader(vertex);
         glDeleteShader(fragment);
         GLint linked = GL_FALSE;
-        glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        glGetProgramiv(
+            state.hardwareColorProgram_, GL_LINK_STATUS, &linked);
         if (linked != GL_TRUE) {
-            glDeleteProgram(program);
-            program = 0;
-            destroyImage(display, image);
+            glDeleteProgram(state.hardwareColorProgram_);
+            state.hardwareColorProgram_ = 0;
+            reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
+                state.destroyImageProc_)(display, image);
             return false;
         }
-        glGenFramebuffers(1, &framebuffer);
-        glGenTextures(1, &externalTexture);
-        glGenVertexArrays(1, &vertexArray);
+        glGenFramebuffers(1, &state.hardwareColorFramebuffer_);
+        glGenTextures(1, &state.hardwareColorExternalTexture_);
+        glGenVertexArrays(1, &state.hardwareColorVertexArray_);
     }
 
-    glBindTexture(GL_TEXTURE_EXTERNAL_OES, externalTexture);
+    glBindTexture(
+        GL_TEXTURE_EXTERNAL_OES, state.hardwareColorExternalTexture_);
     imageTargetTexture(
         GL_TEXTURE_EXTERNAL_OES, reinterpret_cast<GLeglImageOES>(image));
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glBindFramebuffer(
+        GL_FRAMEBUFFER, state.hardwareColorFramebuffer_);
     glFramebufferTexture2D(
         GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
         destination.texture, 0);
@@ -182,24 +261,31 @@ bool ConvertHardwareColorImage(
         glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
     if (complete) {
         glViewport(0, 0, destination.Width, destination.Height);
-        glUseProgram(program);
+        glUseProgram(state.hardwareColorProgram_);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_EXTERNAL_OES, externalTexture);
-        glUniform1i(glGetUniformLocation(program, "sourceImage"), 0);
-        glBindVertexArray(vertexArray);
+        glBindTexture(
+            GL_TEXTURE_EXTERNAL_OES, state.hardwareColorExternalTexture_);
+        glUniform1i(
+            glGetUniformLocation(
+                state.hardwareColorProgram_, "sourceImage"),
+            0);
+        glBindVertexArray(state.hardwareColorVertexArray_);
         glDrawArrays(GL_TRIANGLES, 0, 3);
-        // The AImage and its decoder surface cannot be returned until the
-        // sampling pass completes. This fence wait is intentionally scoped to
-        // this one conversion pass; the owned RGB texture remains asynchronous
-        // for the application's later rendering.
-        GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        auto& lease = state.hardwareColorLeases_[destinationSlot];
+        lease.owner = std::move(owner);
+        lease.display = reinterpret_cast<void*>(display);
+        lease.image = reinterpret_cast<void*>(image);
+        lease.fence = reinterpret_cast<void*>(
+            glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0));
         glFlush();
-        glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ULL);
-        glDeleteSync(fence);
+        image = EGL_NO_IMAGE_KHR;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
-    destroyImage(display, image);
+    if (image != EGL_NO_IMAGE_KHR) {
+        reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
+            state.destroyImageProc_)(display, image);
+    }
     return complete;
 }
 #endif
@@ -598,6 +684,9 @@ bool UnlitGeometryRenderSystem::RebuildGeometry(
 void UnlitGeometryRenderSystem::Shutdown(EntityManager& ecs) {
     ecs.ForEach<UnlitGeometryRenderState>(
             [&](EntityID e, UnlitGeometryRenderState& ugrS) {
+#if defined(__ANDROID__)
+        ShutdownHardwareColorConversion(ugrS);
+#endif
         for (int i = 0; i < 2; ++i) {
             OVRFW::FreeTexture(ugrS.textures_[i][TEX_Y]);
             OVRFW::FreeTexture(ugrS.textures_[i][TEX_U]);
@@ -673,6 +762,9 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                  InteractableComponent& interactable,
                  UnlitGeometryRenderComponent &ugrC,
                  UnlitGeometryRenderState &ugrS) {
+#if defined(__ANDROID__)
+        RetireCompletedHardwareColorUploads(ugrS);
+#endif
         // ViPE geometry is expressed relative to the capture camera. On Android,
         // align that camera with the headset once so the mesh is not left at the
         // stage origin (usually floor level and therefore fully depth-occluded).
@@ -770,13 +862,6 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                 frame.preparedDepthHeight == ugrS.meshHeight_ &&
                 PreparedDepthPixels(
                     frame, ugrS.meshWidth_, ugrS.meshHeight_) != nullptr) {
-                UpdateFrameGeometry(flC, frame, tC, tS, ugrS, interactable);
-                ScopedCpuTimer cpuTimer(
-                    performanceTiming_.get(),
-                    PerformanceSubsystem::TextureUpload,
-                    true);
-                ScopedGpuTimer gpuTimer(
-                    gpuTiming_, PerformanceSubsystem::TextureUpload);
                 if ((ugrS.textures_[0][TEX_DEPTH].Width !=
                         static_cast<int>(ugrS.meshWidth_) ||
                      ugrS.textures_[0][TEX_DEPTH].Height !=
@@ -789,9 +874,23 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                     flS.frameReady.store(false, std::memory_order_relaxed);
                     return;
                 }
-                UpdateTextures(ugrC, flS.framePtr, ugrS);
-                UpdateDynamicIndices(flC, frame, ugrS);
-                ugrS.depthTextureReady_ = true;
+                bool texturesUpdated = false;
+                {
+                    ScopedCpuTimer cpuTimer(
+                        performanceTiming_.get(),
+                        PerformanceSubsystem::TextureUpload,
+                        true);
+                    ScopedGpuTimer gpuTimer(
+                        gpuTiming_, PerformanceSubsystem::TextureUpload);
+                    texturesUpdated =
+                        UpdateTextures(ugrC, flS.framePtr, ugrS);
+                }
+                if (texturesUpdated) {
+                    UpdateFrameGeometry(
+                        flC, frame, tC, tS, ugrS, interactable);
+                    UpdateDynamicIndices(flC, frame, ugrS);
+                    ugrS.depthTextureReady_ = true;
+                }
             } else {
                 LOGW(
                     "Skipping frame %d prepared at %dx%d; waiting for mesh depth %dx%d",
@@ -1093,15 +1192,16 @@ void UnlitGeometryRenderSystem::UpdateDepthScaleFactor(
 /**
  * @brief Upload new frame pixel data into the GL textures using double-buffering.
  *
- * Swaps to the alternate texture set, then uploads Y, U, V, alpha and depth
- * data from the provided VideoFrame into the corresponding GL textures.
+ * Uploads Y, U, V, alpha and depth data into the inactive texture set and
+ * publishes that set only after every required operation succeeds.
  *
  * @param ugrC Component that provides texture format and unpack alignment info.
  * @param framePtr Pointer to a pointer to the VideoFrame containing data buffers
  *                 and stride information.
  * @param ugrS The render state which holds texture handles and current surface set.
+ * @return true when a complete new surface set was published.
  */
-void UnlitGeometryRenderSystem::UpdateTextures(
+bool UnlitGeometryRenderSystem::UpdateTextures(
         UnlitGeometryRenderComponent &ugrC,
         VideoFrame** framePtr,
         UnlitGeometryRenderState &ugrS) {
@@ -1109,25 +1209,26 @@ void UnlitGeometryRenderSystem::UpdateTextures(
         **framePtr, ugrS.meshWidth_, ugrS.meshHeight_);
     if (depthData == nullptr) {
         LOGE("UpdateTextures called without prepared depth pixels");
-        return;
+        return false;
     }
     const int desiredFullRange = (*framePtr)->yuvFullRange ? 1 : 0;
-    ugrS.colorIsRgb_ = (*framePtr)->hardwareColorImage ? 1 : 0;
-    if (desiredFullRange != ugrS.useFullRangeYuv_) {
-        ugrS.useFullRangeYuv_ = desiredFullRange;
-        RefreshGeometryPrograms(ugrS);
-    }
-
-    // Swap the current surface set index to point to the other set.
-    ugrS.currentSurfaceSet_ = (ugrS.currentSurfaceSet_ + 1) % 2;
+    const int desiredColorIsRgb =
+        (*framePtr)->hardwareColorImage ? 1 : 0;
+    const int destinationSet = (ugrS.currentSurfaceSet_ + 1) % 2;
 
     std::array<TextureUploadSlice, 5> slices;
-    const bool staged = StageFrameTextureUpload(
-        **framePtr, *depthData, ugrS, slices);
+    bool staged = false;
+    {
+        ScopedCpuTimer stagingTimer(
+            performanceTiming_.get(),
+            PerformanceSubsystem::TextureStaging);
+        staged = StageFrameTextureUpload(
+            **framePtr, *depthData, ugrS, slices);
+    }
     if (!staged && (*framePtr)->colorPlaneOwner != nullptr) {
         LOGE("PBO staging is required for retained strided color planes");
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-        return;
+        return false;
     }
     if (!staged && !ugrS.pboFailureLogged_) {
         LOGW("PBO texture staging failed; using direct uploads");
@@ -1142,44 +1243,57 @@ void UnlitGeometryRenderSystem::UpdateTextures(
 
 #if defined(__ANDROID__)
     if ((*framePtr)->hardwareColorImage) {
-        if (!ConvertHardwareColorImage(
+        bool converted = false;
+        const uint64_t droppedBefore =
+            ugrS.hardwareColorDroppedFrames_;
+        {
+            ScopedCpuTimer conversionTimer(
+                performanceTiming_.get(),
+                PerformanceSubsystem::HardwareColorConversion);
+            converted = ConvertHardwareColorImage(
                 (*framePtr)->hardwareColorImage,
-                ugrS.textures_[ugrS.currentSurfaceSet_][TEX_Y])) {
-            LOGE("Failed to import/convert MediaCodec color output");
-            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-            return;
+                ugrS.textures_[destinationSet][TEX_Y],
+                static_cast<size_t>(destinationSet),
+                ugrS);
         }
-        (*framePtr)->hardwareColorImage.reset();
+        if (!converted) {
+            if (ugrS.hardwareColorDroppedFrames_ == droppedBefore) {
+                LOGE("Failed to import/convert MediaCodec color output");
+            }
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            (*framePtr)->hardwareColorImage.reset();
+            return false;
+        }
     } else
 #endif
     {
         UpdateGl8Texture(
-            ugrS.textures_[ugrS.currentSurfaceSet_][TEX_Y],
+            ugrS.textures_[destinationSet][TEX_Y],
             GL_RED,
             uploadAddress(0, (*framePtr)->textureYData.data()),
             ugrC.texture_unpack_alignments_[TEX_Y],
             (*framePtr)->textureYStride);
         UpdateGl8Texture(
-            ugrS.textures_[ugrS.currentSurfaceSet_][TEX_U],
+            ugrS.textures_[destinationSet][TEX_U],
             GL_RED,
             uploadAddress(1, (*framePtr)->textureUData.data()),
             ugrC.texture_unpack_alignments_[TEX_U],
             (*framePtr)->textureUStride);
         UpdateGl8Texture(
-            ugrS.textures_[ugrS.currentSurfaceSet_][TEX_V],
+            ugrS.textures_[destinationSet][TEX_V],
             GL_RED,
             uploadAddress(2, (*framePtr)->textureVData.data()),
             ugrC.texture_unpack_alignments_[TEX_V],
             (*framePtr)->textureVStride);
     }
     UpdateGl8Texture(
-        ugrS.textures_[ugrS.currentSurfaceSet_][TEX_ALPHA],
+        ugrS.textures_[destinationSet][TEX_ALPHA],
         GL_RED_INTEGER,
         uploadAddress(3, (*framePtr)->textureAlphaData.data()),
         ugrC.texture_unpack_alignments_[TEX_ALPHA],
         (*framePtr)->textureAlphaStride);
     UpdateGl16Texture(
-        ugrS.textures_[ugrS.currentSurfaceSet_][TEX_DEPTH],
+        ugrS.textures_[destinationSet][TEX_DEPTH],
         GL_RED_INTEGER,
         uploadAddress(4, depthData->data()),
         ugrC.texture_unpack_alignments_[TEX_DEPTH],
@@ -1187,6 +1301,13 @@ void UnlitGeometryRenderSystem::UpdateTextures(
     if (staged) {
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
     }
+    ugrS.colorIsRgb_ = desiredColorIsRgb;
+    if (desiredFullRange != ugrS.useFullRangeYuv_) {
+        ugrS.useFullRangeYuv_ = desiredFullRange;
+        RefreshGeometryPrograms(ugrS);
+    }
+    ugrS.currentSurfaceSet_ = destinationSet;
+    return true;
 }
 
 void UnlitGeometryRenderSystem::BindFullIndexBuffer(

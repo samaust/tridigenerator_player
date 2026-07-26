@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "OVR_Math.h"
@@ -14,6 +15,13 @@
 #include "../Components/UnlitGeometryRenderComponent.h"
 
 struct UnlitGeometryRenderState {
+    struct HardwareColorUploadLease {
+        std::shared_ptr<void> owner;
+        void* display = nullptr;
+        void* image = nullptr;
+        void* fence = nullptr;
+    };
+
     // Double-buffered textures
     OVRFW::GlTexture textures_[2][TEXTURE_SLOT_MAX];
 
@@ -40,6 +48,19 @@ struct UnlitGeometryRenderState {
     std::array<unsigned, UploadPboCount> uploadPbos_{};
     size_t nextUploadPbo_ = 0;
     bool pboFailureLogged_ = false;
+
+    // Android hardware-color conversion state. EGL/GL objects are stored as
+    // opaque values here so this state remains buildable on desktop.
+    unsigned hardwareColorProgram_ = 0;
+    unsigned hardwareColorFramebuffer_ = 0;
+    unsigned hardwareColorExternalTexture_ = 0;
+    unsigned hardwareColorVertexArray_ = 0;
+    void* getNativeClientBufferProc_ = nullptr;
+    void* imageTargetTextureProc_ = nullptr;
+    void* createImageProc_ = nullptr;
+    void* destroyImageProc_ = nullptr;
+    std::array<HardwareColorUploadLease, 2> hardwareColorLeases_{};
+    uint64_t hardwareColorDroppedFrames_ = 0;
 
     // Shader programs (limited-range and full-range YUV)
     OVRFW::GlProgram ProgramLimited_;

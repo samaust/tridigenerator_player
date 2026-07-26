@@ -84,6 +84,7 @@ android {
 
     release {
       debuggable false
+      signingConfig signingConfigs.debug
     }
 
     // Installable profiling build: keep debug signing/Android Studio Run

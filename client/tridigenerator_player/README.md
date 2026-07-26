@@ -395,6 +395,10 @@ producer FPS, current/minimum ring occupancy, and post-warm-up starvation. Decod
 capture run asynchronously, so their averages describe those background invocations rather than
 main-thread frame time.
 
+Geometry upload diagnostics split render-thread PBO staging from hardware-color conversion
+submission and report pending hardware-image releases and frames dropped rather than blocking on
+a busy conversion slot. Hardware-image completion is polled asynchronously on later XR updates.
+
 On devices supporting `GL_EXT_disjoint_timer_query`, the overlay also reports non-blocking GPU
 averages for camera/light GL work, geometry texture uploads, and the complete two-eye application
 render. The render value includes UI, controllers, eye-buffer setup, and resolves; it is not limited

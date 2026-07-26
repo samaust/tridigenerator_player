@@ -54,7 +54,7 @@ public:
             UnlitGeometryRenderState& renderState,
             InteractableComponent& interactable);
     void UpdateDepthScaleFactor(FrameLoaderComponent &flC, UnlitGeometryRenderState &ugrS);
-    void UpdateTextures(
+    bool UpdateTextures(
             UnlitGeometryRenderComponent &ugrC,
             VideoFrame** framePtr,
             UnlitGeometryRenderState &ugrS);
