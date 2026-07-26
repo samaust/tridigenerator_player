@@ -1,6 +1,8 @@
 #pragma once
 
 #include <GLES3/gl3.h>
+#include <memory>
+#include <utility>
 
 #include "FrameParams.h"
 #include "Render/GlGeometry.h"
@@ -10,6 +12,8 @@
 #include "OVR_Math.h"
 
 #include "../Core/EntityManager.h"
+#include "../Data/GpuTimingManager.h"
+#include "../Data/PerformanceTimingStats.h"
 
 #include "../Components/FrameLoaderComponent.h"
 #include "../Components/TransformComponent.h"
@@ -23,6 +27,12 @@ struct EnvironmentDepthState;
 
 class UnlitGeometryRenderSystem {
 public:
+    explicit UnlitGeometryRenderSystem(
+        std::shared_ptr<PerformanceTimingStats> performanceTiming = nullptr,
+        GpuTimingManager* gpuTiming = nullptr)
+        : performanceTiming_(std::move(performanceTiming)),
+          gpuTiming_(gpuTiming) {}
+
     bool Init(EntityManager& ecs, int meshDetailDivisor = 2);
     bool RebuildGeometry(EntityManager& ecs, int meshDetailDivisor);
     void Shutdown(EntityManager& ecs);
@@ -63,4 +73,8 @@ public:
         UnlitGeometryRenderState& ugrS,
         EnvironmentDepthState* environmentDepthState);
     void Render(EntityManager& ecs, std::vector<OVRFW::ovrDrawSurface>& surfaceList);
+
+private:
+    std::shared_ptr<PerformanceTimingStats> performanceTiming_;
+    GpuTimingManager* gpuTiming_ = nullptr;
 };

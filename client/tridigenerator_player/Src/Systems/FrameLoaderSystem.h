@@ -1,12 +1,20 @@
 #pragma once
 
+#include <memory>
+#include <utility>
+
 #include "../Core/EntityManager.h"
+#include "../Data/PerformanceTimingStats.h"
 
 #include "../Components/FrameLoaderComponent.h"
 #include "../States/FrameLoaderState.h"
 
 class FrameLoaderSystem {
 public:
+    explicit FrameLoaderSystem(
+        std::shared_ptr<PerformanceTimingStats> performanceTiming = nullptr)
+        : performanceTiming_(std::move(performanceTiming)) {}
+
     bool Init(EntityManager& ecs);
     void Shutdown(EntityManager& ecs);
     void Update(EntityManager& ecs, double nowSeconds);
@@ -21,6 +29,8 @@ public:
         FrameLoaderComponent& flC,
         FrameLoaderState& flS);
 private:
+    std::shared_ptr<PerformanceTimingStats> performanceTiming_;
+
     static size_t writeString(void* ptr, size_t size, size_t nmemb, void* userdata);
     static size_t writeBinary(void* ptr, size_t size, size_t nmemb, void* userdata);
     bool LoadManifest(FrameLoaderComponent& flC,

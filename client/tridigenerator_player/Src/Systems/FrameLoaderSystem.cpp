@@ -481,7 +481,14 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
                 s.frame = &flS.framePool[slot];
 
                 // Decode the next frame, passing our target buffer.
-                if (!demuxer.decode_next_frame(*(s.frame))) {
+                bool decoded = false;
+                {
+                    ScopedCpuTimer decodeTimer(
+                        performanceTiming_.get(),
+                        PerformanceSubsystem::VideoDecode);
+                    decoded = demuxer.decode_next_frame(*(s.frame));
+                }
+                if (!decoded) {
                     // End of stream
 
                     // Check looping
@@ -502,8 +509,15 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
                     flS.audioAvailable.store(demuxer.has_audio(), std::memory_order_release);
                     continue;
                 }
-                if (!PrepareDecodedDepth(
-                        flC, *s.frame, depthPreparer, preparedDepth)) {
+                bool prepared = false;
+                {
+                    ScopedCpuTimer depthTimer(
+                        performanceTiming_.get(),
+                        PerformanceSubsystem::DepthPreparation);
+                    prepared = PrepareDecodedDepth(
+                        flC, *s.frame, depthPreparer, preparedDepth);
+                }
+                if (!prepared) {
                     LOGW(
                         "Failed to prepare depth for decoded frame %d",
                         s.frame->frameIndex);

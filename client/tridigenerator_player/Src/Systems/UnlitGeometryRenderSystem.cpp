@@ -555,6 +555,12 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
 
         // Create color, alpha, depth textures if not already created
         if (!TexturesCreated(ugrS) && flS.framePtr != nullptr) {
+            ScopedCpuTimer cpuTimer(
+                performanceTiming_.get(),
+                PerformanceSubsystem::TextureUpload,
+                true);
+            ScopedGpuTimer gpuTimer(
+                gpuTiming_, PerformanceSubsystem::TextureUpload);
             LOGI("Creating textures");
             CreateTextures(
                 flS.framePtr,
@@ -571,6 +577,13 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                 frame.preparedDepthHeight == ugrS.meshHeight_ &&
                 PreparedDepthPixels(
                     frame, ugrS.meshWidth_, ugrS.meshHeight_) != nullptr) {
+                UpdateFrameGeometry(flC, frame, tC, tS, ugrS, interactable);
+                ScopedCpuTimer cpuTimer(
+                    performanceTiming_.get(),
+                    PerformanceSubsystem::TextureUpload,
+                    true);
+                ScopedGpuTimer gpuTimer(
+                    gpuTiming_, PerformanceSubsystem::TextureUpload);
                 if ((ugrS.textures_[0][TEX_DEPTH].Width !=
                         static_cast<int>(ugrS.meshWidth_) ||
                      ugrS.textures_[0][TEX_DEPTH].Height !=
@@ -583,7 +596,6 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                     flS.frameReady.store(false, std::memory_order_relaxed);
                     return;
                 }
-                UpdateFrameGeometry(flC, frame, tC, tS, ugrS, interactable);
                 UpdateTextures(ugrC, flS.framePtr, ugrS);
                 ugrS.depthTextureReady_ = true;
             } else {

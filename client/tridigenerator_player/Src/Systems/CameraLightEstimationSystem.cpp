@@ -6,6 +6,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <GLES3/gl31.h>
@@ -195,6 +196,7 @@ struct CameraLightEstimationPlatformState {
     std::mutex mutex;
     CameraFrame latestFrame;
     uint64_t consumedSequence = 0;
+    std::shared_ptr<PerformanceTimingStats> performanceTiming;
 #if defined(__ANDROID__)
     ACameraManager* manager = nullptr;
     ACameraDevice* device = nullptr;
@@ -244,6 +246,9 @@ void CopyPlane(AImage* image, int plane, int width, int height, std::vector<uint
 
 void OnImageAvailable(void* context, AImageReader* reader) {
     auto* platform = static_cast<CameraLightEstimationPlatformState*>(context);
+    ScopedCpuTimer captureTimer(
+        platform ? platform->performanceTiming.get() : nullptr,
+        PerformanceSubsystem::CameraCapture);
     AImage* image = nullptr;
     if (AImageReader_acquireLatestImage(reader, &image) != AMEDIA_OK || !image) return;
     CameraFrame frame;
@@ -504,11 +509,18 @@ bool StartCamera(CameraLightEstimationPlatformState& p) {
 } // namespace
 #endif
 
-CameraLightEstimationSystem::CameraLightEstimationSystem(XrInstance instance) : instance_(instance) {}
+CameraLightEstimationSystem::CameraLightEstimationSystem(
+        XrInstance instance,
+        std::shared_ptr<PerformanceTimingStats> performanceTiming,
+        GpuTimingManager* gpuTiming)
+    : instance_(instance),
+      performanceTiming_(std::move(performanceTiming)),
+      gpuTiming_(gpuTiming) {}
 
 bool CameraLightEstimationSystem::Init(EntityManager& ecs) {
-    ecs.ForEach<CameraLightEstimationState>([](EntityID, CameraLightEstimationState& state) {
+    ecs.ForEach<CameraLightEstimationState>([&](EntityID, CameraLightEstimationState& state) {
         state.platform = std::make_shared<CameraLightEstimationPlatformState>();
+        state.platform->performanceTiming = performanceTiming_;
     });
     return true;
 }
@@ -667,6 +679,8 @@ void CameraLightEstimationSystem::Update(
             if (frame.planes[0].empty() || frame.planes[1].empty() || frame.planes[2].empty()) return;
             state.lastCameraProcessingSeconds = now;
 
+            ScopedGpuTimer gpuTimer(
+                gpuTiming_, PerformanceSubsystem::LightEstimation);
             for (int plane = 0; plane < 3; ++plane) {
                 const int width = plane == 0 ? frame.width : (frame.width + 1) / 2;
                 const int height = plane == 0 ? frame.height : (frame.height + 1) / 2;

@@ -23,6 +23,8 @@
 #include "../Components/ColorMatchingSettings.h"
 #include "../Components/MeshDetailSettings.h"
 #include "../Data/FrameTimingStats.h"
+#include "../Data/GpuTimingManager.h"
+#include "../Data/PerformanceTimingStats.h"
 
 namespace OVRFW {
 class SimpleBeamRenderer;
@@ -103,6 +105,9 @@ private:
     OVR::Posef uiAnchorPose_ = OVR::Posef::Identity();
     double lastUpdateSeconds_ = 0.0;
     FrameTimingStats frameTimingStats_;
+    std::shared_ptr<PerformanceTimingStats> performanceTimingStats_ =
+        std::make_shared<PerformanceTimingStats>();
+    std::unique_ptr<GpuTimingManager> gpuTiming_;
     EntityID objectEntity_ = 0;
     XrAction hapticAction_ = XR_NULL_HANDLE;
 

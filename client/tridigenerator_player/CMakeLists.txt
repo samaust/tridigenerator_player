@@ -96,6 +96,12 @@ if(UNIX AND NOT ANDROID)
         add_executable(frame_timing_stats_tests Tests/FrameTimingStatsTests.cpp)
         target_include_directories(frame_timing_stats_tests PRIVATE Src)
         add_test(NAME frame_timing_stats_tests COMMAND frame_timing_stats_tests)
+        add_executable(performance_timing_stats_tests
+            Tests/PerformanceTimingStatsTests.cpp)
+        target_include_directories(performance_timing_stats_tests PRIVATE Src)
+        target_link_libraries(performance_timing_stats_tests PRIVATE pthread)
+        add_test(NAME performance_timing_stats_tests
+            COMMAND performance_timing_stats_tests)
     endif()
     install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
     return()

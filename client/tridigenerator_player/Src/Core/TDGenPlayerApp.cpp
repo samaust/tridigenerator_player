@@ -260,18 +260,25 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
 
     // Initialize ECS and Systems
     entityManager_ = std::make_unique<EntityManager>();
+    gpuTiming_ = std::make_unique<GpuTimingManager>(performanceTimingStats_);
+    if (!gpuTiming_->Init()) {
+        LOGW("GPU performance timing unavailable; CPU diagnostics remain enabled");
+    }
 
     coreSystem_ = std::make_unique<CoreSystem>(GetInstance(), GetSystemId());
     sceneSystem_ = std::make_unique<SceneSystem>();
-    frameLoaderSystem_ = std::make_unique<FrameLoaderSystem>();
+    frameLoaderSystem_ =
+        std::make_unique<FrameLoaderSystem>(performanceTimingStats_);
     audioSystem_ = std::make_unique<AudioSystem>();
     inputSystem_ = std::make_unique<InputSystem>();
     interactionSystem_ = std::make_unique<InteractionSystem>();
     transformSystem_ = std::make_unique<TransformSystem>();
     renderSystem_ = std::make_unique<RenderSystem>();
     environmentDepthSystem_ = std::make_unique<EnvironmentDepthSystem>(GetInstance());
-    cameraLightEstimationSystem_ = std::make_unique<CameraLightEstimationSystem>(GetInstance());
-    unlitGeometryRenderSystem_ = std::make_unique<UnlitGeometryRenderSystem>();
+    cameraLightEstimationSystem_ = std::make_unique<CameraLightEstimationSystem>(
+        GetInstance(), performanceTimingStats_, gpuTiming_.get());
+    unlitGeometryRenderSystem_ = std::make_unique<UnlitGeometryRenderSystem>(
+        performanceTimingStats_, gpuTiming_.get());
     LOGI("ECS Systems Initialized");
 
     // Create entities
@@ -345,6 +352,8 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
 bool TDGenPlayerApp::SessionInit()
 {
     frameTimingStats_.Reset();
+    performanceTimingStats_->Reset();
+    if (gpuTiming_) gpuTiming_->Init();
     // Initialize XRInputActions and create action spaces using XrApp helper functions
     //xrInput_.Init(GetInstance(), GetSession());
     //xrInput_.CreateActionSpaces(GetLocalSpace());
@@ -368,6 +377,9 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 {
     using clock = std::chrono::steady_clock;
     const auto now = clock::now();
+    performanceTimingStats_->SetEnabled(diagnosticOverlayVisible_);
+    performanceTimingStats_->BeginForegroundFrame();
+    if (gpuTiming_) gpuTiming_->Poll();
     double nowSeconds = std::chrono::duration<double>(now.time_since_epoch()).count();
     if (frameTimingStats_.AddFrame(now)) {
         RefreshDiagnosticOverlay();
@@ -428,8 +440,20 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     });
     transformSystem_->Update(*entityManager_);
     renderSystem_->Update(*entityManager_);
-    environmentDepthSystem_->Update(*entityManager_, in);
-    cameraLightEstimationSystem_->Update(*entityManager_, in, Focused);
+    {
+        ScopedCpuTimer timer(
+            performanceTimingStats_.get(),
+            PerformanceSubsystem::EnvironmentDepth,
+            true);
+        environmentDepthSystem_->Update(*entityManager_, in);
+    }
+    {
+        ScopedCpuTimer timer(
+            performanceTimingStats_.get(),
+            PerformanceSubsystem::LightEstimation,
+            true);
+        cameraLightEstimationSystem_->Update(*entityManager_, in, Focused);
+    }
     unlitGeometryRenderSystem_->Update(*entityManager_, in);
 #if defined(__ANDROID__)
     RefreshColorMatchingUi();
@@ -503,10 +527,22 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     if (pointerRenderer_) {
         pointerRenderer_->Update(in, pointerDevices);
     }
+    const auto updateEnd = clock::now();
+    performanceTimingStats_->EndForegroundFrame(
+        std::chrono::duration<double, std::milli>(updateEnd - now).count());
+    if (performanceTimingStats_->PublishIfReady(updateEnd)) {
+        RefreshDiagnosticOverlay();
+    }
 }
 
 void TDGenPlayerApp::AppRenderFrame(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out)
 {
+    ScopedCpuTimer cpuTimer(
+        performanceTimingStats_.get(),
+        PerformanceSubsystem::Rendering);
+    ScopedGpuTimer gpuTimer(
+        gpuTiming_.get(),
+        PerformanceSubsystem::Rendering);
     OVRFW::XrApp::AppRenderFrame(in, out);
 }
 
@@ -543,6 +579,8 @@ void TDGenPlayerApp::SessionEnd()
     StopHaptics();
     lastUpdateSeconds_ = 0.0;
     frameTimingStats_.Reset();
+    performanceTimingStats_->Reset();
+    if (gpuTiming_) gpuTiming_->Shutdown();
     uiAnchorInitialized_ = false;
     entityManager_->ForEach<UnlitGeometryRenderComponent>(
         [](EntityID, UnlitGeometryRenderComponent& render) {
@@ -577,6 +615,7 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
     sceneSystem_->Shutdown(*entityManager_);
     coreSystem_->Shutdown(*entityManager_);
     environmentDepthSystem_->Shutdown(*entityManager_);
+    gpuTiming_.reset();
 
     unlitGeometryRenderSystem_.reset();
     cameraLightEstimationSystem_.reset();
@@ -676,7 +715,17 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
     }
     diagnosticUi_->SetPose(uiAnchorPose_);
     diagnosticLabel_ = diagnosticUi_->AddLabel(
-        "FPS: --.-\nFrame: --.- ms", {0.82f, 0.43f, -1.48f}, {160.0f, 90.0f});
+        "FPS: --.-  Frame: --.- ms\n"
+        "Subsystem       CPU ms  GPU ms\n"
+        "Env depth           --     N/A\n"
+        "Camera capture      --     N/A\n"
+        "Light estimate      --      --\n"
+        "Depth resize        --     N/A\n"
+        "Video decode        --     N/A\n"
+        "Texture upload      --      --\n"
+        "Rendering           --      --\n"
+        "Other update        --     N/A",
+        {1.02f, 0.18f, -1.48f}, {430.0f, 560.0f});
     RefreshDiagnosticOverlay();
 #endif
 }
@@ -690,11 +739,58 @@ void TDGenPlayerApp::ShutdownDiagnosticOverlay() {
 }
 
 void TDGenPlayerApp::RefreshDiagnosticOverlay() {
-    if (!diagnosticLabel_ || !frameTimingStats_.HasPublishedSample()) return;
-    diagnosticLabel_->SetText(
-        "FPS: %.1f\nFrame: %.1f ms",
-        frameTimingStats_.Fps(),
-        frameTimingStats_.AverageFrameMilliseconds());
+    if (!diagnosticLabel_) return;
+    const PerformanceTimingSnapshot snapshot =
+        performanceTimingStats_->Snapshot();
+    const bool gpuSupported = gpuTiming_ && gpuTiming_->IsSupported();
+    const auto metricText = [&](PerformanceSubsystem subsystem,
+                                PerformanceDomain domain,
+                                bool applicable) {
+        if (!applicable ||
+            (domain == PerformanceDomain::Gpu && !gpuSupported)) {
+            return std::string("N/A");
+        }
+        const auto& metric = snapshot.Get(subsystem, domain);
+        if (!snapshot.valid || !metric.HasSamples()) return std::string("--");
+        std::ostringstream value;
+        value << std::fixed << std::setprecision(2)
+              << metric.averageMilliseconds;
+        return value.str();
+    };
+    const auto cpu = [&](PerformanceSubsystem subsystem) {
+        return metricText(subsystem, PerformanceDomain::Cpu, true);
+    };
+    const auto gpu = [&](PerformanceSubsystem subsystem, bool applicable) {
+        return metricText(subsystem, PerformanceDomain::Gpu, applicable);
+    };
+
+    std::ostringstream text;
+    if (frameTimingStats_.HasPublishedSample()) {
+        text << std::fixed << std::setprecision(1)
+             << "FPS: " << frameTimingStats_.Fps()
+             << "  Frame: " << frameTimingStats_.AverageFrameMilliseconds()
+             << " ms\n";
+    } else {
+        text << "FPS: --.-  Frame: --.- ms\n";
+    }
+    text << "Subsystem       CPU ms  GPU ms\n"
+         << "Env depth       " << cpu(PerformanceSubsystem::EnvironmentDepth)
+         << "  " << gpu(PerformanceSubsystem::EnvironmentDepth, false) << "\n"
+         << "Camera capture  " << cpu(PerformanceSubsystem::CameraCapture)
+         << "  " << gpu(PerformanceSubsystem::CameraCapture, false) << "\n"
+         << "Light estimate  " << cpu(PerformanceSubsystem::LightEstimation)
+         << "  " << gpu(PerformanceSubsystem::LightEstimation, true) << "\n"
+         << "Depth resize    " << cpu(PerformanceSubsystem::DepthPreparation)
+         << "  " << gpu(PerformanceSubsystem::DepthPreparation, false) << "\n"
+         << "Video decode    " << cpu(PerformanceSubsystem::VideoDecode)
+         << "  " << gpu(PerformanceSubsystem::VideoDecode, false) << "\n"
+         << "Texture upload  " << cpu(PerformanceSubsystem::TextureUpload)
+         << "  " << gpu(PerformanceSubsystem::TextureUpload, true) << "\n"
+         << "Rendering       " << cpu(PerformanceSubsystem::Rendering)
+         << "  " << gpu(PerformanceSubsystem::Rendering, true) << "\n"
+         << "Other update    " << cpu(PerformanceSubsystem::OtherUpdate)
+         << "  " << gpu(PerformanceSubsystem::OtherUpdate, false);
+    diagnosticLabel_->SetText(text.str().c_str());
 }
 
 void TDGenPlayerApp::BuildDiagnosticsControls() {
@@ -704,7 +800,7 @@ void TDGenPlayerApp::BuildDiagnosticsControls() {
     ui_->AddButton("Back", {0.0f, 0.30f, -1.5f}, {500.0f, 60.0f},
         [this]() { RequestUiMode(diagnosticsReturnMode_); });
     ui_->AddToggleButton(
-        "FPS / frame time: On", "FPS / frame time: Off",
+        "Performance timings: On", "Performance timings: Off",
         &diagnosticOverlayVisible_, {0.0f, 0.18f, -1.5f}, {500.0f, 60.0f},
         [this]() { RefreshDiagnosticOverlay(); });
 }
