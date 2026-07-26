@@ -51,6 +51,11 @@ struct VideoFrame {
     uint32_t textureDepthWidth = 0;
     uint32_t textureDepthHeight = 0;
     int textureDepthStride = 0;
+    // Android retains the FFmpeg frame until the writer has sampled and
+    // endian-converted the pixels needed by the active mesh.
+    std::shared_ptr<void> depthPlaneOwner;
+    PlaneView depthPlaneView;
+    bool depthPlaneBigEndian = false;
 
     // Depth resized and bounded by the decoder thread for the active mesh detail.
     std::vector<uint16_t> preparedDepthData;

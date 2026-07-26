@@ -2,6 +2,7 @@
 #include "Systems/DepthFramePreparation.h"
 
 #include <cassert>
+#include <cstdint>
 #include <vector>
 
 int main() {
@@ -49,11 +50,72 @@ int main() {
     assert(preparer.Prepare(
         source, 5, 3, 5, 3, 65535, 1.0f, {1.0f, 1.0f, 0.0f, 0.0f},
         prepared));
-    assert(prepared.pixels.empty());
+    assert(prepared.pixels == source);
     assert(prepared.boundsValid);
     assert(!preparer.Prepare(
         source, 0, 3, 3, 2, 65535, 1.0f, {1.0f, 1.0f, 0.0f, 0.0f},
         prepared));
     assert(prepared.pixels.empty());
+
+    // Strided and deliberately unaligned raw planes must produce exactly the
+    // same samples and bounds for either schema-v4 byte order.
+    constexpr uint32_t rawWidth = 7;
+    constexpr uint32_t rawHeight = 5;
+    constexpr int rawStride = 17;
+    std::vector<uint16_t> rawValues(rawWidth * rawHeight);
+    for (size_t i = 0; i < rawValues.size(); ++i) {
+        rawValues[i] = i == 9 ? 65535 : static_cast<uint16_t>(100 + i * 3);
+    }
+    std::vector<uint8_t> bigEndianStorage(
+        1 + static_cast<size_t>(rawStride) * rawHeight, 0xcc);
+    std::vector<uint8_t> littleEndianStorage(
+        1 + static_cast<size_t>(rawStride) * rawHeight, 0xdd);
+    for (uint32_t y = 0; y < rawHeight; ++y) {
+        for (uint32_t x = 0; x < rawWidth; ++x) {
+            const uint16_t value = rawValues[
+                static_cast<size_t>(y) * rawWidth + x];
+            uint8_t* be = bigEndianStorage.data() + 1 +
+                static_cast<size_t>(y) * rawStride + x * 2;
+            uint8_t* le = littleEndianStorage.data() + 1 +
+                static_cast<size_t>(y) * rawStride + x * 2;
+            be[0] = static_cast<uint8_t>(value >> 8);
+            be[1] = static_cast<uint8_t>(value);
+            le[0] = static_cast<uint8_t>(value);
+            le[1] = static_cast<uint8_t>(value >> 8);
+        }
+    }
+    for (int divisor = 1; divisor <= 4; ++divisor) {
+        const uint32_t destinationWidth =
+            MeshDetailControl::ReducedDimension(rawWidth, divisor);
+        const uint32_t destinationHeight =
+            MeshDetailControl::ReducedDimension(rawHeight, divisor);
+        PreparedDepthFrame reference;
+        PreparedDepthFrame fromBigEndian;
+        PreparedDepthFrame fromLittleEndian;
+        assert(preparer.Prepare(
+            rawValues, rawWidth, rawHeight,
+            destinationWidth, destinationHeight, 65535, 1000.0f,
+            {4.0f, 4.0f, 3.0f, 2.0f}, reference));
+        assert(preparer.Prepare(
+            bigEndianStorage.data() + 1, rawWidth, rawHeight, rawStride, true,
+            destinationWidth, destinationHeight, 65535, 1000.0f,
+            {4.0f, 4.0f, 3.0f, 2.0f}, fromBigEndian));
+        assert(preparer.Prepare(
+            littleEndianStorage.data() + 1, rawWidth, rawHeight, rawStride, false,
+            destinationWidth, destinationHeight, 65535, 1000.0f,
+            {4.0f, 4.0f, 3.0f, 2.0f}, fromLittleEndian));
+        assert(fromBigEndian.pixels == reference.pixels);
+        assert(fromLittleEndian.pixels == reference.pixels);
+        assert(fromBigEndian.boundsValid == reference.boundsValid);
+        assert(fromLittleEndian.boundsValid == reference.boundsValid);
+        assert(fromBigEndian.boundsMinimum == reference.boundsMinimum);
+        assert(fromBigEndian.boundsMaximum == reference.boundsMaximum);
+        assert(fromLittleEndian.boundsMinimum == reference.boundsMinimum);
+        assert(fromLittleEndian.boundsMaximum == reference.boundsMaximum);
+    }
+    assert(!preparer.Prepare(
+        bigEndianStorage.data() + 1, rawWidth, rawHeight,
+        static_cast<int>(rawWidth * 2 - 1), true,
+        3, 2, 65535, 1000.0f, {4.0f, 4.0f, 3.0f, 2.0f}, prepared));
     return 0;
 }

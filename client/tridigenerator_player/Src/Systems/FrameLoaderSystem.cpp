@@ -58,7 +58,11 @@ static void PreallocateVideoFrame(
     frame.textureUData.resize(chromaPixels);
     frame.textureVData.resize(chromaPixels);
     frame.textureAlphaData.resize(lumaPixels);
+#if defined(__ANDROID__)
+    frame.textureDepthData.clear();
+#else
     frame.textureDepthData.resize(lumaPixels);
+#endif
     const int divisor = MeshDetailControl::SanitizeDivisor(meshDetailDivisor);
     frame.preparedDepthData.resize(
         static_cast<size_t>(
@@ -91,12 +95,17 @@ static bool PrepareDecodedDepth(
         VideoFrame& frame,
         DepthFramePreparer& preparer,
         PreparedDepthFrame& prepared) {
+    const auto releaseDepthPlane = [&]() {
+        frame.depthPlaneOwner.reset();
+        frame.depthPlaneView = {};
+    };
     if (frame.frameIndex < 0 ||
         frame.frameIndex >= static_cast<int>(loader.dataset.frames.size())) {
         frame.preparedDepthData.clear();
         frame.preparedDepthWidth = 0;
         frame.preparedDepthHeight = 0;
         frame.preparedDepthBoundsValid = false;
+        releaseDepthPlane();
         return false;
     }
 
@@ -106,7 +115,20 @@ static bool PrepareDecodedDepth(
         MeshDetailControl::ReducedDimension(loader.width, divisor));
     const uint32_t height = static_cast<uint32_t>(
         MeshDetailControl::ReducedDimension(loader.height, divisor));
-    if (!preparer.Prepare(
+    const bool preparedSuccessfully = frame.depthPlaneOwner
+        ? preparer.Prepare(
+            frame.depthPlaneView.data,
+            frame.depthPlaneView.width,
+            frame.depthPlaneView.height,
+            frame.depthPlaneView.stride,
+            frame.depthPlaneBigEndian,
+            width,
+            height,
+            loader.dataset.invalidDepthValue,
+            loader.dataset.depthUnitsPerMetre,
+            loader.dataset.frames[frame.frameIndex].intrinsics,
+            prepared)
+        : preparer.Prepare(
             frame.textureDepthData,
             frame.textureDepthWidth,
             frame.textureDepthHeight,
@@ -115,7 +137,9 @@ static bool PrepareDecodedDepth(
             loader.dataset.invalidDepthValue,
             loader.dataset.depthUnitsPerMetre,
             loader.dataset.frames[frame.frameIndex].intrinsics,
-            prepared)) {
+            prepared);
+    releaseDepthPlane();
+    if (!preparedSuccessfully) {
         frame.preparedDepthData.clear();
         frame.preparedDepthWidth = 0;
         frame.preparedDepthHeight = 0;
@@ -646,9 +670,11 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
                     record(
                         PerformanceSubsystem::DepthDecode,
                         decodeTiming.depthCodecMilliseconds);
-                    record(
-                        PerformanceSubsystem::DepthConvertCopy,
-                        decodeTiming.depthConvertCopyMilliseconds);
+                    if (!s.frame->depthPlaneOwner) {
+                        record(
+                            PerformanceSubsystem::DepthConvertCopy,
+                            decodeTiming.depthConvertCopyMilliseconds);
+                    }
                     record(
                         PerformanceSubsystem::DemuxAudio,
                         decodeTiming.demuxAudioMilliseconds);
@@ -685,12 +711,24 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
                     break;
                 }
                 bool prepared = false;
+                const bool fusedDepthConversion =
+                    s.frame->depthPlaneOwner != nullptr;
+                const auto depthPreparationStart =
+                    std::chrono::steady_clock::now();
                 {
                     ScopedCpuTimer depthTimer(
                         performanceTiming_.get(),
                         PerformanceSubsystem::DepthPreparation);
                     prepared = PrepareDecodedDepth(
                         flC, *s.frame, depthPreparer, preparedDepth);
+                }
+                if (collectTiming && fusedDepthConversion) {
+                    performanceTiming_->Record(
+                        PerformanceSubsystem::DepthConvertCopy,
+                        PerformanceDomain::Cpu,
+                        std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() -
+                            depthPreparationStart).count());
                 }
                 if (!prepared) {
                     LOGW(

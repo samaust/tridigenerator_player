@@ -19,6 +19,47 @@ struct PreparedDepthFrame {
 class DepthFramePreparer {
 public:
     bool Prepare(
+            const uint8_t* source,
+            uint32_t sourceWidth,
+            uint32_t sourceHeight,
+            int sourceStrideBytes,
+            bool sourceBigEndian,
+            uint32_t destinationWidth,
+            uint32_t destinationHeight,
+            uint16_t invalidDepthValue,
+            float depthUnitsPerMetre,
+            const std::array<float, 4>& intrinsics,
+            PreparedDepthFrame& output) {
+        if (source == nullptr || sourceStrideBytes == 0 ||
+            static_cast<uint64_t>(
+                sourceStrideBytes < 0 ? -static_cast<int64_t>(sourceStrideBytes)
+                                      : sourceStrideBytes) <
+                static_cast<uint64_t>(sourceWidth) * sizeof(uint16_t)) {
+            output = {};
+            return false;
+        }
+        return PrepareWithReader(
+            sourceWidth,
+            sourceHeight,
+            destinationWidth,
+            destinationHeight,
+            invalidDepthValue,
+            depthUnitsPerMetre,
+            intrinsics,
+            [&](uint32_t x, uint32_t y) {
+                const uint8_t* pixel =
+                    source + static_cast<ptrdiff_t>(y) * sourceStrideBytes +
+                    static_cast<size_t>(x) * sizeof(uint16_t);
+                return sourceBigEndian
+                    ? static_cast<uint16_t>(
+                        static_cast<uint16_t>(pixel[0]) << 8 | pixel[1])
+                    : static_cast<uint16_t>(
+                        static_cast<uint16_t>(pixel[1]) << 8 | pixel[0]);
+            },
+            output);
+    }
+
+    bool Prepare(
             const std::vector<uint16_t>& source,
             uint32_t sourceWidth,
             uint32_t sourceHeight,
@@ -30,15 +71,44 @@ public:
             PreparedDepthFrame& output) {
         const size_t sourcePixels =
             static_cast<size_t>(sourceWidth) * sourceHeight;
+        if (source.size() < sourcePixels) {
+            output = {};
+            return false;
+        }
+        return PrepareWithReader(
+            sourceWidth,
+            sourceHeight,
+            destinationWidth,
+            destinationHeight,
+            invalidDepthValue,
+            depthUnitsPerMetre,
+            intrinsics,
+            [&](uint32_t x, uint32_t y) {
+                return source[
+                    static_cast<size_t>(y) * sourceWidth + x];
+            },
+            output);
+    }
+
+private:
+    template <typename ReadDepth>
+    bool PrepareWithReader(
+            uint32_t sourceWidth,
+            uint32_t sourceHeight,
+            uint32_t destinationWidth,
+            uint32_t destinationHeight,
+            uint16_t invalidDepthValue,
+            float depthUnitsPerMetre,
+            const std::array<float, 4>& intrinsics,
+            ReadDepth&& readDepth,
+            PreparedDepthFrame& output) {
         if (sourceWidth == 0 || sourceHeight == 0 ||
             destinationWidth == 0 || destinationHeight == 0 ||
-            source.size() < sourcePixels ||
             depthUnitsPerMetre <= 0.0f ||
             intrinsics[0] == 0.0f || intrinsics[1] == 0.0f) {
             output = {};
             return false;
         }
-
         RefreshMapping(
             sourceWidth,
             sourceHeight,
@@ -47,15 +117,8 @@ public:
             intrinsics);
         output.width = destinationWidth;
         output.height = destinationHeight;
-        const bool resizePixels =
-            sourceWidth != destinationWidth ||
-            sourceHeight != destinationHeight;
-        if (resizePixels) {
-            output.pixels.resize(
-                static_cast<size_t>(destinationWidth) * destinationHeight);
-        } else {
-            output.pixels.clear();
-        }
+        output.pixels.resize(
+            static_cast<size_t>(destinationWidth) * destinationHeight);
         output.boundsValid = false;
 
         std::array<float, 3> minimum{
@@ -68,15 +131,12 @@ public:
             std::numeric_limits<float>::lowest()};
 
         for (uint32_t y = 0; y < destinationHeight; ++y) {
-            const size_t sourceRow =
-                static_cast<size_t>(sourceY_[y]) * sourceWidth;
             const size_t destinationRow =
                 static_cast<size_t>(y) * destinationWidth;
             for (uint32_t x = 0; x < destinationWidth; ++x) {
-                const uint16_t encoded = source[sourceRow + sourceX_[x]];
-                if (resizePixels) {
-                    output.pixels[destinationRow + x] = encoded;
-                }
+                const uint16_t encoded =
+                    readDepth(sourceX_[x], sourceY_[y]);
+                output.pixels[destinationRow + x] = encoded;
                 if (encoded == invalidDepthValue) continue;
 
                 const float z =
@@ -103,6 +163,7 @@ public:
         return true;
     }
 
+public:
     static uint32_t SourceCoordinate(
             uint32_t destinationCoordinate,
             uint32_t sourceSize,

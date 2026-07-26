@@ -720,10 +720,33 @@ bool WebmInMemoryDemuxer::receive_depth_frame(
     }
     if (ret == 0) {
         const auto copyStart = timing_start(timing != nullptr);
-        const size_t num_pixels =
-            static_cast<size_t>(depthFrame_->width) * depthFrame_->height;
         outFrame.textureDepthWidth = depthFrame_->width;
         outFrame.textureDepthHeight = depthFrame_->height;
+#if defined(__ANDROID__)
+        AVFrame* retained = av_frame_clone(depthFrame_);
+        if (!retained) {
+            av_frame_unref(depthFrame_);
+            throw std::bad_alloc();
+        }
+        outFrame.depthPlaneOwner = std::shared_ptr<void>(
+            retained,
+            [](void* value) {
+                AVFrame* frame = static_cast<AVFrame*>(value);
+                av_frame_free(&frame);
+            });
+        outFrame.depthPlaneView = {
+            retained->data[0],
+            static_cast<uint32_t>(retained->width),
+            static_cast<uint32_t>(retained->height),
+            retained->linesize[0]};
+        outFrame.depthPlaneBigEndian = depthBigEndian_;
+        outFrame.textureDepthData.clear();
+        outFrame.textureDepthStride = retained->linesize[0];
+#else
+        outFrame.depthPlaneOwner.reset();
+        outFrame.depthPlaneView = {};
+        const size_t num_pixels =
+            static_cast<size_t>(depthFrame_->width) * depthFrame_->height;
         outFrame.textureDepthData.resize(num_pixels);
         for (int y = 0; y < depthFrame_->height; ++y) {
             const uint8_t* source =
@@ -764,6 +787,7 @@ bool WebmInMemoryDemuxer::receive_depth_frame(
         }
         outFrame.textureDepthStride =
             depthFrame_->width * static_cast<int>(sizeof(uint16_t));
+#endif
         int64_t pts = depthFrame_->best_effort_timestamp;
         if (pts == AV_NOPTS_VALUE) pts = depthFrame_->pts;
         lastDepthTimestampUs_ = pts_to_us(
