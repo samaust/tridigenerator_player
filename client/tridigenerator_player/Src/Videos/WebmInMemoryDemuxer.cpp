@@ -4,7 +4,12 @@
 #include <stdexcept>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 #include <iostream>
+
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #define LOG_TAG "WebmInMemoryDemuxer"
 #include "../Core/Logging.h"
@@ -41,6 +46,12 @@ static inline int64_t pts_to_us(int64_t pts, AVRational tb) {
     if (pts == AV_NOPTS_VALUE) return AV_NOPTS_VALUE;
     AVRational us_tb = {1, 1000000};
     return av_rescale_q(pts, tb, us_tb);
+}
+
+static inline std::chrono::steady_clock::time_point timing_start(bool enabled) {
+    return enabled
+        ? std::chrono::steady_clock::now()
+        : std::chrono::steady_clock::time_point{};
 }
 
 static bool guess_full_range_from_samples(
@@ -119,13 +130,20 @@ int64_t WebmInMemoryDemuxer::seek_callback(int64_t offset, int whence) {
 }
 
 // ---------- Construction / destruction ----------
-WebmInMemoryDemuxer::WebmInMemoryDemuxer(const std::vector<uint8_t>& blob)
-        : blob_(blob) {
+WebmInMemoryDemuxer::WebmInMemoryDemuxer(
+        const std::vector<uint8_t>& blob,
+        DecoderThreadConfig threadConfig)
+        : blob_(blob),
+          threadConfig_(threadConfig) {
     // members initialized in init()
 }
 
 WebmInMemoryDemuxer::~WebmInMemoryDemuxer() {
     // Cleanup
+    clear_pending_packets();
+    av_frame_free(&alphaFrame_);
+    av_frame_free(&depthFrame_);
+    av_frame_free(&audioFrame_);
     if (dav1dCtx_) {
         dav1d_close(&dav1dCtx_);
         dav1dCtx_ = nullptr;
@@ -133,8 +151,6 @@ WebmInMemoryDemuxer::~WebmInMemoryDemuxer() {
     avcodec_free_context(&alphaCodecCtx_);
     avcodec_free_context(&depthCodecCtx_);
     avcodec_free_context(&audioCodecCtx_);
-    sws_freeContext(swsCtx_);
-    swsCtx_ = nullptr;
     swr_free(&swrCtx_);
 
     if (fmtCtx_) {
@@ -207,9 +223,20 @@ bool WebmInMemoryDemuxer::init(std::string* error) {
                 } else if (cp->codec_id == AV_CODEC_ID_FFV1 && cp->format == AV_PIX_FMT_GRAY8 && alphaStreamIndex_ == -1) {
                     alphaStreamIndex_ = (int)i;
                     LOGI("Found FFV1 alpha stream (gray8) at index %d", i);
-                } else if (cp->codec_id == AV_CODEC_ID_PNG && cp->format == AV_PIX_FMT_GRAY16BE && depthStreamIndex_ == -1) {
+                } else if (
+                    ((cp->codec_id == AV_CODEC_ID_PNG &&
+                      cp->format == AV_PIX_FMT_GRAY16BE) ||
+                     (cp->codec_id == AV_CODEC_ID_FFV1 &&
+                      (cp->format == AV_PIX_FMT_GRAY16LE ||
+                       cp->format == AV_PIX_FMT_GRAY16BE))) &&
+                    depthStreamIndex_ == -1) {
                     depthStreamIndex_ = (int)i;
-                    LOGI("Found FFV1 depth stream (gray16be) at index %d", i);
+                    depthBigEndian_ = cp->format == AV_PIX_FMT_GRAY16BE;
+                    LOGI(
+                        "Found %s depth stream (%s) at index %d",
+                        cp->codec_id == AV_CODEC_ID_PNG ? "PNG" : "FFV1",
+                        depthBigEndian_ ? "gray16be" : "gray16le",
+                        i);
                 }
             } else if (cp->codec_type == AVMEDIA_TYPE_AUDIO && audioStreamIndex_ == -1) {
                 audioStreamIndex_ = static_cast<int>(i);
@@ -233,25 +260,53 @@ bool WebmInMemoryDemuxer::init(std::string* error) {
         const AVCodec* alphaCodec = avcodec_find_decoder(alphaStream->codecpar->codec_id);
         if (!alphaCodec) throw std::runtime_error("Could not find FFV1 decoder for alpha");
         alphaCodecCtx_ = avcodec_alloc_context3(alphaCodec);
+        if (!alphaCodecCtx_) throw std::bad_alloc();
         throw_if_ffmpeg_err(avcodec_parameters_to_context(alphaCodecCtx_, alphaStream->codecpar), "alpha avcodec_parameters_to_context");
+        alphaCodecCtx_->thread_count = std::max(1, threadConfig_.alphaThreads);
+        alphaCodecCtx_->thread_type =
+            (alphaCodec->capabilities & AV_CODEC_CAP_SLICE_THREADS)
+            ? FF_THREAD_SLICE
+            : FF_THREAD_FRAME;
         throw_if_ffmpeg_err(avcodec_open2(alphaCodecCtx_, alphaCodec, nullptr), "alpha avcodec_open2");
+        LOGI(
+            "Alpha decoder threads requested=%d active=%d type=%s",
+            threadConfig_.alphaThreads,
+            alphaCodecCtx_->thread_count,
+            (alphaCodecCtx_->active_thread_type & FF_THREAD_SLICE)
+                ? "slice"
+                : (alphaCodecCtx_->active_thread_type & FF_THREAD_FRAME)
+                    ? "frame"
+                    : "none");
 
         // FFmpeg decoder for depth stream
         AVStream* depthStream = fmtCtx_->streams[depthStreamIndex_];
         const AVCodec* depthCodec = avcodec_find_decoder(depthStream->codecpar->codec_id);
         if (!depthCodec) throw std::runtime_error("Could not find PNG decoder for depth");
         depthCodecCtx_ = avcodec_alloc_context3(depthCodec);
+        if (!depthCodecCtx_) throw std::bad_alloc();
         throw_if_ffmpeg_err(avcodec_parameters_to_context(depthCodecCtx_, depthStream->codecpar), "depth avcodec_parameters_to_context");
+        depthCodecCtx_->thread_count = std::max(1, threadConfig_.depthThreads);
+        depthCodecCtx_->thread_type =
+            depthCodec->capabilities & AV_CODEC_CAP_FRAME_THREADS
+            ? FF_THREAD_FRAME
+            : FF_THREAD_SLICE;
         throw_if_ffmpeg_err(avcodec_open2(depthCodecCtx_, depthCodec, nullptr), "depth avcodec_open2");
+        LOGI(
+            "Depth decoder threads requested=%d active=%d type=%s",
+            threadConfig_.depthThreads,
+            depthCodecCtx_->thread_count,
+            (depthCodecCtx_->active_thread_type & FF_THREAD_FRAME)
+                ? "frame"
+                : (depthCodecCtx_->active_thread_type & FF_THREAD_SLICE)
+                    ? "slice"
+                    : "none");
 
-        // 2. Initialize SwScaler for conversion
-        swsCtx_ = sws_getContext(
-                depthCodecCtx_->width, depthCodecCtx_->height, depthCodecCtx_->pix_fmt, // Source info
-                depthCodecCtx_->width, depthCodecCtx_->height, AV_PIX_FMT_GRAY16LE, // Target info
-                SWS_POINT, // SWS_POINT ensures a lossless conversion (like byte swapping)
-                NULL, NULL, NULL
-        );
-        if (!swsCtx_) throw std::runtime_error("Could not initialize SwsContext");
+        alphaFrame_ = av_frame_alloc();
+        depthFrame_ = av_frame_alloc();
+        audioFrame_ = av_frame_alloc();
+        if (!alphaFrame_ || !depthFrame_ || !audioFrame_) {
+            throw std::bad_alloc();
+        }
 
         if (audioStreamIndex_ >= 0) {
             AVStream* audioStream = fmtCtx_->streams[audioStreamIndex_];
@@ -304,8 +359,10 @@ bool WebmInMemoryDemuxer::init(std::string* error) {
         avcodec_free_context(&alphaCodecCtx_);
         avcodec_free_context(&depthCodecCtx_);
         avcodec_free_context(&audioCodecCtx_);
-        sws_freeContext(swsCtx_);
-        swsCtx_ = nullptr;
+        clear_pending_packets();
+        av_frame_free(&alphaFrame_);
+        av_frame_free(&depthFrame_);
+        av_frame_free(&audioFrame_);
         swr_free(&swrCtx_);
         if (fmtCtx_) { avformat_close_input(&fmtCtx_); fmtCtx_ = nullptr; }
         if (avioCtx_) {
@@ -336,6 +393,11 @@ bool WebmInMemoryDemuxer::seek_to_start() {
     }
 
     flush_decoders();
+    clear_pending_packets();
+    demuxEof_ = false;
+    alphaDrainSent_ = false;
+    depthDrainSent_ = false;
+    audioDrainSent_ = false;
     nextFrameIndex_ = 0;
     pendingAudio_.clear();
     if (audioCodecCtx_) avcodec_flush_buffers(audioCodecCtx_);
@@ -353,12 +415,11 @@ std::vector<AudioPcmBlock> WebmInMemoryDemuxer::take_audio_blocks() {
 }
 
 void WebmInMemoryDemuxer::drain_audio_frames() {
-    if (!audioCodecCtx_ || !swrCtx_) return;
-    AVFrame* frame = av_frame_alloc();
-    if (!frame) return;
-    while (avcodec_receive_frame(audioCodecCtx_, frame) == 0) {
+    if (!audioCodecCtx_ || !swrCtx_ || !audioFrame_) return;
+    while (avcodec_receive_frame(audioCodecCtx_, audioFrame_) == 0) {
         const int outputFrames = static_cast<int>(av_rescale_rnd(
-            swr_get_delay(swrCtx_, audioCodecCtx_->sample_rate) + frame->nb_samples,
+            swr_get_delay(swrCtx_, audioCodecCtx_->sample_rate) +
+                audioFrame_->nb_samples,
             audioOutputSampleRate_, audioCodecCtx_->sample_rate, AV_ROUND_UP));
         AudioPcmBlock block;
         block.sampleRate = audioOutputSampleRate_;
@@ -369,26 +430,35 @@ void WebmInMemoryDemuxer::drain_audio_frames() {
         };
         const int converted = swr_convert(
             swrCtx_, output, outputFrames,
-            const_cast<const uint8_t**>(frame->extended_data), frame->nb_samples);
+            const_cast<const uint8_t**>(audioFrame_->extended_data),
+            audioFrame_->nb_samples);
         if (converted > 0) {
             block.samples.resize(static_cast<size_t>(converted) * 2);
-            int64_t pts = frame->best_effort_timestamp;
-            if (pts == AV_NOPTS_VALUE) pts = frame->pts;
+            int64_t pts = audioFrame_->best_effort_timestamp;
+            if (pts == AV_NOPTS_VALUE) pts = audioFrame_->pts;
             const AVRational timeBase = fmtCtx_->streams[audioStreamIndex_]->time_base;
             block.timestampUs = pts == AV_NOPTS_VALUE
                 ? 0
                 : av_rescale_q(pts, timeBase, AVRational{1, 1000000});
             pendingAudio_.push_back(std::move(block));
         }
-        av_frame_unref(frame);
+        av_frame_unref(audioFrame_);
     }
-    av_frame_free(&frame);
 }
 
 void WebmInMemoryDemuxer::decode_audio_packet(const AVPacket* pkt) {
     if (!audioCodecCtx_) return;
-    if (avcodec_send_packet(audioCodecCtx_, pkt) >= 0) {
+    int result = avcodec_send_packet(audioCodecCtx_, pkt);
+    if (result == AVERROR(EAGAIN)) {
         drain_audio_frames();
+        result = avcodec_send_packet(audioCodecCtx_, pkt);
+    }
+    if (result >= 0) {
+        drain_audio_frames();
+    } else {
+        char error[128] = {};
+        av_strerror(result, error, sizeof(error));
+        LOGI("Optional audio packet was rejected: %s", error);
     }
 }
 
@@ -432,6 +502,10 @@ bool WebmInMemoryDemuxer::submit_packet_to_dav1d(const AVPacket* pkt) {
     d.m.timestamp = ts_us;
 
     int s = dav1d_send_data(dav1dCtx_, &d);
+    if (s == -EAGAIN) {
+        dav1d_data_unref(&d);
+        return false;
+    }
     if (s < 0) {
         // dav1d_send_data failed -> we must release our pkt_ref because dav1d won't call the callback
         dav1d_data_unref(&d);
@@ -443,10 +517,18 @@ bool WebmInMemoryDemuxer::submit_packet_to_dav1d(const AVPacket* pkt) {
 }
 
 // ---------- get next dav1d picture and populate outFrame ----------
-bool WebmInMemoryDemuxer::get_next_dav1d_picture(VideoFrame& outFrame) {
+bool WebmInMemoryDemuxer::get_next_dav1d_picture(
+        VideoFrame& outFrame,
+        DecodeInvocationTiming* timing) {
     Dav1dPicture pic;
     memset(&pic, 0, sizeof(pic));
+    const auto codecStart = timing_start(timing != nullptr);
     int r = dav1d_get_picture(dav1dCtx_, &pic);
+    if (timing) {
+        timing->colorCodecMilliseconds +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - codecStart).count();
+    }
     if (r == 0) {
         // picture available
         // Check bit depth (bytes per component)
@@ -477,7 +559,7 @@ bool WebmInMemoryDemuxer::get_next_dav1d_picture(VideoFrame& outFrame) {
         const uint32_t cw = (uint32_t)((w + ss_hor) >> ss_hor);
         const uint32_t ch = (uint32_t)((h + ss_ver) >> ss_ver);
 
-        // DECODE DIRECTLY INTO outFrame's BUFFERS
+        const auto copyStart = timing_start(timing != nullptr);
         outFrame.textureYData.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
         outFrame.textureUData.resize(static_cast<size_t>(cw) * static_cast<size_t>(ch));
         outFrame.textureVData.resize(static_cast<size_t>(cw) * static_cast<size_t>(ch));
@@ -520,6 +602,11 @@ bool WebmInMemoryDemuxer::get_next_dav1d_picture(VideoFrame& outFrame) {
         } else {
             outFrame.yuvFullRange = guess_full_range_from_samples(outFrame, ss_hor, ss_ver);
         }
+        if (timing) {
+            timing->colorCopyMilliseconds +=
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - copyStart).count();
+        }
 
         dav1d_picture_unref(&pic);
         return true;
@@ -534,118 +621,184 @@ bool WebmInMemoryDemuxer::get_next_dav1d_picture(VideoFrame& outFrame) {
     }
 }
 
-// HELPER FUNCTION to receive a frame from an FFmpeg decoder
-static bool receive_ffmpeg_alpha_frame(AVCodecContext* ctx, AVFrame* frame, VideoFrame& outFrame) {
-    int ret = avcodec_receive_frame(ctx, frame);
+bool WebmInMemoryDemuxer::receive_alpha_frame(
+        VideoFrame& outFrame,
+        DecodeInvocationTiming* timing) {
+    const auto codecStart = timing_start(timing != nullptr);
+    int ret = avcodec_receive_frame(alphaCodecCtx_, alphaFrame_);
+    if (timing) {
+        timing->alphaCodecMilliseconds +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - codecStart).count();
+    }
     if (ret == 0) {
-        // Frame successfully received
-
-        // Alpha frame (8-bit gray)
-        outFrame.textureAlphaWidth = frame->width;
-        outFrame.textureAlphaHeight = frame->height;
-        outFrame.textureAlphaData.resize(frame->width * frame->height);
-        for (int y = 0; y < frame->height; ++y) {
-            memcpy(outFrame.textureAlphaData.data() + y * frame->width,
-                   frame->data[0] + y * frame->linesize[0],
-                   frame->width);
+        const auto copyStart = timing_start(timing != nullptr);
+        outFrame.textureAlphaWidth = alphaFrame_->width;
+        outFrame.textureAlphaHeight = alphaFrame_->height;
+        outFrame.textureAlphaData.resize(
+            static_cast<size_t>(alphaFrame_->width) * alphaFrame_->height);
+        for (int y = 0; y < alphaFrame_->height; ++y) {
+            memcpy(
+                outFrame.textureAlphaData.data() +
+                    static_cast<size_t>(y) * alphaFrame_->width,
+                alphaFrame_->data[0] +
+                    static_cast<size_t>(y) * alphaFrame_->linesize[0],
+                alphaFrame_->width);
         }
-        outFrame.textureAlphaStride = frame->linesize[0];
-        av_frame_unref(frame);
+        outFrame.textureAlphaStride = alphaFrame_->width;
+        int64_t pts = alphaFrame_->best_effort_timestamp;
+        if (pts == AV_NOPTS_VALUE) pts = alphaFrame_->pts;
+        lastAlphaTimestampUs_ = pts_to_us(
+            pts, fmtCtx_->streams[alphaStreamIndex_]->time_base);
+        if (timing) {
+            timing->alphaCopyMilliseconds +=
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - copyStart).count();
+        }
+        av_frame_unref(alphaFrame_);
         return true;
     }
-    return false; // EAGAIN or other error
+    if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
+        throw_if_ffmpeg_err(ret, "alpha avcodec_receive_frame");
+    }
+    return false;
 }
 
-static bool receive_ffmpeg_depth_frame(AVCodecContext* ctx, SwsContext* swsCtx, AVFrame* frameBE, AVFrame* frameLE, VideoFrame& outFrame) {
-    int ret = avcodec_receive_frame(ctx, frameBE);
+bool WebmInMemoryDemuxer::receive_depth_frame(
+        VideoFrame& outFrame,
+        DecodeInvocationTiming* timing) {
+    const auto codecStart = timing_start(timing != nullptr);
+    int ret = avcodec_receive_frame(depthCodecCtx_, depthFrame_);
+    if (timing) {
+        timing->depthCodecMilliseconds +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - codecStart).count();
+    }
     if (ret == 0) {
-        // Frame successfully received
-
-        // Depth frame (16-bit gray BE -> convert to LE)
-        // Use SwsContext to convert from GRAY16BE to GRAY16LE
-        sws_scale(swsCtx,
-                  (const uint8_t *const *)frameBE->data, frameBE->linesize,
-                  0, frameBE->height,
-                  frameLE->data, frameLE->linesize);
-
-        // Calculate required size and resize the vector
-        // The size is (width * height) uint16_t elements.
-        size_t num_pixels = (size_t)frameBE->width * frameBE->height;
-        outFrame.textureDepthWidth = frameBE->width;
-        outFrame.textureDepthHeight = frameBE->height;
+        const auto copyStart = timing_start(timing != nullptr);
+        const size_t num_pixels =
+            static_cast<size_t>(depthFrame_->width) * depthFrame_->height;
+        outFrame.textureDepthWidth = depthFrame_->width;
+        outFrame.textureDepthHeight = depthFrame_->height;
         outFrame.textureDepthData.resize(num_pixels);
-
-        // Define the source and destination pointers
-        const uint8_t* src_ptr = frameLE->data[0];
-        uint8_t* dest_ptr = (uint8_t*)outFrame.textureDepthData.data();
-
-        // Define strides/sizes in bytes
-        const int src_stride_bytes = frameLE->linesize[0];
-        const int dst_stride_bytes = frameLE->width * sizeof(uint16_t); // Tightly packed destination
-        const int row_bytes = dst_stride_bytes; // The actual pixel data bytes per row
-
-        for (int y = 0; y < frameLE->height; ++y) {
-            // Source: Start of the row in the AVFrame buffer.
-            const uint8_t* src_row = src_ptr + y * src_stride_bytes;
-
-            // Destination: Start of the row in the std::vector buffer.
-            // Since the vector is tightly packed, the stride is simply 'row_bytes'.
-            uint8_t* dest_row = dest_ptr + y * row_bytes;
-
-            // Copy only the actual pixel data (row_bytes)
-            memcpy(dest_row, src_row, row_bytes);
-
-            // Error check (Optional but Recommended):
-            if (row_bytes > src_stride_bytes) {
-                // This case should not happen for AVFrame, but is a good check.
-                // It indicates the destination is wider than the source stride.
-                throw std::runtime_error("Destination row is wider than source linesize, potential data corruption.");
+        for (int y = 0; y < depthFrame_->height; ++y) {
+            const uint8_t* source =
+                depthFrame_->data[0] +
+                static_cast<size_t>(y) * depthFrame_->linesize[0];
+            uint16_t* destination =
+                outFrame.textureDepthData.data() +
+                static_cast<size_t>(y) * depthFrame_->width;
+            if (!depthBigEndian_) {
+                memcpy(
+                    destination,
+                    source,
+                    static_cast<size_t>(depthFrame_->width) * sizeof(uint16_t));
+                continue;
             }
+#if defined(__aarch64__)
+            int x = 0;
+            uint8_t* destinationBytes =
+                reinterpret_cast<uint8_t*>(destination);
+            for (; x + 8 <= depthFrame_->width; x += 8) {
+                const uint8x16_t values = vld1q_u8(source + x * 2);
+                vst1q_u8(destinationBytes + x * 2, vrev16q_u8(values));
+            }
+            for (; x < depthFrame_->width; ++x) {
+                destination[x] =
+                    static_cast<uint16_t>(
+                        static_cast<uint16_t>(source[x * 2]) << 8) |
+                    source[x * 2 + 1];
+            }
+#else
+            for (int x = 0; x < depthFrame_->width; ++x) {
+                destination[x] =
+                    static_cast<uint16_t>(
+                        static_cast<uint16_t>(source[x * 2]) << 8) |
+                    source[x * 2 + 1];
+            }
+#endif
         }
-        av_frame_unref(frameBE);
-        av_frame_unref(frameLE);
+        outFrame.textureDepthStride =
+            depthFrame_->width * static_cast<int>(sizeof(uint16_t));
+        int64_t pts = depthFrame_->best_effort_timestamp;
+        if (pts == AV_NOPTS_VALUE) pts = depthFrame_->pts;
+        lastDepthTimestampUs_ = pts_to_us(
+            pts, fmtCtx_->streams[depthStreamIndex_]->time_base);
+        if (timing) {
+            timing->depthConvertCopyMilliseconds +=
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - copyStart).count();
+        }
+        av_frame_unref(depthFrame_);
         return true;
     }
-    return false; // EAGAIN or other error
+    if (ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
+        throw_if_ffmpeg_err(ret, "depth avcodec_receive_frame");
+    }
+    return false;
+}
+
+bool WebmInMemoryDemuxer::send_or_queue_packet(
+        AVCodecContext* context,
+        const AVPacket* packet,
+        std::deque<AVPacket*>& queue) {
+    if (queue.empty()) {
+        const int result = avcodec_send_packet(context, packet);
+        if (result == 0) return true;
+        if (result != AVERROR(EAGAIN)) {
+            throw_if_ffmpeg_err(result, "avcodec_send_packet");
+        }
+    }
+    if (queue.size() >= 16) {
+        throw std::runtime_error("Decoder packet backlog exceeded 16 packets");
+    }
+    AVPacket* retained = av_packet_clone(packet);
+    if (!retained) throw std::bad_alloc();
+    queue.push_back(retained);
+    return false;
+}
+
+bool WebmInMemoryDemuxer::submit_or_queue_color_packet(const AVPacket* packet) {
+    if (pendingColorPackets_.empty() && submit_packet_to_dav1d(packet)) {
+        return true;
+    }
+    if (pendingColorPackets_.size() >= 16) {
+        throw std::runtime_error("Color packet backlog exceeded 16 packets");
+    }
+    AVPacket* retained = av_packet_clone(packet);
+    if (!retained) throw std::bad_alloc();
+    pendingColorPackets_.push_back(retained);
+    return false;
+}
+
+void WebmInMemoryDemuxer::clear_pending_packets() {
+    const auto clear = [](std::deque<AVPacket*>& queue) {
+        while (!queue.empty()) {
+            AVPacket* packet = queue.front();
+            queue.pop_front();
+            av_packet_free(&packet);
+        }
+    };
+    clear(pendingColorPackets_);
+    clear(pendingAlphaPackets_);
+    clear(pendingDepthPackets_);
 }
 
 // ---------- decode_next_frame: streaming (one frame) ----------
-bool WebmInMemoryDemuxer::decode_next_frame(VideoFrame& outFrame) {
+bool WebmInMemoryDemuxer::decode_next_frame(
+        VideoFrame& outFrame,
+        DecodeInvocationTiming* timing) {
     if (!fmtCtx_ || !dav1dCtx_ || !alphaCodecCtx_ || !depthCodecCtx_) {
         throw std::runtime_error("Decoders not initialized");
     }
+    if (timing) *timing = {};
+    const auto totalStart = timing_start(timing != nullptr);
 
     bool has_color = false;
     bool has_alpha = false;
     bool has_depth = false;
-
-    AVFrame* alpha_frame = av_frame_alloc();
-    if (!alpha_frame) {
-        av_frame_free(&alpha_frame);
-        throw std::bad_alloc();
-    }
-
-    AVFrame* depth_frameBE = av_frame_alloc();
-    if (!depth_frameBE) {
-        av_frame_free(&depth_frameBE);
-        throw std::bad_alloc();
-    }
-
-    AVFrame* depth_frameLE = av_frame_alloc();
-    if (!depth_frameLE) {
-        av_frame_free(&depth_frameLE);
-        throw std::bad_alloc();
-    }
-
-    depth_frameLE->width = depthCodecCtx_->width;
-    depth_frameLE->height = depthCodecCtx_->height;
-    depth_frameLE->format = AV_PIX_FMT_GRAY16LE; // Set the target format
-    if (av_frame_get_buffer(depth_frameLE, 0) < 0) {
-        av_frame_free(&alpha_frame);
-        av_frame_free(&depth_frameBE);
-        av_frame_free(&depth_frameLE);
-        throw std::runtime_error("Could not allocate depth_frameLE buffer");
-    }
+    lastAlphaTimestampUs_ = AV_NOPTS_VALUE;
+    lastDepthTimestampUs_ = AV_NOPTS_VALUE;
 
     // This loop continues until we have one frame from each stream
     while (!(has_color && has_alpha && has_depth)) {
@@ -655,19 +808,19 @@ bool WebmInMemoryDemuxer::decode_next_frame(VideoFrame& outFrame) {
         while (true) {
             bool received_any = false;
             if (!has_color) {
-                if (get_next_dav1d_picture(outFrame)) {
+                if (get_next_dav1d_picture(outFrame, timing)) {
                     has_color = true;
                     received_any = true;
                 }
             }
             if (!has_alpha) {
-                if (receive_ffmpeg_alpha_frame(alphaCodecCtx_, alpha_frame, outFrame)) {
+                if (receive_alpha_frame(outFrame, timing)) {
                     has_alpha = true;
                     received_any = true;
                 }
             }
             if (!has_depth) {
-                if (receive_ffmpeg_depth_frame(depthCodecCtx_, swsCtx_, depth_frameBE, depth_frameLE, outFrame)) {
+                if (receive_depth_frame(outFrame, timing)) {
                     has_depth = true;
                     received_any = true;
                 }
@@ -682,34 +835,139 @@ bool WebmInMemoryDemuxer::decode_next_frame(VideoFrame& outFrame) {
         // If we have all three components, we're done.
         if (has_color && has_alpha && has_depth) break;
 
+        bool submittedPending = false;
+        const auto submitPendingFfmpeg =
+            [&](AVCodecContext* context, std::deque<AVPacket*>& queue) {
+                if (queue.empty()) return false;
+                const int result = avcodec_send_packet(context, queue.front());
+                if (result == AVERROR(EAGAIN)) return false;
+                throw_if_ffmpeg_err(result, "pending avcodec_send_packet");
+                AVPacket* packet = queue.front();
+                queue.pop_front();
+                av_packet_free(&packet);
+                return true;
+            };
+        if (!has_color && !pendingColorPackets_.empty() &&
+            submit_packet_to_dav1d(pendingColorPackets_.front())) {
+            AVPacket* packet = pendingColorPackets_.front();
+            pendingColorPackets_.pop_front();
+            av_packet_free(&packet);
+            submittedPending = true;
+        }
+        if (!has_alpha) {
+            submittedPending =
+                submitPendingFfmpeg(alphaCodecCtx_, pendingAlphaPackets_) ||
+                submittedPending;
+        }
+        if (!has_depth) {
+            submittedPending =
+                submitPendingFfmpeg(depthCodecCtx_, pendingDepthPackets_) ||
+                submittedPending;
+        }
+        if (submittedPending) continue;
+
         // Otherwise, read a new packet from the container and feed it to the correct decoder.
         AVPacket pkt;
-        if (!read_packet(&pkt)) {
-            // End of stream, no more packets to read. Break the loop.
+        memset(&pkt, 0, sizeof(pkt));
+        const auto demuxStart = timing_start(timing != nullptr);
+        const bool read = !demuxEof_ && read_packet(&pkt);
+        if (timing) {
+            timing->demuxAudioMilliseconds +=
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - demuxStart).count();
+        }
+        if (!read) {
+            demuxEof_ = true;
+            bool sentDrain = false;
+            const auto sendDrain = [&](AVCodecContext* context, bool& sent) {
+                if (!context || sent) return false;
+                const int result = avcodec_send_packet(context, nullptr);
+                if (result == AVERROR(EAGAIN)) return true;
+                if (result != AVERROR_EOF) {
+                    throw_if_ffmpeg_err(result, "decoder drain");
+                }
+                sent = true;
+                return true;
+            };
+            sentDrain = sendDrain(alphaCodecCtx_, alphaDrainSent_) || sentDrain;
+            sentDrain = sendDrain(depthCodecCtx_, depthDrainSent_) || sentDrain;
+            sentDrain = sendDrain(audioCodecCtx_, audioDrainSent_) || sentDrain;
+            if (audioCodecCtx_) drain_audio_frames();
+            if (sentDrain) continue;
             break;
         }
 
         if (pkt.stream_index == colorStreamIndex_) {
-            submit_packet_to_dav1d(&pkt);
+            const auto start = timing_start(timing != nullptr);
+            if (has_color) {
+                if (pendingColorPackets_.size() >= 16) {
+                    av_packet_unref(&pkt);
+                    throw std::runtime_error(
+                        "Color packet backlog exceeded 16 packets");
+                }
+                AVPacket* retained = av_packet_clone(&pkt);
+                if (!retained) {
+                    av_packet_unref(&pkt);
+                    throw std::bad_alloc();
+                }
+                pendingColorPackets_.push_back(retained);
+            } else {
+                submit_or_queue_color_packet(&pkt);
+            }
+            if (timing) {
+                timing->colorCodecMilliseconds +=
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start).count();
+            }
         } else if (pkt.stream_index == alphaStreamIndex_) {
-            avcodec_send_packet(alphaCodecCtx_, &pkt);
+            const auto start = timing_start(timing != nullptr);
+            send_or_queue_packet(
+                alphaCodecCtx_, &pkt, pendingAlphaPackets_);
+            if (timing) {
+                timing->alphaCodecMilliseconds +=
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start).count();
+            }
         } else if (pkt.stream_index == depthStreamIndex_) {
-            avcodec_send_packet(depthCodecCtx_, &pkt);
+            const auto start = timing_start(timing != nullptr);
+            send_or_queue_packet(
+                depthCodecCtx_, &pkt, pendingDepthPackets_);
+            if (timing) {
+                timing->depthCodecMilliseconds +=
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start).count();
+            }
         } else if (pkt.stream_index == audioStreamIndex_) {
+            const auto start = timing_start(timing != nullptr);
             decode_audio_packet(&pkt);
+            if (timing) {
+                timing->demuxAudioMilliseconds +=
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - start).count();
+            }
         }
 
         av_packet_unref(&pkt);
     }
 
-    av_frame_free(&alpha_frame);
-    av_frame_free(&depth_frameBE);
-    av_frame_free(&depth_frameLE);
-
     // Return true only if we successfully got all three components.
     const bool complete = has_color && has_alpha && has_depth;
     if (complete) {
+        const auto timestampsMatch = [](int64_t a, int64_t b) {
+            return a == AV_NOPTS_VALUE || b == AV_NOPTS_VALUE ||
+                std::llabs(a - b) <= 1;
+        };
+        if (!timestampsMatch(outFrame.ts_us, lastAlphaTimestampUs_) ||
+            !timestampsMatch(outFrame.ts_us, lastDepthTimestampUs_)) {
+            throw std::runtime_error(
+                "Decoded color, alpha, and depth timestamps are not synchronized");
+        }
         outFrame.frameIndex = nextFrameIndex_++;
+    }
+    if (timing) {
+        timing->totalMilliseconds =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - totalStart).count();
     }
     return complete;
 }

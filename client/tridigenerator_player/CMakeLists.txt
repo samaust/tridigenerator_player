@@ -39,7 +39,7 @@ if(UNIX AND NOT ANDROID)
             Src/Data/VipeDataset.cpp)
         target_include_directories(vipe_dataset_tests PRIVATE Src)
         target_compile_definitions(vipe_dataset_tests PRIVATE
-            VIPE_TEST_MANIFEST="${CMAKE_SOURCE_DIR}/../vipe_encoded/dog-example.json")
+            VIPE_TEST_MANIFEST="${CMAKE_CURRENT_LIST_DIR}/../../vipe_encoded/dog-example.json")
         target_link_libraries(vipe_dataset_tests PRIVATE PkgConfig::JSONCPP)
         add_test(NAME vipe_dataset_tests COMMAND vipe_dataset_tests)
         add_executable(vipe_decoder_tests
@@ -48,7 +48,7 @@ if(UNIX AND NOT ANDROID)
         target_include_directories(vipe_decoder_tests PRIVATE
             Src ${CMAKE_CURRENT_LIST_DIR}/../dependencies/meta/SampleXrFramework/Src)
         target_compile_definitions(vipe_decoder_tests PRIVATE
-            VIPE_TEST_VIDEO="${CMAKE_SOURCE_DIR}/../vipe_encoded/dog-example.mkv")
+            VIPE_TEST_VIDEO="${CMAKE_CURRENT_LIST_DIR}/../../vipe_encoded/dog-example.mkv")
         target_link_libraries(vipe_decoder_tests PRIVATE
             PkgConfig::AVFORMAT PkgConfig::AVCODEC PkgConfig::AVUTIL
             PkgConfig::SWSCALE PkgConfig::SWRESAMPLE PkgConfig::DAV1D)

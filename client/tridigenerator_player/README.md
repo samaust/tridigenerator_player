@@ -75,7 +75,7 @@ also contain the source video's first audio stream:
 |---:|---|---|---|---|
 | 0 | Color | AV1 | `yuv420p` | 8-bit YUV 4:2:0 color. |
 | 1 | Mask | FFV1 | `gray` | 8-bit label or visibility value. |
-| 2 | Depth | PNG | `gray16be` | Big-endian unsigned 16-bit linear depth. |
+| 2 | Depth | PNG or FFV1 | `gray16be` or `gray16le` | Lossless unsigned 16-bit linear depth. |
 | 3 (optional) | Audio | Source codec | Source format | Head-locked source audio. |
 
 All three streams must use the manifest's `width`, `height`, and rational `frame_rate`, and each
@@ -165,9 +165,10 @@ This single-frame example shows the complete structure accepted by the player:
 ```
 
 The required identity and timing fields are `schema_version`, `file`, `sequence`, `frame_count`,
-`width`, `height`, and `frame_rate`. Schema versions 1 and 2 are supported. Dimensions and frame
+`width`, `height`, and `frame_rate`. Schema versions 1, 2, and 3 are supported. Dimensions and frame
 count must be positive, and both frame-rate values must be positive integers. The `streams`
-object must match the three fixed entries in the stream table. The `depth` object must specify
+object must match the three fixed entries in the stream table. Schemas 1 and 2 use PNG
+`gray16be` depth; schema 3 additionally accepts FFV1 `gray16le` depth. The `depth` object must specify
 `uint16_linear` encoding, `metres`, a positive finite `units_per_metre`, and a uint16
 `invalid_value`.
 
@@ -370,7 +371,9 @@ The `Diagnostics` menu enables a performance overlay, which is off at startup an
 if the main UI is hidden. It retains application-loop FPS and frame cadence and reports one-second
 per-invocation CPU averages for environment-depth acquisition, camera capture and plane copying,
 light estimation, depth resizing and bounds calculation, video decode, geometry texture upload,
-the complete application render, and residual update work. Decode, depth preparation, and camera
+the complete application render, and residual update work. Decode diagnostics additionally split
+color, mask, depth, plane-copy/conversion, and demux/audio work into average/p95 pairs and report
+producer FPS, current/minimum ring occupancy, and post-warm-up starvation. Decode, depth preparation, and camera
 capture run asynchronously, so their averages describe those background invocations rather than
 main-thread frame time.
 

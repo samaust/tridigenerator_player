@@ -29,9 +29,13 @@ int main(int argc, char** argv) {
         return 1;
     }
     bool decodedAudio = false;
-    for (int index = 0; index < 2; ++index) {
-        VideoFrame frame;
-        if (!decoder.decode_next_frame(frame)) {
+    VideoFrame frame;
+    size_t yCapacity = 0;
+    size_t alphaCapacity = 0;
+    size_t depthCapacity = 0;
+    for (int index = 0; index < 16; ++index) {
+        DecodeInvocationTiming timing;
+        if (!decoder.decode_next_frame(frame, &timing)) {
             std::cerr << "Failed to decode complete frame " << index << '\n';
             return 1;
         }
@@ -45,6 +49,23 @@ int main(int argc, char** argv) {
             std::cerr << "Decoded frame metadata is not synchronized at " << index << '\n';
             return 1;
         }
+        if (timing.totalMilliseconds <= 0.0 ||
+            timing.colorCodecMilliseconds < 0.0 ||
+            timing.alphaCodecMilliseconds < 0.0 ||
+            timing.depthCodecMilliseconds < 0.0) {
+            std::cerr << "Decode stage timing was not populated\n";
+            return 1;
+        }
+        if (index == 0) {
+            yCapacity = frame.textureYData.capacity();
+            alphaCapacity = frame.textureAlphaData.capacity();
+            depthCapacity = frame.textureDepthData.capacity();
+        } else if (frame.textureYData.capacity() != yCapacity ||
+                   frame.textureAlphaData.capacity() != alphaCapacity ||
+                   frame.textureDepthData.capacity() != depthCapacity) {
+            std::cerr << "Decoded frame storage reallocated in steady state\n";
+            return 1;
+        }
         for (const AudioPcmBlock& block : decoder.take_audio_blocks()) {
             decodedAudio = decodedAudio || (
                 block.sampleRate == 48000 && block.channels == 2 &&
@@ -53,6 +74,19 @@ int main(int argc, char** argv) {
     }
     if (expectAudio && !decodedAudio) {
         std::cerr << "Audio stream did not produce stereo PCM\n";
+        return 1;
+    }
+    int decodedFrames = 16;
+    while (decoder.decode_next_frame(frame)) {
+        if (frame.frameIndex != decodedFrames) {
+            std::cerr << "Frame order changed while draining the stream\n";
+            return 1;
+        }
+        ++decodedFrames;
+    }
+    if (decodedFrames != 122) {
+        std::cerr << "Decoder produced " << decodedFrames
+                  << " frames before EOS; expected 122\n";
         return 1;
     }
     if (!decoder.seek_to_start()) {

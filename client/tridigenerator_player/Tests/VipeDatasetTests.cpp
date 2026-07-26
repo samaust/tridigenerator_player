@@ -35,14 +35,16 @@ int main() {
     Expect(dataset.frames.size() == 122, "per-frame metadata count");
     Expect(dataset.depthUnitsPerMetre > 8000.0f, "depth scale parsed");
     Expect(dataset.orientationOffsetDegrees[0] == 0.0f &&
-        dataset.orientationOffsetDegrees[1] == -45.0f &&
+        dataset.orientationOffsetDegrees[1] == 0.0f &&
         dataset.orientationOffsetDegrees[2] == 0.0f, "orientation offsets parsed");
     Expect(dataset.maskLabels.size() == 3, "dog-example mask labels parsed");
     Expect(dataset.maskLabels.at(0) == "background", "background mask label");
     Expect(dataset.maskLabels.at(2) == "animal", "animal mask label");
     Expect(dataset.maskLabels.at(3) == "pet", "pet mask label");
-    Expect(!dataset.HasColorReference(), "schema-v1 dataset has no color reference");
+    Expect(dataset.HasColorReference(), "schema-v2 dataset has color reference");
     Expect(!dataset.hasAudio, "legacy manifest remains valid without audio");
+    Expect(dataset.depthCodec == "png" &&
+        dataset.depthPixelFormat == "gray16be", "legacy depth stream parsed");
 
     std::string withAudio = ReadFile(VIPE_TEST_MANIFEST);
     const std::string depthStream = "\"pixel_format\": \"gray16be\"\n    }";
@@ -100,18 +102,51 @@ int main() {
     const size_t schemaPosition = versionTwo.find("\"schema_version\": 1");
     if (schemaPosition != std::string::npos) versionTwo.replace(
         schemaPosition, std::string("\"schema_version\": 1").size(), "\"schema_version\": 2");
-    const size_t finalBrace = versionTwo.find_last_of('}');
-    if (finalBrace != std::string::npos) versionTwo.insert(finalBrace,
-        R"(,"color_reference":{"color_space":"linear_srgb","aggregation":"sequence","global":{"chromaticity":[1.0,1.0,1.0],"log_average_luminance":0.25,"sample_count":4096},"masks":{"2":{"chromaticity":[1.2,0.95,0.85],"log_average_luminance":0.2,"sample_count":2048}}}})");
+    if (versionTwo.find("\"color_reference\"") == std::string::npos) {
+        const size_t finalBrace = versionTwo.find_last_of('}');
+        if (finalBrace != std::string::npos) versionTwo.insert(finalBrace,
+            R"(,"color_reference":{"color_space":"linear_srgb","aggregation":"sequence","global":{"chromaticity":[1.0,1.0,1.0],"log_average_luminance":0.25,"sample_count":4096},"masks":{"2":{"chromaticity":[1.2,0.95,0.85],"log_average_luminance":0.2,"sample_count":2048}}}})");
+    }
     error.clear();
     Expect(ParseVipeDataset(versionTwo, invalid, error), error.c_str());
     Expect(invalid.HasColorReference(), "schema-v2 dataset has color reference");
-    Expect(invalid.colorReferences.masks.size() == 1, "per-mask color reference parsed");
+    Expect(!invalid.colorReferences.masks.empty(), "per-mask color reference parsed");
+
+    std::string versionThree = versionTwo;
+    const size_t v3Schema = versionThree.find("\"schema_version\": 2");
+    if (v3Schema != std::string::npos) {
+        versionThree.replace(
+            v3Schema,
+            std::string("\"schema_version\": 2").size(),
+            "\"schema_version\": 3");
+    }
+    const size_t pngCodec = versionThree.find("\"codec\": \"png\"");
+    if (pngCodec != std::string::npos) {
+        versionThree.replace(
+            pngCodec,
+            std::string("\"codec\": \"png\"").size(),
+            "\"codec\": \"ffv1\"");
+    }
+    const size_t bigEndian = versionThree.find("\"pixel_format\": \"gray16be\"");
+    if (bigEndian != std::string::npos) {
+        versionThree.replace(
+            bigEndian,
+            std::string("\"pixel_format\": \"gray16be\"").size(),
+            "\"pixel_format\": \"gray16le\"");
+    }
+    error.clear();
+    Expect(ParseVipeDataset(versionThree, invalid, error), error.c_str());
+    Expect(invalid.depthCodec == "ffv1" &&
+        invalid.depthPixelFormat == "gray16le", "schema-v3 FFV1 depth parsed");
 
     std::string missingReference = versionTwo;
-    const size_t referencePosition = missingReference.find(",\"color_reference\"");
-    if (referencePosition != std::string::npos) missingReference.erase(
-        referencePosition, missingReference.find_last_of('}') - referencePosition);
+    const size_t referencePosition = missingReference.find("\"color_reference\"");
+    if (referencePosition != std::string::npos) {
+        missingReference.replace(
+            referencePosition,
+            std::string("\"color_reference\"").size(),
+            "\"removed_reference\"");
+    }
     error.clear();
     Expect(!ParseVipeDataset(missingReference, invalid, error),
         "schema-v2 dataset without color reference rejected");

@@ -71,11 +71,17 @@ int main() {
         PerformanceSubsystem::VideoDecode,
         PerformanceDomain::Cpu).averageMilliseconds, 2.0));
     assert(Near(snapshot.Get(
+        PerformanceSubsystem::VideoDecode,
+        PerformanceDomain::Cpu).p95Milliseconds, 3.0));
+    assert(Near(snapshot.Get(
         PerformanceSubsystem::Rendering,
         PerformanceDomain::Gpu).averageMilliseconds, 4.0));
     assert(Near(snapshot.Get(
         PerformanceSubsystem::OtherUpdate,
         PerformanceDomain::Cpu).averageMilliseconds, 7.0));
+    assert(Near(snapshot.Get(
+        PerformanceSubsystem::OtherUpdate,
+        PerformanceDomain::Cpu).p95Milliseconds, 7.0));
     assert(!snapshot.Get(
         PerformanceSubsystem::CameraCapture,
         PerformanceDomain::Cpu).HasSamples());

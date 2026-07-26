@@ -109,6 +109,7 @@ private:
     OVR::Posef uiAnchorPose_ = OVR::Posef::Identity();
     double lastUpdateSeconds_ = 0.0;
     FrameTimingStats frameTimingStats_;
+    FrameTimingStats xrFrameTimingStats_;
     std::shared_ptr<PerformanceTimingStats> performanceTimingStats_ =
         std::make_shared<PerformanceTimingStats>();
     std::unique_ptr<GpuTimingManager> gpuTiming_;

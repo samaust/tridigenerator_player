@@ -35,6 +35,8 @@ struct VipeDataset {
     int frameRateDenominator = 1;
     float depthUnitsPerMetre = 0.0f;
     uint16_t invalidDepthValue = 0;
+    std::string depthCodec;
+    std::string depthPixelFormat;
     // World-space OpenGL orientation correction in degrees: yaw (+Y), pitch (+X), roll (+Z).
     std::array<float, 3> orientationOffsetDegrees{};
     std::vector<VipeFrameMetadata> frames;

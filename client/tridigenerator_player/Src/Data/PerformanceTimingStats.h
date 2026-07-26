@@ -1,11 +1,14 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <vector>
 
 enum class PerformanceSubsystem : std::size_t {
     EnvironmentDepth = 0,
@@ -14,6 +17,13 @@ enum class PerformanceSubsystem : std::size_t {
     DepthPreparation,
     GeometryCompaction,
     IndexUpload,
+    ColorDecode,
+    ColorCopy,
+    AlphaDecode,
+    AlphaCopy,
+    DepthDecode,
+    DepthConvertCopy,
+    DemuxAudio,
     VideoDecode,
     TextureUpload,
     Rendering,
@@ -29,6 +39,7 @@ enum class PerformanceDomain : std::size_t {
 
 struct PerformanceTimingMetric {
     double averageMilliseconds = 0.0;
+    double p95Milliseconds = 0.0;
     std::uint64_t sampleCount = 0;
 
     bool HasSamples() const { return sampleCount != 0; }
@@ -69,6 +80,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ++generation_;
         accumulated_ = {};
+        for (auto& subsystem : accumulated_) {
+            for (auto& domain : subsystem) domain.samples.clear();
+        }
         published_ = {};
         published_.generation = generation_;
         windowStart_ = {};
@@ -92,6 +106,7 @@ public:
         auto& value = accumulated_[Index(subsystem)][Index(domain)];
         value.totalMilliseconds += milliseconds;
         ++value.sampleCount;
+        value.samples.push_back(milliseconds);
         if (foregroundUpdate && foregroundActive_ &&
             domain == PerformanceDomain::Cpu) {
             foreground_[Index(subsystem)] += milliseconds;
@@ -120,6 +135,7 @@ public:
                                   [Index(PerformanceDomain::Cpu)];
         value.totalMilliseconds += other;
         ++value.sampleCount;
+        value.samples.push_back(other);
         foregroundActive_ = false;
     }
 
@@ -144,10 +160,30 @@ public:
                 if (source.sampleCount != 0) {
                     destination.averageMilliseconds =
                         source.totalMilliseconds / static_cast<double>(source.sampleCount);
+                    if (source.samples.empty()) {
+                        // Keep publication safe if a future accumulator path
+                        // records only totals. Such a metric has no
+                        // distribution, so its average is the best available
+                        // percentile estimate.
+                        destination.p95Milliseconds =
+                            destination.averageMilliseconds;
+                    } else {
+                        std::vector<double> sorted = source.samples;
+                        std::sort(sorted.begin(), sorted.end());
+                        const std::size_t rank = static_cast<std::size_t>(
+                            std::ceil(
+                                0.95 * static_cast<double>(sorted.size())));
+                        destination.p95Milliseconds = sorted[std::min(
+                            sorted.size() - 1,
+                            rank > 0 ? rank - 1 : 0)];
+                    }
                 }
             }
         }
         accumulated_ = {};
+        for (auto& subsystem : accumulated_) {
+            for (auto& domain : subsystem) domain.samples.clear();
+        }
         windowStart_ = now;
         return true;
     }
@@ -171,6 +207,7 @@ private:
     struct Accumulator {
         double totalMilliseconds = 0.0;
         std::uint64_t sampleCount = 0;
+        std::vector<double> samples;
     };
     using AccumulatorArray = std::array<
         std::array<Accumulator, static_cast<std::size_t>(PerformanceDomain::Count)>,

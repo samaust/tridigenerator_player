@@ -361,6 +361,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
 bool TDGenPlayerApp::SessionInit()
 {
     frameTimingStats_.Reset();
+    xrFrameTimingStats_.Reset();
     performanceTimingStats_->Reset();
     if (gpuTiming_) gpuTiming_->Init();
     // Initialize XRInputActions and create action spaces using XrApp helper functions
@@ -395,6 +396,8 @@ void TDGenPlayerApp::AppHandleEvent(XrEventDataBaseHeader* baseEventHeader) {
         currentPanelRefreshRate_ > 0.0f;
     frameTimingStats_.SetPanelRefreshRate(
         currentPanelRefreshRateValid_ ? currentPanelRefreshRate_ : 0.0);
+    xrFrameTimingStats_.SetPanelRefreshRate(
+        currentPanelRefreshRateValid_ ? currentPanelRefreshRate_ : 0.0);
     std::ostringstream message;
     message << std::fixed << std::setprecision(1)
             << "Panel changed " << event->fromDisplayRefreshRate
@@ -424,6 +427,17 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     // window publishes below. Rebuilding it once here and again at the end of
     // the same frame causes avoidable periodic GL-thread hitches.
     frameTimingStats_.AddFrame(now);
+    // This timestamp comes directly from xrWaitFrame and cannot be tied to
+    // media timestamps. Reporting both clocks distinguishes compositor
+    // throttling from a wall-clock diagnostic anomaly.
+    if (std::isfinite(in.PredictedDisplayTime) &&
+        in.PredictedDisplayTime > 0.0) {
+        const auto xrTimestamp =
+            FrameTimingStats::TimePoint{} +
+            std::chrono::duration_cast<FrameTimingStats::Clock::duration>(
+                std::chrono::duration<double>(in.PredictedDisplayTime));
+        xrFrameTimingStats_.AddFrame(xrTimestamp);
+    }
 
     // if SkipInputHandling is True, we need to sync action sets ourselves
     // --- xrSyncAction
@@ -627,6 +641,7 @@ void TDGenPlayerApp::SessionEnd()
     StopHaptics();
     lastUpdateSeconds_ = 0.0;
     frameTimingStats_.Reset();
+    xrFrameTimingStats_.Reset();
     supportedDisplayRefreshRates_.clear();
     requestedDisplayRefreshRate_ = 0.0f;
     currentPanelRefreshRate_ = 0.0f;
@@ -779,7 +794,8 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
     diagnosticUi_->SetPose(uiAnchorPose_);
     diagnosticLabel_ = diagnosticUi_->AddLabel(
         "Panel refresh rate: --.- Hz\n"
-        "Application FPS: --.-\n"
+        "Application/XR FPS: --.-/--.-\n"
+        "Playback: --  source: --.- FPS\n"
         "Missed frames: --\n"
         "Frame p50/p95/p99: --/--/-- ms\n"
         "Subsystem       CPU ms  GPU ms\n"
@@ -792,16 +808,22 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
         "Video decode        --     N/A\n"
         "Texture upload      --      --\n"
         "Rendering           --      --\n"
-        "Other update        --     N/A\n"
-        "Cells K/R/M: --/--/--  EBO: --",
+        "Other update        --     N/A",
         {diagnosticCenterX, 0.24f, -1.48f},
-        {diagnosticWidthTexels, 850.0f});
+        {diagnosticWidthTexels, 800.0f});
     diagnosticCameraLabel_ = diagnosticUi_->AddLabel(
+        "Decode avg/p95 ms\n"
+        " Color codec/copy: --/--  --/--\n"
+        " Alpha codec/copy: --/--  --/--\n"
+        " Depth codec/copy: --/--  --/--\n"
+        " Demux/audio: --/--\n"
+        "Producer: -- fps  ring --/--  starve --\n"
+        "Cells K/R/M: --/--/--  EBO: --\n"
         "Camera: --\n"
         "cb/proc/super/drop: --/--/--/--\n"
         "age/cb95/import95: --/--/-- ms copy: --",
         {diagnosticCenterX, -0.48f, -1.48f},
-        {diagnosticWidthTexels, 180.0f});
+        {diagnosticWidthTexels, 520.0f});
     RefreshDiagnosticOverlay();
 #endif
 }
@@ -837,6 +859,16 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
     const auto cpu = [&](PerformanceSubsystem subsystem) {
         return metricText(subsystem, PerformanceDomain::Cpu, true);
     };
+    const auto cpuAverageP95 = [&](PerformanceSubsystem subsystem) {
+        const auto& metric =
+            snapshot.Get(subsystem, PerformanceDomain::Cpu);
+        if (!snapshot.valid || !metric.HasSamples()) return std::string("--/--");
+        std::ostringstream value;
+        value << std::fixed << std::setprecision(2)
+              << metric.averageMilliseconds << "/"
+              << metric.p95Milliseconds;
+        return value.str();
+    };
     const auto gpu = [&](PerformanceSubsystem subsystem, bool applicable) {
         return metricText(subsystem, PerformanceDomain::Gpu, applicable);
     };
@@ -846,7 +878,37 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
     uint32_t mixedCells = 0;
     size_t compactIndexBytes = 0;
     bool usingDynamicIndices = false;
+    bool playbackPaused = false;
+    double sourceFps = 0.0;
+    std::uint64_t producedFrames = 0;
+    std::uint64_t ringStarvations = 0;
+    int ringLowWater = 0;
+    int ringOccupancy = 0;
+    std::int64_t producerStartNanoseconds = 0;
     if (entityManager_) {
+        entityManager_->ForEach<FrameLoaderComponent>(
+            [&](EntityID, FrameLoaderComponent& loader) {
+                playbackPaused =
+                    loader.paused.load(std::memory_order_acquire);
+                sourceFps = loader.fps;
+            });
+        entityManager_->ForEach<FrameLoaderState>(
+            [&](EntityID, FrameLoaderState& state) {
+                producedFrames =
+                    state.producedFrameCount.load(std::memory_order_acquire);
+                ringStarvations =
+                    state.ringStarvationCount.load(std::memory_order_acquire);
+                ringLowWater =
+                    state.ringLowWaterMark.load(std::memory_order_acquire);
+                producerStartNanoseconds =
+                    state.producerStartNanoseconds.load(
+                        std::memory_order_acquire);
+                for (const FrameSlot& slot : state.ring) {
+                    if (slot.ready.load(std::memory_order_acquire)) {
+                        ++ringOccupancy;
+                    }
+                }
+            });
         entityManager_->ForEach<CameraLightEstimationState>(
             [&](EntityID, CameraLightEstimationState& state) {
                 cameraDiagnostics = state.captureDiagnostics;
@@ -865,6 +927,18 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
             ? "RawExternalYuv" :
         cameraDiagnostics.pipeline == CameraPipelineMode::CpuYuvPlanes
             ? "CpuYuvPlanes" : "Unavailable";
+    const std::int64_t nowNanoseconds =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    const double producerSeconds =
+        producerStartNanoseconds > 0 && nowNanoseconds > producerStartNanoseconds
+        ? static_cast<double>(nowNanoseconds - producerStartNanoseconds) /
+            1000000000.0
+        : 0.0;
+    const double producerFps =
+        producerSeconds > 0.0
+        ? static_cast<double>(producedFrames) / producerSeconds
+        : 0.0;
 
     std::ostringstream text;
     if (currentPanelRefreshRateValid_) {
@@ -873,12 +947,28 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
     } else {
         text << "Panel refresh rate: --.- Hz\n";
     }
-    if (frameTimingStats_.HasPublishedSample()) {
+    if (frameTimingStats_.HasPublishedSample() ||
+        xrFrameTimingStats_.HasPublishedSample()) {
         text << std::fixed << std::setprecision(1)
-             << "Application FPS: " << frameTimingStats_.Fps() << "\n";
+             << "Application/XR FPS: ";
+        if (frameTimingStats_.HasPublishedSample()) {
+            text << frameTimingStats_.Fps();
+        } else {
+            text << "--.-";
+        }
+        text << "/";
+        if (xrFrameTimingStats_.HasPublishedSample()) {
+            text << xrFrameTimingStats_.Fps();
+        } else {
+            text << "--.-";
+        }
+        text << "\n";
     } else {
-        text << "Application FPS: --.-\n";
+        text << "Application/XR FPS: --.-/--.-\n";
     }
+    text << "Playback: " << (playbackPaused ? "paused" : "playing")
+         << "  source: " << std::fixed << std::setprecision(1)
+         << sourceFps << " FPS\n";
     if (frameTimingStats_.HasPanelRefreshRate()) {
         text << "Missed frames: "
              << frameTimingStats_.MissedFrameCount() << "\n";
@@ -914,17 +1004,33 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
          << "Rendering       " << cpu(PerformanceSubsystem::Rendering)
          << "  " << gpu(PerformanceSubsystem::Rendering, true) << "\n"
          << "Other update    " << cpu(PerformanceSubsystem::OtherUpdate)
-         << "  " << gpu(PerformanceSubsystem::OtherUpdate, false) << "\n"
+         << "  " << gpu(PerformanceSubsystem::OtherUpdate, false);
+    diagnosticLabel_->SetText(text.str().c_str());
+
+    std::ostringstream cameraText;
+    cameraText << "Decode avg/p95 ms\n"
+         << " Color codec/copy: "
+         << cpuAverageP95(PerformanceSubsystem::ColorDecode) << "  "
+         << cpuAverageP95(PerformanceSubsystem::ColorCopy) << "\n"
+         << " Alpha codec/copy: "
+         << cpuAverageP95(PerformanceSubsystem::AlphaDecode) << "  "
+         << cpuAverageP95(PerformanceSubsystem::AlphaCopy) << "\n"
+         << " Depth codec/copy: "
+         << cpuAverageP95(PerformanceSubsystem::DepthDecode) << "  "
+         << cpuAverageP95(PerformanceSubsystem::DepthConvertCopy) << "\n"
+         << " Demux/audio: "
+         << cpuAverageP95(PerformanceSubsystem::DemuxAudio) << "\n"
+         << "Producer: " << std::fixed << std::setprecision(1)
+         << producerFps << " fps  ring "
+         << ringOccupancy << "/" << ringLowWater
+         << " cur/low  starve " << ringStarvations << "\n"
          << "Cells K/R/M: "
          << retainedCells << "/" << rejectedCells << "/" << mixedCells
          << "  EBO: "
          << (usingDynamicIndices
                 ? std::to_string(compactIndexBytes / 1024) + " KiB"
-                : std::string("full"));
-    diagnosticLabel_->SetText(text.str().c_str());
-
-    std::ostringstream cameraText;
-    cameraText << "Camera: " << cameraPath << "\n"
+                : std::string("full"))
+         << "\nCamera: " << cameraPath << "\n"
          << "cb/proc/super/drop: "
          << cameraDiagnostics.callbackCount << "/"
          << cameraDiagnostics.processedCount << "/"
@@ -1092,6 +1198,7 @@ void TDGenPlayerApp::InitDisplayRefreshRateSession() {
     currentPanelRefreshRateValid_ = false;
     displayRefreshRateMessage_.clear();
     frameTimingStats_.SetPanelRefreshRate(0.0);
+    xrFrameTimingStats_.SetPanelRefreshRate(0.0);
 
     if (!displayRefreshRateExtensionAvailable_) {
         displayRefreshRateMessage_ =
@@ -1192,6 +1299,7 @@ bool TDGenPlayerApp::QueryCurrentPanelRefreshRate() {
         currentPanelRefreshRate_ = 0.0f;
         currentPanelRefreshRateValid_ = false;
         frameTimingStats_.SetPanelRefreshRate(0.0);
+        xrFrameTimingStats_.SetPanelRefreshRate(0.0);
         if (!displayRefreshRateMessage_.empty()) {
             displayRefreshRateMessage_ += "; ";
         }
@@ -1206,6 +1314,7 @@ bool TDGenPlayerApp::QueryCurrentPanelRefreshRate() {
     currentPanelRefreshRate_ = refreshRate;
     currentPanelRefreshRateValid_ = true;
     frameTimingStats_.SetPanelRefreshRate(refreshRate);
+    xrFrameTimingStats_.SetPanelRefreshRate(refreshRate);
     LOGI("Current panel refresh rate: %.1f Hz", refreshRate);
     return true;
 }

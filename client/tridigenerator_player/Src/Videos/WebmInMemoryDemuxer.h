@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <deque>
 #include <vector>
 #include <string>
 #include <functional>
@@ -20,6 +21,22 @@ extern "C" {
 #include "Render/VideoFrame.h"
 #include "AudioPcmBlock.h"
 
+struct DecodeInvocationTiming {
+    double colorCodecMilliseconds = 0.0;
+    double colorCopyMilliseconds = 0.0;
+    double alphaCodecMilliseconds = 0.0;
+    double alphaCopyMilliseconds = 0.0;
+    double depthCodecMilliseconds = 0.0;
+    double depthConvertCopyMilliseconds = 0.0;
+    double demuxAudioMilliseconds = 0.0;
+    double totalMilliseconds = 0.0;
+};
+
+struct DecoderThreadConfig {
+    int alphaThreads = 2;
+    int depthThreads = 2;
+};
+
 /**
  * @class WebmInMemoryDemuxer
  * @brief Demuxes and decodes a WebM video file held entirely in memory.
@@ -32,7 +49,9 @@ extern "C" {
  */
 class WebmInMemoryDemuxer {
 public:
-    explicit WebmInMemoryDemuxer(const std::vector<uint8_t>& blob);
+    explicit WebmInMemoryDemuxer(
+        const std::vector<uint8_t>& blob,
+        DecoderThreadConfig threadConfig = {});
     ~WebmInMemoryDemuxer();
 
     /**
@@ -48,7 +67,9 @@ public:
      * Returns false on end-of-stream or error.
      * If EOS: user should call seek_to_start() and try again.
      */
-    bool decode_next_frame(VideoFrame& outFrame);
+    bool decode_next_frame(
+        VideoFrame& outFrame,
+        DecodeInvocationTiming* timing = nullptr);
 
     /**
      * Seek to the beginning of the WebM stream (timestamp = 0).
@@ -83,12 +104,25 @@ private:
     bool submit_packet_to_dav1d(const AVPacket* pkt);
 
     // Extract a decoded dav1d picture
-    bool get_next_dav1d_picture(VideoFrame& outFrame);
+    bool get_next_dav1d_picture(
+        VideoFrame& outFrame,
+        DecodeInvocationTiming* timing);
 
     // Convert Dav1dPicture → tightly packed YUV420 buffers
-    bool copy_picture_planes(const Dav1dPicture* pic, VideoFrame& outFrame);
     void decode_audio_packet(const AVPacket* pkt);
     void drain_audio_frames();
+    bool receive_alpha_frame(
+        VideoFrame& outFrame,
+        DecodeInvocationTiming* timing);
+    bool receive_depth_frame(
+        VideoFrame& outFrame,
+        DecodeInvocationTiming* timing);
+    bool send_or_queue_packet(
+        AVCodecContext* context,
+        const AVPacket* packet,
+        std::deque<AVPacket*>& queue);
+    bool submit_or_queue_color_packet(const AVPacket* packet);
+    void clear_pending_packets();
 
     // Reset decoder state (for seeking)
     void flush_decoders();
@@ -114,10 +148,23 @@ private:
     // FFmpeg AVCodec for PNG depth stream
     AVCodecContext* depthCodecCtx_ = nullptr;
     AVCodecContext* audioCodecCtx_ = nullptr;
-    SwsContext* swsCtx_ = nullptr;
     SwrContext* swrCtx_ = nullptr;
+    AVFrame* alphaFrame_ = nullptr;
+    AVFrame* depthFrame_ = nullptr;
+    AVFrame* audioFrame_ = nullptr;
+    std::deque<AVPacket*> pendingColorPackets_;
+    std::deque<AVPacket*> pendingAlphaPackets_;
+    std::deque<AVPacket*> pendingDepthPackets_;
     int audioOutputSampleRate_ = 48000;
     std::vector<AudioPcmBlock> pendingAudio_;
+    DecoderThreadConfig threadConfig_{};
+    bool depthBigEndian_ = true;
+    int64_t lastAlphaTimestampUs_ = AV_NOPTS_VALUE;
+    int64_t lastDepthTimestampUs_ = AV_NOPTS_VALUE;
+    bool demuxEof_ = false;
+    bool alphaDrainSent_ = false;
+    bool depthDrainSent_ = false;
+    bool audioDrainSent_ = false;
 
     // Video parameters
     int width_ = 0;

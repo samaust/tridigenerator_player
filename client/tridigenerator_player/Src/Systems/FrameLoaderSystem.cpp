@@ -38,6 +38,34 @@
 static constexpr int RING_SIZE = 8;
 static constexpr size_t MAX_AUDIO_SAMPLES = 48000 * 2 * 2;
 
+static std::int64_t SteadyNanoseconds() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static void PreallocateVideoFrame(
+        VideoFrame& frame,
+        int width,
+        int height,
+        int meshDetailDivisor) {
+    const size_t lumaPixels =
+        static_cast<size_t>(width) * static_cast<size_t>(height);
+    const size_t chromaPixels =
+        static_cast<size_t>((width + 1) / 2) *
+        static_cast<size_t>((height + 1) / 2);
+    frame.textureYData.resize(lumaPixels);
+    frame.textureUData.resize(chromaPixels);
+    frame.textureVData.resize(chromaPixels);
+    frame.textureAlphaData.resize(lumaPixels);
+    frame.textureDepthData.resize(lumaPixels);
+    const int divisor = MeshDetailControl::SanitizeDivisor(meshDetailDivisor);
+    frame.preparedDepthData.resize(
+        static_cast<size_t>(
+            MeshDetailControl::ReducedDimension(width, divisor)) *
+        static_cast<size_t>(
+            MeshDetailControl::ReducedDimension(height, divisor)));
+}
+
 static void NotifyWriter(FrameLoaderState& state) {
     // Synchronize with the writer's predicate check so a state change cannot
     // occur between that check and the writer entering its indefinite wait.
@@ -292,6 +320,18 @@ bool FrameLoaderSystem::LoadManifest(FrameLoaderComponent& flC,
     // reset indices
     flS.writeIdx.store(0);
     flS.readIdx.store(0);
+    flS.producedFrameCount.store(0, std::memory_order_release);
+    flS.ringStarvationCount.store(0, std::memory_order_release);
+    flS.ringLowWaterMark.store(RING_SIZE - 1, std::memory_order_release);
+    flS.producerStartNanoseconds.store(
+        SteadyNanoseconds(), std::memory_order_release);
+    for (VideoFrame& frame : flS.framePool) {
+        PreallocateVideoFrame(
+            frame,
+            flC.width,
+            flC.height,
+            flC.meshDetailDivisor.load(std::memory_order_acquire));
+    }
     ResetAudioState(flS);
 
     // initialize nextReadTime to now (consumer will read immediately)
@@ -527,12 +567,43 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
                 s.frame = &flS.framePool[slot];
 
                 // Decode the next frame, passing our target buffer.
-                bool decoded = false;
-                {
-                    ScopedCpuTimer decodeTimer(
-                        performanceTiming_.get(),
-                        PerformanceSubsystem::VideoDecode);
-                    decoded = demuxer.decode_next_frame(*(s.frame));
+                const bool collectTiming =
+                    performanceTiming_ && performanceTiming_->IsEnabled();
+                DecodeInvocationTiming decodeTiming;
+                const bool decoded = demuxer.decode_next_frame(
+                    *(s.frame), collectTiming ? &decodeTiming : nullptr);
+                if (collectTiming) {
+                    const auto record = [&](PerformanceSubsystem subsystem,
+                                            double milliseconds) {
+                        performanceTiming_->Record(
+                            subsystem,
+                            PerformanceDomain::Cpu,
+                            milliseconds);
+                    };
+                    record(
+                        PerformanceSubsystem::ColorDecode,
+                        decodeTiming.colorCodecMilliseconds);
+                    record(
+                        PerformanceSubsystem::ColorCopy,
+                        decodeTiming.colorCopyMilliseconds);
+                    record(
+                        PerformanceSubsystem::AlphaDecode,
+                        decodeTiming.alphaCodecMilliseconds);
+                    record(
+                        PerformanceSubsystem::AlphaCopy,
+                        decodeTiming.alphaCopyMilliseconds);
+                    record(
+                        PerformanceSubsystem::DepthDecode,
+                        decodeTiming.depthCodecMilliseconds);
+                    record(
+                        PerformanceSubsystem::DepthConvertCopy,
+                        decodeTiming.depthConvertCopyMilliseconds);
+                    record(
+                        PerformanceSubsystem::DemuxAudio,
+                        decodeTiming.demuxAudioMilliseconds);
+                    record(
+                        PerformanceSubsystem::VideoDecode,
+                        decodeTiming.totalMilliseconds);
                 }
                 if (!decoded) {
                     // End of stream
@@ -615,6 +686,21 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
 
                 // Advance write index
                 flS.writeIdx.store((slot + 1) % RING_SIZE, std::memory_order_release);
+                const std::uint64_t produced =
+                    flS.producedFrameCount.fetch_add(
+                        1, std::memory_order_relaxed) + 1;
+                if (produced >= static_cast<std::uint64_t>(TARGET_FILL)) {
+                    const int occupancy =
+                        RING_SIZE - ComputeFreeSlots(flS) - 1;
+                    int lowWater =
+                        flS.ringLowWaterMark.load(std::memory_order_relaxed);
+                    while (occupancy < lowWater &&
+                           !flS.ringLowWaterMark.compare_exchange_weak(
+                               lowWater,
+                               occupancy,
+                               std::memory_order_relaxed)) {
+                    }
+                }
             } else {
                 // Slot unexpectedly still ready; avoid overwriting it
                 // Sleep and retry
@@ -829,13 +915,23 @@ bool FrameLoaderSystem::SwapNextFrame(
             flS.readIdx.store(currentReadSlot, std::memory_order_release);
             NotifyWriter(flS);
         }
-        if (!flS.ring[currentReadSlot].ready.load(std::memory_order_acquire)) return false;
+        if (!flS.ring[currentReadSlot].ready.load(std::memory_order_acquire)) {
+            if (flS.producedFrameCount.load(std::memory_order_relaxed) >=
+                static_cast<std::uint64_t>(RING_SIZE / 2)) {
+                flS.ringStarvationCount.fetch_add(1, std::memory_order_relaxed);
+            }
+            return false;
+        }
         const VideoFrame* candidate = flS.ring[currentReadSlot].frame;
         if (candidate && candidate->ts_us > audioTimeUs + static_cast<int64_t>(period * 500000.0)) {
             return false;
         }
     } else if (!flS.ring[currentReadSlot].ready.load(std::memory_order_acquire)) {
         // The writer hasn't produced a new frame for us yet.
+        if (flS.producedFrameCount.load(std::memory_order_relaxed) >=
+            static_cast<std::uint64_t>(RING_SIZE / 2)) {
+            flS.ringStarvationCount.fetch_add(1, std::memory_order_relaxed);
+        }
         return false;
     }
 

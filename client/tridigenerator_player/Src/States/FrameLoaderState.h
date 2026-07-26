@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <thread>
 #include <utility> // For std::swap and std::move
 #include <vector>
@@ -56,6 +57,10 @@ struct FrameLoaderState {
     std::vector<FrameSlot> ring; // size RING_SIZE
     std::atomic<int> writeIdx{0}; // index to write next
     std::atomic<int> readIdx{0};  // index of oldest unread slot
+    std::atomic<std::uint64_t> producedFrameCount{0};
+    std::atomic<std::uint64_t> ringStarvationCount{0};
+    std::atomic<int> ringLowWaterMark{8};
+    std::atomic<std::int64_t> producerStartNanoseconds{0};
 
     // Writer thread
     std::thread writerThread;
@@ -101,6 +106,10 @@ struct FrameLoaderState {
         // Manually move atomic values
         writeIdx.store(other.writeIdx.load());
         readIdx.store(other.readIdx.load());
+        producedFrameCount.store(other.producedFrameCount.load());
+        ringStarvationCount.store(other.ringStarvationCount.load());
+        ringLowWaterMark.store(other.ringLowWaterMark.load());
+        producerStartNanoseconds.store(other.producerStartNanoseconds.load());
         audioAvailable.store(other.audioAvailable.load());
         audioStarted.store(other.audioStarted.load());
         audioPlayedFrames.store(other.audioPlayedFrames.load());
@@ -126,6 +135,10 @@ struct FrameLoaderState {
             // Manually move atomic values
             writeIdx.store(other.writeIdx.load());
             readIdx.store(other.readIdx.load());
+            producedFrameCount.store(other.producedFrameCount.load());
+            ringStarvationCount.store(other.ringStarvationCount.load());
+            ringLowWaterMark.store(other.ringLowWaterMark.load());
+            producerStartNanoseconds.store(other.producerStartNanoseconds.load());
             audioAvailable.store(other.audioAvailable.load());
             audioStarted.store(other.audioStarted.load());
             audioPlayedFrames.store(other.audioPlayedFrames.load());
@@ -161,6 +174,22 @@ inline void swap(FrameLoaderState& a, FrameLoaderState& b) noexcept {
     int readIdxB = b.readIdx.load();
     a.readIdx.store(readIdxB);
     b.readIdx.store(readIdxA);
+    auto producedA = a.producedFrameCount.load();
+    auto producedB = b.producedFrameCount.load();
+    a.producedFrameCount.store(producedB);
+    b.producedFrameCount.store(producedA);
+    auto starvationA = a.ringStarvationCount.load();
+    auto starvationB = b.ringStarvationCount.load();
+    a.ringStarvationCount.store(starvationB);
+    b.ringStarvationCount.store(starvationA);
+    int lowWaterA = a.ringLowWaterMark.load();
+    int lowWaterB = b.ringLowWaterMark.load();
+    a.ringLowWaterMark.store(lowWaterB);
+    b.ringLowWaterMark.store(lowWaterA);
+    auto startA = a.producerStartNanoseconds.load();
+    auto startB = b.producerStartNanoseconds.load();
+    a.producerStartNanoseconds.store(startB);
+    b.producerStartNanoseconds.store(startA);
 
     bool audioAvailableA = a.audioAvailable.load();
     bool audioAvailableB = b.audioAvailable.load();

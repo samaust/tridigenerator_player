@@ -118,8 +118,9 @@ bool ParseVipeDataset(const std::string& jsonText, VipeDataset& dataset, std::st
     }
     VipeDataset parsed;
     if (!root["schema_version"].isInt() ||
-        (root["schema_version"].asInt() != 1 && root["schema_version"].asInt() != 2)) {
-        error = "Only ViPE manifest schema_version 1 and 2 are supported";
+        (root["schema_version"].asInt() < 1 ||
+         root["schema_version"].asInt() > 3)) {
+        error = "Only ViPE manifest schema_version 1, 2, and 3 are supported";
         return false;
     }
     parsed.schemaVersion = root["schema_version"].asInt();
@@ -162,12 +163,23 @@ bool ParseVipeDataset(const std::string& jsonText, VipeDataset& dataset, std::st
         return stream.isObject() && stream["index"].asInt() == index &&
             stream["codec"].asString() == codec && stream["pixel_format"].asString() == format;
     };
+    const Json::Value& depthStream = streams["depth"];
+    const bool legacyDepth =
+        streamMatches("depth", 2, "png", "gray16be");
+    const bool ffv1Depth =
+        parsed.schemaVersion >= 3 &&
+        streamMatches("depth", 2, "ffv1", "gray16le");
     if (!streams.isObject() || !streamMatches("color", 0, "av1", "yuv420p") ||
         !streamMatches("mask", 1, "ffv1", "gray") ||
-        !streamMatches("depth", 2, "png", "gray16be")) {
-        error = "Manifest stream contract must be AV1 color, FFV1 gray mask, and PNG gray16be depth";
+        (!legacyDepth && !ffv1Depth)) {
+        error =
+            "Manifest stream contract must use AV1 color, FFV1 gray mask, "
+            "and PNG gray16be depth (schemas 1-3) or FFV1 gray16le depth "
+            "(schema 3)";
         return false;
     }
+    parsed.depthCodec = depthStream["codec"].asString();
+    parsed.depthPixelFormat = depthStream["pixel_format"].asString();
     const Json::Value& audio = streams["audio"];
     if (!audio.isNull()) {
         if (!audio.isObject() || !audio["index"].isInt() ||
@@ -276,13 +288,13 @@ bool ParseVipeDataset(const std::string& jsonText, VipeDataset& dataset, std::st
             }
         }
     }
-    if (parsed.schemaVersion == 2) {
+    if (parsed.schemaVersion >= 2) {
         const Json::Value& references = root["color_reference"];
         if (!references.isObject() || references["color_space"].asString() != "linear_srgb" ||
             references["aggregation"].asString() != "sequence" ||
             !ReadColorReference(references["global"], parsed.colorReferences.global) ||
             !references["masks"].isObject()) {
-            error = "Schema version 2 requires valid sequence-aggregated linear_srgb color_reference metadata";
+            error = "Schema versions 2 and 3 require valid sequence-aggregated linear_srgb color_reference metadata";
             return false;
         }
         parsed.colorReferences.colorSpace = "linear_srgb";
