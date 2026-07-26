@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <string>
+#include <cstdint>
 
 #include "OVR_Math.h"
 
@@ -20,6 +21,11 @@ struct UnlitGeometryRenderState {
 
     // Which surface set is currently being used for rendering
     int currentSurfaceSet_ = 0;
+
+    int meshDetailDivisor_ = 2;
+    uint32_t meshWidth_ = 2;
+    uint32_t meshHeight_ = 2;
+    std::vector<uint16_t> resizedDepthData_;
 
     // Shader programs (limited-range and full-range YUV)
     OVRFW::GlProgram ProgramLimited_;

@@ -32,6 +32,13 @@ public:
             VideoFrame** framePtr,
             UnlitGeometryRenderComponent &ugrC,
             UnlitGeometryRenderState &ugrS);
+    bool PrepareDepthTextureData(
+            const VideoFrame& frame,
+            UnlitGeometryRenderState& ugrS);
+    bool RecreateDepthTextures(
+            const VideoFrame& frame,
+            UnlitGeometryRenderComponent& ugrC,
+            UnlitGeometryRenderState& ugrS);
     OVRFW::GlTexture CreateGlTexture(GLenum internalformat, uint32_t pixelWidth, uint32_t pixelHeight);
     void UpdateFrameGeometry(
             const FrameLoaderComponent& flC,
