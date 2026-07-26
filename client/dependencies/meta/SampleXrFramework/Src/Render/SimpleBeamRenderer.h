@@ -45,10 +45,11 @@ class SimpleBeamRenderer {
         OVRFW::ovrFileSys* fileSys,
         const char* particleTexture,
         OVR::Vector4f particleColor,
-        float scale = 1.0f) {
+        float scale = 1.0f,
+        bool depthTest = false) {
         PointerParticleColor = particleColor;
         Scale = scale;
-        beamRenderer_.Init(256, true);
+        beamRenderer_.Init(256, depthTest);
 
         if (particleTexture != nullptr) {
             spriteAtlas_ = new OVRFW::ovrTextureAtlas();
@@ -79,12 +80,14 @@ class SimpleBeamRenderer {
 
         // Add UI pointers to render
         for (const auto& device : hitTestDevices) {
-            constexpr float beamLength = 0.5f; // 0.5 meter beam length
+            constexpr float defaultBeamLength = 2.0f;
             const OVR::Vector3f beamDir =
-                ((device.pointerEnd - device.pointerStart) * 0.5f).Normalized();
-            const OVR::Vector3f beamEnd = device.pointerStart + beamDir * beamLength;
+                (device.pointerEnd - device.pointerStart).Normalized();
+            const OVR::Vector3f beamEnd = device.hitObject
+                ? device.pointerEnd
+                : device.pointerStart + beamDir * defaultBeamLength;
             const auto& beam =
-                beamRenderer_.AddBeam(in, 0.015f, device.pointerStart, beamEnd, BeamColor);
+                beamRenderer_.AddBeam(in, 0.006f, device.pointerStart, beamEnd, BeamColor);
             beams_.push_back(beam);
 
             if (device.hitObject) {

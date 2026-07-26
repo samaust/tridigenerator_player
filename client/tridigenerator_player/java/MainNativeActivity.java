@@ -19,17 +19,64 @@
 package io.github.samaust.tridigenerator_player;
 
 import android.os.Bundle;
+import android.os.Build;
 import android.util.Log;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import java.util.ArrayList;
+import java.util.List;
 
 public class MainNativeActivity extends android.app.NativeActivity {
     private static final String COLOR_SETTINGS_PREFERENCES = "color_matching_settings";
+    private static final String SCENE_PERMISSION = "com.oculus.permission.USE_SCENE";
+    private static final String CAMERA_PERMISSION = "horizonos.permission.HEADSET_CAMERA";
+    private static final String ANDROID_CAMERA_PERMISSION = "android.permission.CAMERA";
+    private static final int PERMISSION_REQUEST_CODE = 2;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         Log.d(MainActivity.TAG, "MainNativeActivity.onCreate() called");
         super.onCreate(savedInstanceState);
+        requestMissingPermissions();
+    }
+
+    private void requestMissingPermissions() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return;
+        }
+        List<String> missing = new ArrayList<>();
+        if (checkSelfPermission(SCENE_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
+            missing.add(SCENE_PERMISSION);
+        }
+        boolean hasHeadsetCamera =
+            checkSelfPermission(CAMERA_PERMISSION) == PackageManager.PERMISSION_GRANTED;
+        boolean hasAndroidCamera =
+            checkSelfPermission(ANDROID_CAMERA_PERMISSION) == PackageManager.PERMISSION_GRANTED;
+        if (!hasHeadsetCamera && !hasAndroidCamera) {
+            missing.add(CAMERA_PERMISSION);
+            missing.add(ANDROID_CAMERA_PERMISSION);
+        }
+        if (!missing.isEmpty()) {
+            Log.d(MainActivity.TAG, "Requesting XR scene and headset camera permissions");
+            requestPermissions(missing.toArray(new String[0]), PERMISSION_REQUEST_CODE);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != PERMISSION_REQUEST_CODE) {
+            return;
+        }
+        for (int i = 0; i < permissions.length; ++i) {
+            boolean granted =
+                i < grantResults.length && grantResults[i] == PackageManager.PERMISSION_GRANTED;
+            Log.d(
+                MainActivity.TAG,
+                permissions[i] + (granted ? " granted" : " denied"));
+        }
     }
 
     // Called from native code to safely quit app.

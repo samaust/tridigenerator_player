@@ -59,6 +59,8 @@ class TinyUI {
         bool updateColors = true,
         // 0 means use default size (8KB at the time of writing this comment)
         int fontVertexBufferSize = 0);
+    void SetPose(const OVR::Posef& pose);
+    void Clear();
     void Shutdown();
     void Update(const OVRFW::ovrApplFrameIn& in);
     void Render(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out);
@@ -137,6 +139,7 @@ class TinyUI {
     std::unordered_map<VRMenuObject*, std::function<void(void)>> ButtonHandlers;
     std::vector<OVRFW::TinyUI::HitTestDevice> Devices;
     std::vector<OVRFW::TinyUI::HitTestDevice> PreviousFrameDevices;
+    OVR::Posef Pose = OVR::Posef::Identity();
     bool UpdateColors;
     std::function<void(void)> UnhandledClickHandler;
 };

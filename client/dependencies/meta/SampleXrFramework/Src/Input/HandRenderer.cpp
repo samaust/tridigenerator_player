@@ -220,7 +220,13 @@ bool HandRenderer::Init(const XrHandTrackingMeshFB* mesh, bool leftHand) {
         &mesh->vertexBlendWeights[0],
         mesh->vertexCountOutput * sizeof(XrVector4f));
     indices.resize(mesh->indexCountOutput);
-    memcpy(indices.data(), mesh->indices, mesh->indexCountOutput * sizeof(int16_t));
+    // XrHandTrackingMeshFB supplies signed 16-bit indices, while this framework
+    // uses 32-bit TriangleIndex values. A byte copy leaves every destination
+    // index half-initialized and produces malformed hand geometry and depth.
+    for (std::uint32_t i = 0; i < mesh->indexCountOutput; ++i) {
+        indices[i] = static_cast<TriangleIndex>(
+                static_cast<std::uint16_t>(mesh->indices[i]));
+    }
 
     /// Model/Render buffers
     TransformMatrices.resize(MAX_JOINTS, OVR::Matrix4f::Identity());

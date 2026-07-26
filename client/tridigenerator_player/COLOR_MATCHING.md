@@ -96,7 +96,7 @@ configuration:
 | `matchingStrength` | `1.0` | Multiplies the final fade amount in the render shader. |
 | `updateRateHz` | `10.0` | Maximum spatial compute dispatch rate. Global estimation is not rate-limited by this value. |
 | `temporalSmoothing` | `0.85` | Fraction of the previous estimate retained during smoothing. |
-| `minExposure` / `maxExposure` | `0.35` / `2.0` | Bounds for the exposure multiplier. |
+| `minExposure` / `maxExposure` | `0.05` / `2.0` | Bounds for the exposure multiplier. |
 | `minTint` / `maxTint` | `0.7` / `1.4` | Per-channel tint bounds. |
 | `maximumFrameAgeSeconds` | `0.25` | Maximum accepted camera-frame age. |
 | `estimateHoldSeconds` | `1.0` | Time without a successful estimate before the tier becomes Unavailable. |
@@ -286,6 +286,9 @@ fragment shader. Successful dispatch changes the tier to Spatial.
 | 2 | Inverse grid extent XYZ and `tierBlend` |
 | 3 | `matchingStrength` and unused values |
 
+`OVR::Matrix4f` authors these values as rows, while GLSL matrix subscripting returns columns. The
+fragment shader therefore explicitly reconstructs all four rows before using the packed values.
+
 When available, the light-field texture is bound through `TEX_LIGHT_FIELD`. A nearest-filtered
 `256 x 1` `GL_RGBA16F` lookup is bound through `TEX_DATASET_REFERENCE`; each texel contains the
 corresponding mask's dataset chromaticity and luminance, or the global fallback. Both are declared
@@ -340,7 +343,7 @@ tier downgrade affects runtime state only and does not rewrite the saved request
 | Temporal smoothing | `0.0–0.95` | `0.05` | `0.85` |
 | Minimum tint | `0.25–1.0` | `0.05` | `0.7` |
 | Maximum tint | `1.0–3.0` | `0.05` | `1.4` |
-| Minimum exposure | `0.1–1.0` | `0.05` | `0.35` |
+| Minimum exposure | `0.02–1.0` | `0.05` | `0.05` |
 | Maximum exposure | `1.0–4.0` | `0.05` | `2.0` |
 
 Disabled is always selectable. Global remains in `Checking` until calibrated camera startup either

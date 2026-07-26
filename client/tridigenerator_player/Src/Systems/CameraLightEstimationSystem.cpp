@@ -217,6 +217,9 @@ struct CameraLightEstimationPlatformState {
     bool startAttempted = false;
     bool cameraCapabilityKnown = false;
     bool cameraAvailable = false;
+    int consecutiveStartFailures = 0;
+    double nextStartAttemptSeconds = 0.0;
+    std::string lastStartError;
 };
 
 #if defined(__ANDROID__)
@@ -256,24 +259,68 @@ void OnImageAvailable(void* context, AImageReader* reader) {
     platform->latestFrame = std::move(frame);
 }
 
-void ConfigureCapture(CameraLightEstimationPlatformState* p) {
-    if (!p->device || !p->window || p->session) return;
-    if (ACameraDevice_createCaptureRequest(p->device, TEMPLATE_PREVIEW, &p->request) != ACAMERA_OK ||
-        ACameraOutputTarget_create(p->window, &p->target) != ACAMERA_OK ||
-        ACaptureRequest_addTarget(p->request, p->target) != ACAMERA_OK ||
-        ACaptureSessionOutputContainer_create(&p->outputs) != ACAMERA_OK ||
-        ACaptureSessionOutput_create(p->window, &p->output) != ACAMERA_OK ||
-        ACaptureSessionOutputContainer_add(p->outputs, p->output) != ACAMERA_OK) {
-        LOGE("Unable to configure headset camera output");
-        return;
+bool ConfigureCapture(CameraLightEstimationPlatformState* p) {
+    if (!p->device || !p->window || p->session) {
+        p->lastStartError = "invalid camera session state";
+        return false;
+    }
+    camera_status_t status =
+        ACameraDevice_createCaptureRequest(p->device, TEMPLATE_PREVIEW, &p->request);
+    if (status != ACAMERA_OK) {
+        p->lastStartError =
+            "create capture request failed (" + std::to_string(status) + ")";
+        return false;
+    }
+    status = ACameraOutputTarget_create(p->window, &p->target);
+    if (status != ACAMERA_OK) {
+        p->lastStartError =
+            "create camera target failed (" + std::to_string(status) + ")";
+        return false;
+    }
+    status = ACaptureRequest_addTarget(p->request, p->target);
+    if (status != ACAMERA_OK) {
+        p->lastStartError =
+            "add camera target failed (" + std::to_string(status) + ")";
+        return false;
+    }
+    status = ACaptureSessionOutputContainer_create(&p->outputs);
+    if (status != ACAMERA_OK) {
+        p->lastStartError =
+            "create output container failed (" + std::to_string(status) + ")";
+        return false;
+    }
+    status = ACaptureSessionOutput_create(p->window, &p->output);
+    if (status != ACAMERA_OK) {
+        p->lastStartError =
+            "create session output failed (" + std::to_string(status) + ")";
+        return false;
+    }
+    status = ACaptureSessionOutputContainer_add(p->outputs, p->output);
+    if (status != ACAMERA_OK) {
+        p->lastStartError =
+            "add session output failed (" + std::to_string(status) + ")";
+        return false;
     }
     ACameraCaptureSession_stateCallbacks callbacks{};
     callbacks.context = p;
-    if (ACameraDevice_createCaptureSession(p->device, p->outputs, &callbacks, &p->session) == ACAMERA_OK &&
-        ACameraCaptureSession_setRepeatingRequest(p->session, nullptr, 1, &p->request, nullptr) == ACAMERA_OK) {
-        p->captureRunning = true;
-        LOGI("Headset camera capture started");
+    status =
+        ACameraDevice_createCaptureSession(p->device, p->outputs, &callbacks, &p->session);
+    if (status != ACAMERA_OK) {
+        p->lastStartError =
+            "create capture session failed (" + std::to_string(status) + ")";
+        return false;
     }
+    status = ACameraCaptureSession_setRepeatingRequest(
+        p->session, nullptr, 1, &p->request, nullptr);
+    if (status != ACAMERA_OK) {
+        p->lastStartError =
+            "start repeating capture failed (" + std::to_string(status) + ")";
+        return false;
+    }
+    p->captureRunning = true;
+    p->lastStartError.clear();
+    LOGI("Headset camera capture started");
+    return true;
 }
 
 void OnCameraDisconnected(void* context, ACameraDevice*) {
@@ -298,24 +345,63 @@ bool ReadFloatArray(const ACameraMetadata* metadata, uint32_t tag, float* output
 }
 
 void StopCamera(CameraLightEstimationPlatformState& p) {
+    LOGI("Stopping headset camera capture");
     p.captureRunning = false;
-    if (p.session) { ACameraCaptureSession_stopRepeating(p.session); ACameraCaptureSession_close(p.session); p.session = nullptr; }
+
+    // Prevent new image work from racing teardown. Closing the camera device is
+    // synchronous and already stops its repeating request, so do that before
+    // releasing any session outputs or their AImageReader surface.
+    if (p.reader) {
+        AImageReader_ImageListener listener{nullptr, nullptr};
+        AImageReader_setImageListener(p.reader, &listener);
+    }
+    if (p.device) {
+        ACameraDevice_close(p.device);
+        p.device = nullptr;
+    }
+    if (p.session) {
+        ACameraCaptureSession_close(p.session);
+        p.session = nullptr;
+    }
     if (p.request && p.target) ACaptureRequest_removeTarget(p.request, p.target);
     if (p.output && p.outputs) ACaptureSessionOutputContainer_remove(p.outputs, p.output);
     if (p.output) { ACaptureSessionOutput_free(p.output); p.output = nullptr; }
     if (p.outputs) { ACaptureSessionOutputContainer_free(p.outputs); p.outputs = nullptr; }
     if (p.target) { ACameraOutputTarget_free(p.target); p.target = nullptr; }
     if (p.request) { ACaptureRequest_free(p.request); p.request = nullptr; }
-    if (p.device) { ACameraDevice_close(p.device); p.device = nullptr; }
     if (p.reader) { AImageReader_delete(p.reader); p.reader = nullptr; p.window = nullptr; }
     if (p.manager) { ACameraManager_delete(p.manager); p.manager = nullptr; }
+    {
+        std::lock_guard<std::mutex> lock(p.mutex);
+        p.consumedSequence = p.latestFrame.sequence;
+    }
+    LOGI("Headset camera capture stopped");
 }
 
 bool StartCamera(CameraLightEstimationPlatformState& p) {
+    p.lastStartError.clear();
+    p.cameraId.clear();
+    p.calibrationValid = false;
+    std::fill_n(p.intrinsics, 5, 0.0f);
+    std::fill_n(p.distortion, 5, 0.0f);
+    std::fill_n(p.lensRotation, 4, 0.0f);
+    p.lensRotation[3] = 1.0f;
+    std::fill_n(p.lensTranslation, 3, 0.0f);
+    std::fill_n(p.activeArray, 4, 0);
     p.manager = ACameraManager_create();
-    if (!p.manager) return false;
+    if (!p.manager) {
+        p.lastStartError = "could not create camera manager";
+        return false;
+    }
     ACameraIdList* ids = nullptr;
-    if (ACameraManager_getCameraIdList(p.manager, &ids) != ACAMERA_OK || !ids) return false;
+    const camera_status_t listStatus =
+        ACameraManager_getCameraIdList(p.manager, &ids);
+    if (listStatus != ACAMERA_OK || !ids) {
+        p.lastStartError =
+            "camera list failed (" + std::to_string(listStatus) + ")";
+        return false;
+    }
+    const int cameraCount = ids->numCameras;
     int selectedWidth = 0, selectedHeight = 0;
     for (int i = 0; i < ids->numCameras; ++i) {
         ACameraMetadata* metadata = nullptr;
@@ -356,31 +442,64 @@ bool StartCamera(CameraLightEstimationPlatformState& p) {
         if (!p.cameraId.empty()) break;
     }
     ACameraManager_deleteCameraIdList(ids);
-    if (p.cameraId.empty() || !p.calibrationValid || selectedWidth == 0) {
-        LOGW("No calibrated left passthrough RGB camera was found");
+    if (p.cameraId.empty() || selectedWidth == 0) {
+        p.lastStartError = p.cameraId.empty()
+            ? "no passthrough RGB camera found (" +
+                std::to_string(cameraCount) + " cameras)"
+            : "passthrough camera has no supported YUV stream";
+        LOGW("%s", p.lastStartError.c_str());
         return false;
     }
-    const float activeWidth = static_cast<float>(p.activeArray[2] - p.activeArray[0]);
-    const float activeHeight = static_cast<float>(p.activeArray[3] - p.activeArray[1]);
-    const float outputAspect = static_cast<float>(selectedWidth) / static_cast<float>(selectedHeight);
-    float cropWidth = activeWidth, cropHeight = activeHeight;
-    if (activeWidth / activeHeight > outputAspect) cropWidth = activeHeight * outputAspect;
-    else cropHeight = activeWidth / outputAspect;
-    const float cropLeft = p.activeArray[0] + (activeWidth - cropWidth) * 0.5f;
-    const float cropTop = p.activeArray[1] + (activeHeight - cropHeight) * 0.5f;
-    p.intrinsics[0] *= selectedWidth / cropWidth;
-    p.intrinsics[1] *= selectedHeight / cropHeight;
-    p.intrinsics[2] = (p.intrinsics[2] - cropLeft) * selectedWidth / cropWidth;
-    p.intrinsics[3] = (p.intrinsics[3] - cropTop) * selectedHeight / cropHeight;
-    if (AImageReader_new(selectedWidth, selectedHeight, AIMAGE_FORMAT_YUV_420_888, 2, &p.reader) != AMEDIA_OK ||
-        AImageReader_getWindow(p.reader, &p.window) != AMEDIA_OK) return false;
+    if (p.calibrationValid) {
+        const float activeWidth = static_cast<float>(p.activeArray[2] - p.activeArray[0]);
+        const float activeHeight = static_cast<float>(p.activeArray[3] - p.activeArray[1]);
+        const float outputAspect =
+            static_cast<float>(selectedWidth) / static_cast<float>(selectedHeight);
+        float cropWidth = activeWidth, cropHeight = activeHeight;
+        if (activeWidth / activeHeight > outputAspect) {
+            cropWidth = activeHeight * outputAspect;
+        } else {
+            cropHeight = activeWidth / outputAspect;
+        }
+        const float cropLeft = p.activeArray[0] + (activeWidth - cropWidth) * 0.5f;
+        const float cropTop = p.activeArray[1] + (activeHeight - cropHeight) * 0.5f;
+        p.intrinsics[0] *= selectedWidth / cropWidth;
+        p.intrinsics[1] *= selectedHeight / cropHeight;
+        p.intrinsics[2] = (p.intrinsics[2] - cropLeft) * selectedWidth / cropWidth;
+        p.intrinsics[3] = (p.intrinsics[3] - cropTop) * selectedHeight / cropHeight;
+    } else {
+        // Global matching only needs image samples. Keep it available even when
+        // the pose/intrinsics metadata required for spatial reprojection is absent.
+        LOGW("Passthrough camera has no usable spatial calibration; global matching only");
+    }
+    media_status_t mediaStatus = AImageReader_new(
+        selectedWidth, selectedHeight, AIMAGE_FORMAT_YUV_420_888, 2, &p.reader);
+    if (mediaStatus != AMEDIA_OK) {
+        p.lastStartError =
+            "create image reader failed (" + std::to_string(mediaStatus) + ")";
+        return false;
+    }
+    mediaStatus = AImageReader_getWindow(p.reader, &p.window);
+    if (mediaStatus != AMEDIA_OK) {
+        p.lastStartError =
+            "get image-reader window failed (" + std::to_string(mediaStatus) + ")";
+        return false;
+    }
     AImageReader_ImageListener listener{&p, OnImageAvailable};
     AImageReader_setImageListener(p.reader, &listener);
     ACameraDevice_StateCallbacks callbacks{&p, OnCameraDisconnected, OnCameraError};
     const camera_status_t status = ACameraManager_openCamera(p.manager, p.cameraId.c_str(), &callbacks, &p.device);
-    if (status == ACAMERA_OK) ConfigureCapture(&p);
+    if (status != ACAMERA_OK) {
+        p.lastStartError =
+            "open passthrough camera failed (" + std::to_string(status) + ")";
+    } else {
+        ConfigureCapture(&p);
+    }
     LOGI("Selected left passthrough camera %s (%dx%d)", p.cameraId.c_str(), selectedWidth, selectedHeight);
-    return status == ACAMERA_OK && p.captureRunning;
+    if (!p.captureRunning) {
+        LOGE("Headset camera start failed: %s", p.lastStartError.c_str());
+    }
+    return p.captureRunning;
 }
 } // namespace
 #endif
@@ -421,32 +540,52 @@ void CameraLightEstimationSystem::Update(
             const bool datasetReferenceAvailable = loader && loader->dataset.HasColorReference();
             if (!datasetReferenceAvailable) {
                 state.globalAvailability = TierAvailability::Unavailable;
+                state.availabilityMessage = "Global: dataset has no color reference";
             } else if (state.platform && state.platform->cameraCapabilityKnown) {
                 state.globalAvailability = state.platform->cameraAvailable
                     ? TierAvailability::Available : TierAvailability::Unavailable;
+                state.availabilityMessage = state.platform->cameraAvailable
+                    ? std::string()
+                    : "Global: " + (
+                        state.platform->lastStartError.empty()
+                            ? std::string("camera unavailable")
+                            : state.platform->lastStartError);
             } else {
                 state.globalAvailability = TierAvailability::Checking;
+                state.availabilityMessage = "Global: checking headset camera...";
             }
 #else
             state.globalAvailability = TierAvailability::Unavailable;
+            state.availabilityMessage = "Global: headset camera unavailable";
+#endif
+            const bool cameraSpatialCalibrationAvailable =
+#if defined(__ANDROID__)
+                state.platform && state.platform->cameraCapabilityKnown &&
+                state.platform->cameraAvailable && state.platform->calibrationValid;
+#else
+                false;
 #endif
             if (!spatialPrerequisitesSupported ||
                 state.globalAvailability == TierAvailability::Unavailable) {
                 state.spatialAvailability = TierAvailability::Unavailable;
             } else if (state.globalAvailability == TierAvailability::Checking) {
                 state.spatialAvailability = TierAvailability::Checking;
+            } else if (!cameraSpatialCalibrationAvailable) {
+                state.spatialAvailability = TierAvailability::Unavailable;
             } else {
                 state.spatialAvailability = TierAvailability::Available;
             }
-
-            const ColorMatchingTier requestedBeforeDowngrade = component.requestedTier;
-            component.requestedTier = DowngradeUnavailableTier(
-                component.requestedTier, state.globalAvailability, state.spatialAvailability);
-            if (component.requestedTier != requestedBeforeDowngrade) {
-                LOGW("Color matching tier auto-downgraded from %s to %s",
-                    ColorMatchingTierName(requestedBeforeDowngrade),
-                    ColorMatchingTierName(component.requestedTier));
+            if (state.globalAvailability == TierAvailability::Available &&
+                state.spatialAvailability == TierAvailability::Unavailable) {
+                if (!spatialPrerequisitesSupported) {
+                    state.availabilityMessage =
+                        "Spatial: environment depth/alignment unavailable";
+                } else if (!cameraSpatialCalibrationAvailable) {
+                    state.availabilityMessage =
+                        "Spatial: camera calibration unavailable";
+                }
             }
+
             if (component.requestedTier != state.loggedRequestedTier) {
                 LOGI("Color matching requested tier: %s",
                     ColorMatchingTierName(component.requestedTier));
@@ -463,19 +602,38 @@ void CameraLightEstimationSystem::Update(
             }
 #if defined(__ANDROID__)
             if (state.platform) {
-                if ((!focused || !ShouldCaptureForColorMatching(component.requestedTier)) &&
-                    state.platform->manager) {
-                    StopCamera(*state.platform);
+                if (!focused || !ShouldCaptureForColorMatching(component.requestedTier)) {
+                    if (state.platform->manager) {
+                        StopCamera(*state.platform);
+                    }
+                    // Permission dialogs temporarily remove XR focus. Always permit
+                    // a fresh camera attempt after focus returns.
                     state.platform->startAttempted = false;
+                    state.platform->nextStartAttemptSeconds = 0.0;
                 } else if (focused && ShouldCaptureForColorMatching(component.requestedTier) &&
-                    !state.platform->manager && !state.platform->startAttempted) {
+                    !state.platform->manager && !state.platform->startAttempted &&
+                    now >= state.platform->nextStartAttemptSeconds) {
                     state.platform->startAttempted = true;
                     const bool started = StartCamera(*state.platform);
-                    state.platform->cameraCapabilityKnown = true;
                     state.platform->cameraAvailable = started;
+                    state.platform->consecutiveStartFailures =
+                        started ? 0 : state.platform->consecutiveStartFailures + 1;
+                    state.platform->cameraCapabilityKnown =
+                        started || state.platform->consecutiveStartFailures >= 3;
                     state.globalAvailability = started
-                        ? TierAvailability::Available : TierAvailability::Unavailable;
-                    if (!started) StopCamera(*state.platform);
+                        ? TierAvailability::Available :
+                        state.platform->cameraCapabilityKnown
+                            ? TierAvailability::Unavailable
+                            : TierAvailability::Checking;
+                    if (!started) {
+                        StopCamera(*state.platform);
+                        state.platform->startAttempted = false;
+                        state.platform->nextStartAttemptSeconds =
+                            now + (state.platform->cameraCapabilityKnown ? 5.0 : 1.0);
+                        LOGW(
+                            "Headset camera start failed (attempt %d); retrying",
+                            state.platform->consecutiveStartFailures);
+                    }
                 }
             }
 #endif
@@ -536,7 +694,8 @@ void CameraLightEstimationSystem::Update(
 
             if (!AllowsSpatialColorMatching(component.requestedTier)) return;
 
-            if (!coreComponent || !coreState || !coreComponent->supportsTimeConversion ||
+            if (!state.platform->calibrationValid ||
+                !coreComponent || !coreState || !coreComponent->supportsTimeConversion ||
                 !coreState->XrConvertTimespecTimeToTimeKHR || coreState->viewSpace == XR_NULL_HANDLE ||
                 !depth || !depth->HasDepth || !transform || now-state.lastDispatchSeconds < 1.0/component.updateRateHz) return;
             timespec ts{frame.timestampNs / 1000000000LL, frame.timestampNs % 1000000000LL};

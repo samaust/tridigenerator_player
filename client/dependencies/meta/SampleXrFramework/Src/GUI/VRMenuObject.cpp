@@ -378,7 +378,13 @@ void VRMenuObject::BuildDrawSurface(
         surfaceList.resize(surfaceList.size() + 1);
     } else {
         // add one draw surface
-        n = (flags & VRMenuRenderFlags_t(VRMENU_RENDER_SUBMIT_TEXT_SURFACE)) != 0 ? 2 : 1;
+        // Empty labels intentionally have no TextSurface. They may still carry
+        // VRMENU_RENDER_SUBMIT_TEXT_SURFACE because TinyUI uses the same panel
+        // definition for labels, buttons, and decorative backgrounds.
+        const bool submitText =
+            (flags & VRMenuRenderFlags_t(VRMENU_RENDER_SUBMIT_TEXT_SURFACE)) != 0 &&
+            TextSurface != nullptr;
+        n = submitText ? 2 : 1;
         surfaceList.resize(surfaceList.size() + n);
 
         Surfaces[surfaceIndex].BuildDrawSurface(
@@ -752,52 +758,7 @@ void VRMenuSurface::CreateFromSurfaceParms(OvrGuiSys& guiSys, VRMenuSurfaceParms
         /// OVR_PERF_ACCUMULATE( CreateImageGeometry );
     }
 
-    {
-        /// OVR_PERF_TIMER( SelectProgramType );
-        // now, based on the combination of surfaces, determine the render prog to use
-        if (HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE, 1) &&
-            HasTexturesOfType(SURFACE_TEXTURE_COLOR_RAMP, 1) &&
-            HasTexturesOfType(SURFACE_TEXTURE_COLOR_RAMP_TARGET, 1)) {
-            ProgramType = PROGRAM_DIFFUSE_COLOR_RAMP_TARGET;
-        } else if (
-            HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE, 1) &&
-            HasTexturesOfType(SURFACE_TEXTURE_MAX, 2)) {
-            ProgramType = PROGRAM_DIFFUSE_ONLY;
-        } else if (
-            HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE_ALPHA_DISCARD, 1) &&
-            HasTexturesOfType(SURFACE_TEXTURE_MAX, 2)) {
-            ProgramType = PROGRAM_DIFFUSE_ALPHA_DISCARD;
-        } else if (
-            HasTexturesOfType(SURFACE_TEXTURE_ADDITIVE, 1) &&
-            HasTexturesOfType(SURFACE_TEXTURE_MAX, 2)) {
-            ProgramType = PROGRAM_ADDITIVE_ONLY;
-        } else if (
-            HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE, 2) &&
-            HasTexturesOfType(SURFACE_TEXTURE_MAX, 1)) {
-            ProgramType = PROGRAM_DIFFUSE_COMPOSITE;
-        } else if (
-            HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE, 1) &&
-            HasTexturesOfType(SURFACE_TEXTURE_COLOR_RAMP, 1) &&
-            HasTexturesOfType(SURFACE_TEXTURE_MAX, 1)) {
-            ProgramType = PROGRAM_DIFFUSE_COLOR_RAMP;
-        } else if (
-            HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE, 1) &&
-            HasTexturesOfType(SURFACE_TEXTURE_ADDITIVE, 1) &&
-            HasTexturesOfType(SURFACE_TEXTURE_MAX, 1)) {
-            ProgramType = PROGRAM_DIFFUSE_PLUS_ADDITIVE;
-        } else if (
-            HasTexturesOfType(SURFACE_TEXTURE_ALPHA_MASK, 1) &&
-            HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE, 1) &&
-            HasTexturesOfType(SURFACE_TEXTURE_MAX, 1)) {
-            ProgramType = PROGRAM_ALPHA_DIFFUSE;
-        } else {
-            ALOGW("Invalid material combination -- either add a shader to support it or fix it.");
-            ProgramType = PROGRAM_MAX;
-        }
-        /// OVR_PERF_ACCUMULATE( SelectProgramType );
-    }
-
-    SetTextureSampling(ProgramType);
+    SelectProgramType();
 
     /// OVR_PERF_ACCUMULATE( CreateFromSurfaceParms );
 }
@@ -805,7 +766,57 @@ void VRMenuSurface::CreateFromSurfaceParms(OvrGuiSys& guiSys, VRMenuSurfaceParms
 //==============================
 // VRMenuSurface::RegenerateSurfaceGeometry
 void VRMenuSurface::RegenerateSurfaceGeometry() {
+    // Border changes alter the number of vertices and indices. GlGeometry::Update
+    // only replaces vertex data, so retaining the old index buffer can reference
+    // vertices that no longer exist (for example, nine-slice panel -> plain quad).
+    SurfaceDef.geo.Free();
     CreateImageGeometry(TextureDims.x, TextureDims.y, Dims, Border, CropUV, Contents);
+}
+
+//==============================
+// VRMenuSurface::SelectProgramType
+void VRMenuSurface::SelectProgramType() {
+    if (HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE, 1) &&
+        HasTexturesOfType(SURFACE_TEXTURE_COLOR_RAMP, 1) &&
+        HasTexturesOfType(SURFACE_TEXTURE_COLOR_RAMP_TARGET, 1)) {
+        ProgramType = PROGRAM_DIFFUSE_COLOR_RAMP_TARGET;
+    } else if (
+        HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE, 1) &&
+        HasTexturesOfType(SURFACE_TEXTURE_MAX, 2)) {
+        ProgramType = PROGRAM_DIFFUSE_ONLY;
+    } else if (
+        HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE_ALPHA_DISCARD, 1) &&
+        HasTexturesOfType(SURFACE_TEXTURE_MAX, 2)) {
+        ProgramType = PROGRAM_DIFFUSE_ALPHA_DISCARD;
+    } else if (
+        HasTexturesOfType(SURFACE_TEXTURE_ADDITIVE, 1) &&
+        HasTexturesOfType(SURFACE_TEXTURE_MAX, 2)) {
+        ProgramType = PROGRAM_ADDITIVE_ONLY;
+    } else if (
+        HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE, 2) &&
+        HasTexturesOfType(SURFACE_TEXTURE_MAX, 1)) {
+        ProgramType = PROGRAM_DIFFUSE_COMPOSITE;
+    } else if (
+        HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE, 1) &&
+        HasTexturesOfType(SURFACE_TEXTURE_COLOR_RAMP, 1) &&
+        HasTexturesOfType(SURFACE_TEXTURE_MAX, 1)) {
+        ProgramType = PROGRAM_DIFFUSE_COLOR_RAMP;
+    } else if (
+        HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE, 1) &&
+        HasTexturesOfType(SURFACE_TEXTURE_ADDITIVE, 1) &&
+        HasTexturesOfType(SURFACE_TEXTURE_MAX, 1)) {
+        ProgramType = PROGRAM_DIFFUSE_PLUS_ADDITIVE;
+    } else if (
+        HasTexturesOfType(SURFACE_TEXTURE_ALPHA_MASK, 1) &&
+        HasTexturesOfType(SURFACE_TEXTURE_DIFFUSE, 1) &&
+        HasTexturesOfType(SURFACE_TEXTURE_MAX, 1)) {
+        ProgramType = PROGRAM_ALPHA_DIFFUSE;
+    } else {
+        ALOGW("Invalid material combination -- either add a shader to support it or fix it.");
+        ProgramType = PROGRAM_MAX;
+        return;
+    }
+    SetTextureSampling(ProgramType);
 }
 
 //==============================
@@ -878,6 +889,7 @@ void VRMenuSurface::LoadTexture(
         return;
     }
     Textures[textureIndex].LoadTexture(guiSys, type, imageName, true);
+    SelectProgramType();
 }
 
 //==============================
@@ -894,6 +906,7 @@ void VRMenuSurface::LoadTexture(
         return;
     }
     Textures[textureIndex].LoadTexture(type, texId, width, height);
+    SelectProgramType();
 }
 
 //==============================

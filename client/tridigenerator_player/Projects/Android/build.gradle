@@ -69,7 +69,10 @@ android {
     main {
       manifest.srcFile 'AndroidManifest.xml'
       java.srcDirs = ['../../java']
-      assets.srcDirs = ['../../assets']
+      assets.srcDirs = [
+        '../../assets',
+        '../../../dependencies/meta/SampleXrFramework/res/raw'
+      ]
       res.srcDirs = ['../../res']
     }
   }

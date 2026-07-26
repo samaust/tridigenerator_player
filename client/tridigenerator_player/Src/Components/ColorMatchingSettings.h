@@ -10,7 +10,7 @@ struct ColorMatchingSettings {
     float temporalSmoothing = 0.85f;
     float minTint = 0.7f;
     float maxTint = 1.4f;
-    float minExposure = 0.35f;
+    float minExposure = 0.05f;
     float maxExposure = 2.0f;
 };
 
@@ -30,4 +30,3 @@ bool ValidateColorMatchingSettings(const ColorMatchingSettings& settings, std::s
 std::string SerializeColorMatchingSettings(const ColorMatchingSettings& settings);
 bool ParseColorMatchingSettings(
     const std::string& jsonText, ColorMatchingSettings& settings, std::string& error);
-

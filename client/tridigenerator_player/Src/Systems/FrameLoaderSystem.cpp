@@ -103,7 +103,7 @@ bool FrameLoaderSystem::Init(EntityManager& ecs) {
             FrameLoaderComponent& flC,
             FrameLoaderState& flS) {
 #if defined(ANDROID)
-        flC.baseUrl = std::string("http://192.168.111.250:8080");
+        flC.baseUrl = std::string("http://192.168.111.5:8080");
 #else
         flC.dataDirectory = "vipe_encoded";
 #endif

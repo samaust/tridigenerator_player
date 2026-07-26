@@ -1200,8 +1200,13 @@ void XrApp::SyncActionSets(ovrApplFrameIn& in) {
     for (int i = 0; i < 4; i++) {
         if (ActionPoseIsActive(controller[i], subactionPath[i])) {
             LocVel lv = GetSpaceLocVel(controllerSpace[i], ToXrTime(in.PredictedDisplayTime));
+            constexpr XrSpaceLocationFlags requiredTrackingFlags =
+                XR_SPACE_LOCATION_POSITION_VALID_BIT |
+                XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+                XR_SPACE_LOCATION_POSITION_TRACKED_BIT |
+                XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
             ControllerPoseActive[i] =
-                (lv.loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) != 0;
+                (lv.loc.locationFlags & requiredTrackingFlags) == requiredTrackingFlags;
             ControllerPose[i] = lv.loc.pose;
         } else {
             ControllerPoseActive[i] = false;

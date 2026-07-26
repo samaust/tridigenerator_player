@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 
 #include "OVR_Math.h"
 #include "../Components/ColorMatchingControl.h"
@@ -40,6 +41,7 @@ struct CameraLightEstimationState {
     ColorMatchingTier loggedRequestedTier = ColorMatchingTier::Spatial;
     TierAvailability globalAvailability = TierAvailability::Checking;
     TierAvailability spatialAvailability = TierAvailability::Checking;
+    std::string availabilityMessage;
     float tierBlend = 0.0f;
     double lastEstimateSeconds = 0.0;
     double lastDispatchSeconds = 0.0;

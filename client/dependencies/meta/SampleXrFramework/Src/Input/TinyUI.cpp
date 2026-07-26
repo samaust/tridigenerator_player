@@ -79,7 +79,7 @@ itemParms {
   }
   LocalScale = ( 100.0f, 100.0f, 1.0f );
   TextLocalPose {
-  Position = ( 0.0f, 0.0f, 0.0f );
+  Position = ( 0.0f, 0.0f, 0.008f );
   Orientation = ( 0.0f, 0.0f, 0.0f, 1.0f );
   }
   TextLocalScale = ( 1.0f, 1.0f, 1.0f );
@@ -132,7 +132,13 @@ class SimpleTargetMenu : public OVRFW::VRMenu {
         for (const auto* ip : itemParms) {
             // Find the one panel
             if ((int)ip->Id.Get() == 0) {
-                const_cast<OVRFW::VRMenuObjectParms*>(ip)->Text = text;
+                auto* panelParms = const_cast<OVRFW::VRMenuObjectParms*>(ip);
+                panelParms->Text = text;
+                // Give each label its own draw surface. The shared font surface uses
+                // alpha blending that can disappear when rendered over a passthrough
+                // composition layer.
+                panelParms->Flags |=
+                    OVRFW::VRMenuObjectFlags_t(OVRFW::VRMENUOBJECT_INSTANCE_TEXT);
             }
         }
 
@@ -175,8 +181,14 @@ bool TinyUI::Init(
         ALOGE("Couldn't create Locale");
         return false;
     }
-    std::string fontName;
-    GetLocale().GetLocalizedString("@string/font_name", "efigs.fnt", fontName);
+    constexpr const char* bundledFontUri = "apk:///assets/efigs.fnt";
+    std::string fontName = bundledFontUri;
+    std::vector<uint8_t> fontBuffer;
+    if (!FileSys->ReadFile(bundledFontUri, fontBuffer) || fontBuffer.empty()) {
+        ALOGE("Bundled TinyUI font is missing: %s", bundledFontUri);
+        return false;
+    }
+    ALOG("TinyUI font asset found: %s (%zu bytes)", bundledFontUri, fontBuffer.size());
 
     GuiSys = OvrGuiSys::Create(context);
     if (nullptr == GuiSys) {
@@ -192,6 +204,29 @@ bool TinyUI::Init(
     }
 
     return true;
+}
+
+void TinyUI::SetPose(const OVR::Posef& pose) {
+    Pose = pose;
+}
+
+void TinyUI::Clear() {
+    // Keep GuiSys and its font resources alive while replacing a menu. Recreating
+    // GuiSys in the middle of a session can invalidate instanced text surfaces.
+    std::vector<VRMenu*> menus;
+    menus.reserve(Menus.size());
+    for (const auto& entry : Menus) {
+        menus.push_back(entry.second);
+    }
+    for (VRMenu* menu : menus) {
+        GuiSys->DestroyMenu(menu);
+    }
+    AllElements.clear();
+    Menus.clear();
+    ButtonHandlers.clear();
+    Devices.clear();
+    PreviousFrameDevices.clear();
+    UnhandledClickHandler = {};
 }
 
 void TinyUI::Shutdown() {
@@ -307,13 +342,17 @@ OVRFW::VRMenuObject* TinyUI::CreateMenu(
         GuiSys->AddMenu(m);
         GuiSys->OpenMenu(m->GetName());
         Posef pose = m->GetMenuPose();
-        pose.Translation = position;
+        pose.Rotation = Pose.Rotation;
+        pose.Translation = Pose.Transform(position);
         m->SetMenuPose(pose);
         OvrVRMenuMgr& menuMgr = GuiSys->GetVRMenuMgr();
         VRMenuObject* mo = menuMgr.ToObject(m->GetRootHandle());
         if (mo != nullptr) {
             mo = menuMgr.ToObject(mo->GetChildHandleForIndex(0));
-            mo->SetSurfaceDims(0, size);
+            // VRMenu converts texels at 500 texels/meter. Most callers space
+            // rows 10-12 cm apart, so the original 50-70 texel panels overlapped.
+            constexpr float panelHeightScale = 0.55f;
+            mo->SetSurfaceDims(0, {size.x, size.y * panelHeightScale});
             mo->RegenerateSurfaceGeometry(0, false);
             mo->GetSurface(0).SetName(menuName);
             /// remember everything

@@ -1,5 +1,7 @@
 #include "InputSystem.h"
 
+#include <chrono>
+#include <cmath>
 #include <vector>
 
 #include "meta_openxr_preview/openxr_oculus_helpers.h"
@@ -161,6 +163,9 @@ void InputSystem::SessionEnd(EntityManager& ecs) {
             state.handTrackers[handIndex] = XR_NULL_HANDLE;
             state.previousPinch[handIndex] = false;
         }
+        state.previousControllerPoseValid.fill(false);
+        state.lastControllerActivitySeconds.fill(-1.0);
+        state.lastHandTrackingActiveSeconds = -1.0;
         input = {};
         state.sessionInitialized = false;
     });
@@ -266,6 +271,80 @@ void InputSystem::Update(EntityManager& ecs, const OVRFW::ovrApplFrameIn& in) {
 
             if (state.handRendererInitialized[handIndex]) {
                 state.handRenderers[handIndex].Update(hand.joints.data());
+            }
+        }
+
+        // Prefer hand tracking globally while either hand is active, and keep
+        // that preference briefly through camera occlusion. Otherwise a
+        // sleeping controller's last-known pose can flash back as a model and
+        // UI ray while the player is using their hands.
+        using clock = std::chrono::steady_clock;
+        const double nowSeconds =
+                std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+
+        // OpenXR can retain a valid pose for a stationary controller even after
+        // it has been put down. Require recent physical motion or control input
+        // before treating it as held. Picking it up makes it visible again on
+        // the first moving frame.
+        constexpr float minimumPositionDeltaSq = 0.003f * 0.003f;
+        constexpr float minimumRotationDot = 0.99996f; // about one degree
+        constexpr double controllerActivityGraceSeconds = 3.0;
+        for (size_t handIndex = 0; handIndex < kHandCount; ++handIndex) {
+            ControllerInput& controller = input.controllers[handIndex];
+            if (!controller.tracked) {
+                state.previousControllerPoseValid[handIndex] = false;
+                state.lastControllerActivitySeconds[handIndex] = -1.0;
+                continue;
+            }
+
+            bool moved = false;
+            if (state.previousControllerPoseValid[handIndex]) {
+                const OVR::Posef& previous =
+                        state.previousControllerPose[handIndex];
+                const float rotationDot = std::abs(
+                        previous.Rotation.x * controller.gripPose.Rotation.x +
+                        previous.Rotation.y * controller.gripPose.Rotation.y +
+                        previous.Rotation.z * controller.gripPose.Rotation.z +
+                        previous.Rotation.w * controller.gripPose.Rotation.w);
+                moved =
+                        (controller.gripPose.Translation -
+                         previous.Translation).LengthSq() >=
+                                minimumPositionDeltaSq ||
+                        rotationDot <= minimumRotationDot;
+            }
+            const bool controlActive =
+                    controller.indexClick ||
+                    controller.indexTrigger > 0.05f ||
+                    controller.gripTrigger > 0.05f ||
+                    controller.joystick.LengthSq() > 0.01f;
+            if (moved || controlActive) {
+                state.lastControllerActivitySeconds[handIndex] = nowSeconds;
+            }
+            state.previousControllerPose[handIndex] = controller.gripPose;
+            state.previousControllerPoseValid[handIndex] = true;
+            controller.tracked =
+                    state.lastControllerActivitySeconds[handIndex] >= 0.0 &&
+                    nowSeconds - state.lastControllerActivitySeconds[handIndex] <
+                            controllerActivityGraceSeconds;
+        }
+
+        const bool anyHandActive =
+                input.hands[InputComponent::Left].active ||
+                input.hands[InputComponent::Right].active;
+        if (anyHandActive) {
+            state.lastHandTrackingActiveSeconds = nowSeconds;
+        }
+        constexpr double handTrackingGraceSeconds = 2.0;
+        const bool preferHandTracking =
+                state.lastHandTrackingActiveSeconds >= 0.0 &&
+                nowSeconds - state.lastHandTrackingActiveSeconds <
+                        handTrackingGraceSeconds;
+        if (preferHandTracking) {
+            for (ControllerInput& controller : input.controllers) {
+                controller.tracked = false;
+                controller.gripPressed = false;
+                controller.gripPressedThisFrame = false;
+                controller.gripReleasedThisFrame = false;
             }
         }
 

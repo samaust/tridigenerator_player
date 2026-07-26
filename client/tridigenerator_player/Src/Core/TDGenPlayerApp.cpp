@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iterator>
 #include <iostream>
@@ -93,6 +94,97 @@ constexpr float operator"" _m(unsigned long long meters)
 {
     return static_cast<float>(meters);
 }
+
+#if defined(__ANDROID__)
+namespace {
+
+GLuint CreateCircularButtonTexture(const bool showPlayIcon) {
+    constexpr int textureSize = 64;
+    constexpr int samplesPerAxis = 4;
+    constexpr float outerRadius = 30.0f;
+    constexpr float innerRadius = 26.5f;
+    constexpr float fillColor[3] = {0.31f, 0.24f, 0.82f};
+    constexpr float borderColor[3] = {0.86f, 0.92f, 1.0f};
+    constexpr float iconColor[3] = {1.0f, 1.0f, 1.0f};
+    std::vector<uint8_t> pixels(textureSize * textureSize * 4);
+
+    for (int y = 0; y < textureSize; ++y) {
+        for (int x = 0; x < textureSize; ++x) {
+            float accumulatedColor[3] = {};
+            int coveredSamples = 0;
+            for (int sampleY = 0; sampleY < samplesPerAxis; ++sampleY) {
+                for (int sampleX = 0; sampleX < samplesPerAxis; ++sampleX) {
+                    const float dx =
+                        static_cast<float>(x) +
+                        (static_cast<float>(sampleX) + 0.5f) / samplesPerAxis -
+                        textureSize * 0.5f;
+                    const float dy =
+                        static_cast<float>(y) +
+                        (static_cast<float>(sampleY) + 0.5f) / samplesPerAxis -
+                        textureSize * 0.5f;
+                    const float distance = std::sqrt(dx * dx + dy * dy);
+                    if (distance > outerRadius) {
+                        continue;
+                    }
+
+                    const bool isIcon = showPlayIcon
+                        ? (std::abs(dy) <= 10.0f &&
+                           dx >= -6.5f &&
+                           dx <= 10.5f - 1.7f * std::abs(dy))
+                        : (std::abs(dy) <= 9.0f &&
+                           (std::abs(dx - 5.0f) <= 2.25f ||
+                            std::abs(dx + 5.0f) <= 2.25f));
+                    const float* color = isIcon
+                        ? iconColor
+                        : distance >= innerRadius ? borderColor : fillColor;
+                    for (int channel = 0; channel < 3; ++channel) {
+                        accumulatedColor[channel] += color[channel];
+                    }
+                    ++coveredSamples;
+                }
+            }
+
+            const size_t offset = static_cast<size_t>((y * textureSize + x) * 4);
+            if (coveredSamples == 0) {
+                pixels[offset + 0] = 0;
+                pixels[offset + 1] = 0;
+                pixels[offset + 2] = 0;
+                pixels[offset + 3] = 0;
+                continue;
+            }
+            for (int channel = 0; channel < 3; ++channel) {
+                pixels[offset + channel] = static_cast<uint8_t>(
+                    accumulatedColor[channel] * 255.0f / coveredSamples + 0.5f);
+            }
+            pixels[offset + 3] = static_cast<uint8_t>(
+                coveredSamples * 255.0f /
+                (samplesPerAxis * samplesPerAxis) + 0.5f);
+        }
+    }
+
+    GLuint texture = 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGBA8,
+        textureSize,
+        textureSize,
+        0,
+        GL_RGBA,
+        GL_UNSIGNED_BYTE,
+        pixels.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return texture;
+}
+
+} // namespace
+#endif
 
 TDGenPlayerApp::TDGenPlayerApp() {
     BackgroundColor = OVR::Vector4f(0.0f, 0.0f, 0.0f, 0.0f);
@@ -220,6 +312,9 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     environmentDepthSystem_->Init(*entityManager_);
     cameraLightEstimationSystem_->Init(*entityManager_);
     unlitGeometryRenderSystem_->Init(*entityManager_);
+    pointerRenderer_ = std::make_unique<OVRFW::SimpleBeamRenderer>();
+    pointerRenderer_->Init(
+        GetFileSys(), nullptr, OVR::Vector4f(0.35f, 0.75f, 1.0f, 1.0f), 1.0f, true);
 
     auto& initialLoader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
 #if defined(__ANDROID__)
@@ -228,13 +323,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     if (!initialLoader.selectedDatasetId.empty() && initialLoader.errorMessage.empty()) {
         auto& render = entityManager_->GetComponent<UnlitGeometryRenderComponent>(objectEntity_);
         render.maskVisibility_.Reset(initialLoader.dataset.maskLabels);
-        BuildMaskSelector();
-    } else {
-        BuildDatasetPicker();
     }
-#if defined(__ANDROID__)
-    BuildPlaybackControls();
-#endif
 
     return true;
 }
@@ -282,6 +371,20 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     coreSystem_->Update(*entityManager_);
     sceneSystem_->Update(*entityManager_);
     inputSystem_->Update(*entityManager_, in);
+    if (!uiAnchorInitialized_) {
+        uiAnchorPose_ = in.HeadPose;
+        uiAnchorInitialized_ = true;
+        const auto& loader =
+            entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+        if (!loader.selectedDatasetId.empty() && loader.errorMessage.empty()) {
+            BuildMaskSelector();
+        } else {
+            BuildDatasetPicker();
+        }
+#if defined(__ANDROID__)
+        BuildPlaybackControls();
+#endif
+    }
     entityManager_->ForEach<InputComponent>([&](EntityID, InputComponent& input) {
         if (Focused && input.rightAPressedThisFrame) {
             TogglePlayback();
@@ -318,6 +421,7 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     RefreshColorMatchingUi();
     RefreshMeshScaleUi();
 #endif
+    std::vector<OVRFW::TinyUI::HitTestDevice> pointerDevices;
     if ((ui_ || playbackUi_) && uiVisible_) {
         if (ui_) ui_->HitTestDevices().clear();
         if (playbackUi_) playbackUi_->HitTestDevices().clear();
@@ -342,6 +446,31 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
         });
         if (ui_) ui_->Update(in);
         if (playbackUi_) playbackUi_->Update(in);
+        const auto mergePointerDevices =
+            [&pointerDevices](const std::vector<OVRFW::TinyUI::HitTestDevice>& devices) {
+                for (const auto& device : devices) {
+                    auto existing = std::find_if(
+                        pointerDevices.begin(),
+                        pointerDevices.end(),
+                        [&device](const OVRFW::TinyUI::HitTestDevice& candidate) {
+                            return candidate.deviceNum == device.deviceNum;
+                        });
+                    if (existing == pointerDevices.end()) {
+                        pointerDevices.push_back(device);
+                        continue;
+                    }
+                    const float existingDistance =
+                        (existing->pointerEnd - existing->pointerStart).LengthSq();
+                    const float candidateDistance =
+                        (device.pointerEnd - device.pointerStart).LengthSq();
+                    if (device.hitObject &&
+                        (!existing->hitObject || candidateDistance < existingDistance)) {
+                        *existing = device;
+                    }
+                }
+        };
+        if (ui_) mergePointerDevices(ui_->HitTestDevices());
+        if (playbackUi_) mergePointerDevices(playbackUi_->HitTestDevices());
 #if defined(__ANDROID__)
         PreviewColorMatchingDraft();
 #endif
@@ -355,17 +484,14 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
             else BuildDatasetPicker();
         }
     }
+    if (pointerRenderer_) {
+        pointerRenderer_->Update(in, pointerDevices);
+    }
 }
 
 void TDGenPlayerApp::AppRenderFrame(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out)
 {
     OVRFW::XrApp::AppRenderFrame(in, out);
-    if (ui_ && uiVisible_) {
-        ui_->Render(in, out);
-    }
-    if (playbackUi_ && uiVisible_) {
-        playbackUi_->Render(in, out);
-    }
 }
 
 void TDGenPlayerApp::AppRenderEye(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out, int eye)
@@ -378,12 +504,30 @@ void TDGenPlayerApp::Render(const OVRFW::ovrApplFrameIn &in, OVRFW::ovrRendererO
 {
     unlitGeometryRenderSystem_->Render(*entityManager_, out.Surfaces);
     inputSystem_->Render(*entityManager_, out.Surfaces);
+    // TinyUI only appends draw surfaces. It must run before XrApp renders and
+    // resolves the eye buffers, which happens inside the base AppRenderFrame().
+    if (ui_ && uiVisible_) {
+        ui_->Render(in, out);
+    }
+    if (playbackUi_ && uiVisible_) {
+        playbackUi_->Render(in, out);
+    }
+    // Append the depth-tested pointer after the UI so it can compare against
+    // panel depth and remain visible only for the ray segments in front.
+    if (pointerRenderer_ && uiVisible_) {
+        pointerRenderer_->Render(in, out);
+    }
 }
 
 void TDGenPlayerApp::SessionEnd()
 {
     StopHaptics();
     lastUpdateSeconds_ = 0.0;
+    uiAnchorInitialized_ = false;
+    entityManager_->ForEach<UnlitGeometryRenderComponent>(
+        [](EntityID, UnlitGeometryRenderComponent& render) {
+            render.poseInitialized = false;
+        });
     //xrInput_.Destroy();
     inputSystem_->SessionEnd(*entityManager_);
     cameraLightEstimationSystem_->SessionEnd(*entityManager_);
@@ -393,6 +537,10 @@ void TDGenPlayerApp::SessionEnd()
 
 void TDGenPlayerApp::AppShutdown(const xrJava *context)
 {
+    if (pointerRenderer_) {
+        pointerRenderer_->Shutdown();
+        pointerRenderer_.reset();
+    }
     ShutdownPlaybackControls();
     ShutdownUi();
     // Explicitly destroy the systems and entity manager.
@@ -440,6 +588,24 @@ void TDGenPlayerApp::ShutdownUi() {
     meshScaleCurrentLabel_ = nullptr;
 }
 
+bool TDGenPlayerApp::PrepareUi() {
+    uiStatusLabel_ = nullptr;
+    meshScaleValueLabel_ = nullptr;
+    meshScaleCurrentLabel_ = nullptr;
+    if (ui_) {
+        ui_->Clear();
+    } else {
+        ui_ = std::make_unique<OVRFW::TinyUI>();
+        if (!ui_->Init(GetContext(), GetFileSys())) {
+            LOGE("Failed to initialize main UI");
+            ui_.reset();
+            return false;
+        }
+    }
+    ui_->SetPose(uiAnchorPose_);
+    return true;
+}
+
 void TDGenPlayerApp::BuildPlaybackControls() {
 #if defined(__ANDROID__)
     ShutdownPlaybackControls();
@@ -449,10 +615,23 @@ void TDGenPlayerApp::BuildPlaybackControls() {
         playbackUi_.reset();
         return;
     }
+    playbackUi_->SetPose(uiAnchorPose_);
+    // The bar keeps TinyUI's dark background. The button texture supplies its
+    // own contrasting fill and border; these white multipliers preserve those
+    // colors while still giving hover/click feedback.
+    playbackUi_->BackgroundColor = {1.0f, 1.0f, 1.0f, 1.0f};
+    playbackUi_->HoverColor = {0.72f, 0.82f, 1.0f, 1.0f};
+    playbackUi_->HighlightColor = {1.0f, 0.88f, 0.62f, 1.0f};
     playbackUi_->AddLabel("", {0.0f, -0.48f, -1.52f}, {900.0f, 70.0f});
     playbackButton_ = playbackUi_->AddButton(
-        "⏸", {0.0f, -0.48f, -1.49f}, {120.0f, 54.0f},
+        "", {0.0f, -0.48f, -1.518f}, {80.0f, 80.0f},
         [this]() { TogglePlayback(); });
+    if (playbackButton_) {
+        playbackButton_->SetSurfaceBorder(0, OVR::Vector4f::ZERO);
+        playbackButton_->SetSurfaceDims(0, {44.0f, 44.0f});
+        playbackButton_->RegenerateSurfaceGeometry(0, false);
+        playbackButton_->SetSurfaceColor(0, playbackUi_->BackgroundColor);
+    }
     RefreshPlaybackControls();
 #endif
 }
@@ -478,17 +657,19 @@ void TDGenPlayerApp::TogglePlayback() {
 void TDGenPlayerApp::RefreshPlaybackControls() {
     if (!playbackButton_ || !entityManager_ || objectEntity_ == 0) return;
     const auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
-    playbackButton_->SetText(loader.paused ? "▶" : "⏸");
+    const GLuint circularTexture = CreateCircularButtonTexture(loader.paused);
+    playbackButton_->SetSurfaceTextureTakeOwnership(
+        0,
+        0,
+        OVRFW::SURFACE_TEXTURE_DIFFUSE_ALPHA_DISCARD,
+        circularTexture,
+        64,
+        64);
+    playbackButton_->SetSurfaceColor(0, playbackUi_->BackgroundColor);
 }
 
 void TDGenPlayerApp::BuildDatasetPicker() {
-    ShutdownUi();
-    ui_ = std::make_unique<OVRFW::TinyUI>();
-    if (!ui_->Init(GetContext(), GetFileSys())) {
-        LOGE("Failed to initialize dataset picker UI");
-        ui_.reset();
-        return;
-    }
+    if (!PrepareUi()) return;
     currentUiMode_ = UiMode::Datasets;
     uiStatusLabel_ = ui_->AddLabel("ViPE datasets", {0.0f, 0.42f, -1.5f}, {500.0f, 70.0f});
 #if defined(__ANDROID__)
@@ -512,13 +693,7 @@ void TDGenPlayerApp::BuildDatasetPicker() {
 }
 
 void TDGenPlayerApp::BuildMaskSelector() {
-    ShutdownUi();
-    ui_ = std::make_unique<OVRFW::TinyUI>();
-    if (!ui_->Init(GetContext(), GetFileSys())) {
-        LOGE("Failed to initialize mask selector UI");
-        ui_.reset();
-        return;
-    }
+    if (!PrepareUi()) return;
     currentUiMode_ = UiMode::Masks;
 
     auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
@@ -554,13 +729,7 @@ void TDGenPlayerApp::BuildMaskSelector() {
 }
 
 void TDGenPlayerApp::BuildMeshScaleControls() {
-    ShutdownUi();
-    ui_ = std::make_unique<OVRFW::TinyUI>();
-    if (!ui_->Init(GetContext(), GetFileSys())) {
-        LOGE("Failed to initialize mesh scale UI");
-        ui_.reset();
-        return;
-    }
+    if (!PrepareUi()) return;
     currentUiMode_ = UiMode::MeshScale;
     auto& transform = entityManager_->GetComponent<TransformComponent>(objectEntity_);
     auto& interactable = entityManager_->GetComponent<InteractableComponent>(objectEntity_);
@@ -587,16 +756,27 @@ void TDGenPlayerApp::BuildMeshScaleControls() {
             RequestUiMode(UiMode::MeshScale);
         });
 
-    ui_->AddLabel("Scale", {-0.28f, 0.06f, -1.5f}, {160.0f, 50.0f});
+    // At 500 texels/meter, the previous 150-texel value panel overlapped both
+    // 60-texel step controls. Keep every surface coplanar, but leave a 2 cm
+    // horizontal gap between the value and each button to avoid z-fighting.
+    constexpr float scaleRowY = 0.06f;
+    constexpr float decrementX = -0.18f;
+    constexpr float valueX = 0.0f;
+    constexpr float incrementX = 0.18f;
+    const OVR::Vector2f stepSize = {50.0f, 50.0f};
+    const OVR::Vector2f valueSize = {110.0f, 50.0f};
+    ui_->AddLabel("Scale", {-0.36f, scaleRowY, -1.5f}, {100.0f, 50.0f});
     if (interactable.scaleLocked) {
-        ui_->AddLabel("−", {-0.08f, 0.06f, -1.5f}, {60.0f, 50.0f});
-        meshScaleValueLabel_ = ui_->AddLabel(value, {0.10f, 0.06f, -1.5f}, {150.0f, 50.0f});
-        ui_->AddLabel("+", {0.28f, 0.06f, -1.5f}, {60.0f, 50.0f});
+        ui_->AddLabel("-", {decrementX, scaleRowY, -1.5f}, stepSize);
+        meshScaleValueLabel_ =
+            ui_->AddLabel(value, {valueX, scaleRowY, -1.5f}, valueSize);
+        ui_->AddLabel("+", {incrementX, scaleRowY, -1.5f}, stepSize);
     } else {
-        ui_->AddButton("−", {-0.08f, 0.06f, -1.5f}, {60.0f, 50.0f},
+        ui_->AddButton("-", {decrementX, scaleRowY, -1.5f}, stepSize,
             [this]() { StepMeshScale(-1); });
-        meshScaleValueLabel_ = ui_->AddLabel(value, {0.10f, 0.06f, -1.5f}, {150.0f, 50.0f});
-        ui_->AddButton("+", {0.28f, 0.06f, -1.5f}, {60.0f, 50.0f},
+        meshScaleValueLabel_ =
+            ui_->AddLabel(value, {valueX, scaleRowY, -1.5f}, valueSize);
+        ui_->AddButton("+", {incrementX, scaleRowY, -1.5f}, stepSize,
             [this]() { StepMeshScale(1); });
     }
     ui_->AddButton("Reset to 1×", {0.0f, -0.07f, -1.5f}, {500.0f, 55.0f},
@@ -653,13 +833,7 @@ void TDGenPlayerApp::RefreshMeshScaleUi() {
 }
 
 void TDGenPlayerApp::BuildColorMatchingControls() {
-    ShutdownUi();
-    ui_ = std::make_unique<OVRFW::TinyUI>();
-    if (!ui_->Init(GetContext(), GetFileSys())) {
-        LOGE("Failed to initialize color matching UI");
-        ui_.reset();
-        return;
-    }
+    if (!PrepareUi()) return;
     currentUiMode_ = UiMode::ColorMatching;
 
     CameraLightEstimationComponent* component = nullptr;
@@ -683,10 +857,19 @@ void TDGenPlayerApp::BuildColorMatchingControls() {
     colorMatchingUiActive_ = state->tier;
     colorMatchingUiGlobal_ = state->globalAvailability;
     colorMatchingUiSpatial_ = state->spatialAvailability;
+    colorMatchingUiAvailabilityMessage_ = state->availabilityMessage;
 
     ui_->AddLabel("Color matching", {0.0f, 0.48f, -1.5f}, {620.0f, 60.0f});
+    const TierAvailability selectedAvailability =
+        selectedTier == ColorMatchingTier::Spatial ? state->spatialAvailability :
+        selectedTier == ColorMatchingTier::Global ? state->globalAvailability :
+        TierAvailability::Available;
     const char* active = state->tier == LightEstimateTier::Spatial ? "Spatial" :
-        state->tier == LightEstimateTier::Global ? "Global" : "Unavailable";
+        state->tier == LightEstimateTier::Global ? "Global" :
+        selectedTier == ColorMatchingTier::Disabled ? "Disabled" :
+        selectedAvailability == TierAvailability::Checking ? "Checking..." :
+        selectedAvailability == TierAvailability::Available ? "Starting..." :
+        "Unavailable";
     std::string status = std::string("Selected: ") +
         ColorMatchingTierName(selectedTier) + " | Active: " + active;
     if (colorMatchingEditActive_ && colorMatchingDraft_ != colorMatchingSaved_) {
@@ -708,7 +891,14 @@ void TDGenPlayerApp::BuildColorMatchingControls() {
     const auto addTierRow = [&](ColorMatchingTier tier, TierAvailability availability, float y) {
         const std::string name = ColorMatchingTierName(tier);
         if (selectedTier == tier) {
-            ui_->AddLabel(name + " (Selected)", {0.0f, y, -1.5f}, {620.0f, 60.0f});
+            std::string label = name + " (Selected";
+            if (!IsTierSelectable(
+                    tier, state->globalAvailability, state->spatialAvailability)) {
+                label += ", ";
+                label += TierAvailabilityName(availability);
+            }
+            label += ")";
+            ui_->AddLabel(label, {0.0f, y, -1.5f}, {620.0f, 60.0f});
         } else if (!IsTierSelectable(
                        tier, state->globalAvailability, state->spatialAvailability)) {
             ui_->AddLabel(name + " (" + TierAvailabilityName(availability) + ")",
@@ -721,16 +911,14 @@ void TDGenPlayerApp::BuildColorMatchingControls() {
     addTierRow(ColorMatchingTier::Disabled, TierAvailability::Available, -0.12f);
     addTierRow(ColorMatchingTier::Global, state->globalAvailability, -0.21f);
     addTierRow(ColorMatchingTier::Spatial, state->spatialAvailability, -0.30f);
+    if (!state->availabilityMessage.empty()) {
+        ui_->AddLabel(
+            state->availabilityMessage, {0.0f, -0.39f, -1.5f}, {620.0f, 45.0f});
+    }
 }
 
 void TDGenPlayerApp::BuildColorMatchingSettingsControls() {
-    ShutdownUi();
-    ui_ = std::make_unique<OVRFW::TinyUI>();
-    if (!ui_->Init(GetContext(), GetFileSys())) {
-        LOGE("Failed to initialize color matching settings UI");
-        ui_.reset();
-        return;
-    }
+    if (!PrepareUi()) return;
     currentUiMode_ = UiMode::ColorMatchingSettings;
     ui_->AddLabel("Color matching settings", {0.0f, 0.48f, -1.5f}, {620.0f, 55.0f});
     ui_->AddLabel("Dataset: " + colorMatchingSettingsDatasetId_,
@@ -746,7 +934,7 @@ void TDGenPlayerApp::BuildColorMatchingSettingsControls() {
     ui_->AddSlider("Max tint", {-0.30f, -0.09f, -1.5f},
         &colorMatchingDraft_.maxTint, 1.4f, 0.05f, 1.0f, 3.0f);
     ui_->AddSlider("Min exposure", {-0.30f, -0.19f, -1.5f},
-        &colorMatchingDraft_.minExposure, 0.35f, 0.05f, 0.1f, 1.0f);
+        &colorMatchingDraft_.minExposure, 0.05f, 0.05f, 0.02f, 1.0f);
     ui_->AddSlider("Max exposure", {-0.30f, -0.29f, -1.5f},
         &colorMatchingDraft_.maxExposure, 2.0f, 0.05f, 1.0f, 4.0f);
 }
@@ -783,11 +971,13 @@ void TDGenPlayerApp::RefreshColorMatchingUi() {
                 colorMatchingDraft_.requestedTier != colorMatchingUiRequested_ ||
                 state.tier != colorMatchingUiActive_ ||
                 state.globalAvailability != colorMatchingUiGlobal_ ||
-                state.spatialAvailability != colorMatchingUiSpatial_) {
+                state.spatialAvailability != colorMatchingUiSpatial_ ||
+                state.availabilityMessage != colorMatchingUiAvailabilityMessage_) {
                 colorMatchingUiRequested_ = colorMatchingDraft_.requestedTier;
                 colorMatchingUiActive_ = state.tier;
                 colorMatchingUiGlobal_ = state.globalAvailability;
                 colorMatchingUiSpatial_ = state.spatialAvailability;
+                colorMatchingUiAvailabilityMessage_ = state.availabilityMessage;
                 colorMatchingUiSnapshotValid_ = true;
                 RequestUiMode(UiMode::ColorMatching);
             }

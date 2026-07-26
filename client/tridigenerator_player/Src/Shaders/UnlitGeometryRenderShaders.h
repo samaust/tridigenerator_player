@@ -118,14 +118,31 @@ void main()
 	float v = texture(u_texV, oTexCoord).r;
 	vec3 rgb = srgb_to_linear(yuv_to_rgb(y, u, v));
 
-	vec4 estimatedLight = u_lightParams[0];
-	if (u_lightParams[1].w >= 2.0) {
-	    highp vec3 gridUv = (worldPosition.xyz - u_lightParams[1].xyz) * u_lightParams[2].xyz;
+	// u_lightParams is authored as rows in OVR::Matrix4f. GLSL matrix
+	// subscripting returns columns, so explicitly reconstruct those rows.
+	highp vec4 globalLight = vec4(
+	    u_lightParams[0].x, u_lightParams[1].x,
+	    u_lightParams[2].x, u_lightParams[3].x);
+	highp vec4 gridMinimumAndTier = vec4(
+	    u_lightParams[0].y, u_lightParams[1].y,
+	    u_lightParams[2].y, u_lightParams[3].y);
+	highp vec4 inverseExtentAndBlend = vec4(
+	    u_lightParams[0].z, u_lightParams[1].z,
+	    u_lightParams[2].z, u_lightParams[3].z);
+	highp vec4 matchingParams = vec4(
+	    u_lightParams[0].w, u_lightParams[1].w,
+	    u_lightParams[2].w, u_lightParams[3].w);
+
+	vec4 estimatedLight = globalLight;
+	if (gridMinimumAndTier.w >= 2.0) {
+	    highp vec3 gridUv =
+	        (worldPosition.xyz - gridMinimumAndTier.xyz) * inverseExtentAndBlend.xyz;
 	    if (all(greaterThanEqual(gridUv, vec3(0.0))) && all(lessThanEqual(gridUv, vec3(1.0)))) {
 	        estimatedLight = texture(u_lightField, gridUv);
 	    }
 	}
-	highp float matchAmount = clamp(u_lightParams[2].w * u_lightParams[3].x, 0.0, 1.0);
+	highp float matchAmount =
+	    clamp(inverseExtentAndBlend.w * matchingParams.x, 0.0, 1.0);
 	highp vec4 datasetReference = texelFetch(u_datasetColorReference, ivec2(int(maskId), 0), 0);
 	highp vec3 chromaGain = clamp(
 	    estimatedLight.rgb / max(datasetReference.rgb, vec3(0.001)),

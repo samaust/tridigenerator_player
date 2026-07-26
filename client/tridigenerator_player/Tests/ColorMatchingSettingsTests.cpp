@@ -11,7 +11,7 @@ int main() {
     assert(defaults.matchingStrength == 1.0f);
     assert(defaults.temporalSmoothing == 0.85f);
     assert(defaults.minTint == 0.7f && defaults.maxTint == 1.4f);
-    assert(defaults.minExposure == 0.35f && defaults.maxExposure == 2.0f);
+    assert(defaults.minExposure == 0.05f && defaults.maxExposure == 2.0f);
 
     std::string error;
     assert(ValidateColorMatchingSettings(defaults, error));
@@ -32,11 +32,15 @@ int main() {
 
     assert(!ParseColorMatchingSettings("{}", parsed, error));
     assert(!ParseColorMatchingSettings(
-        R"({"version":2,"tier":2,"matching_strength":1,"temporal_smoothing":0.85,"min_tint":0.7,"max_tint":1.4,"min_exposure":0.35,"max_exposure":2})",
+        R"({"version":3,"tier":2,"matching_strength":1,"temporal_smoothing":0.85,"min_tint":0.7,"max_tint":1.4,"min_exposure":0.35,"max_exposure":2})",
         parsed, error));
     assert(!ParseColorMatchingSettings(
         R"({"version":1,"tier":99,"matching_strength":1,"temporal_smoothing":0.85,"min_tint":0.7,"max_tint":1.4,"min_exposure":0.35,"max_exposure":2})",
         parsed, error));
+    assert(ParseColorMatchingSettings(
+        R"({"version":1,"tier":2,"matching_strength":1,"temporal_smoothing":0.85,"min_tint":0.7,"max_tint":1.4,"min_exposure":0.35,"max_exposure":2})",
+        parsed, error));
+    assert(parsed.minExposure == defaults.minExposure);
 
     ColorMatchingSettings custom = defaults;
     custom.requestedTier = ColorMatchingTier::Global;

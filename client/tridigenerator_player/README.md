@@ -336,7 +336,7 @@ The Android build assigns these controller and hand-tracking controls:
 | Adjust grab distance | Move the right thumbstick up to move farther away or down to move closer. This works regardless of which controller started the grab. | No direct hand-only distance control; the right controller thumbstick remains usable when available. |
 | Two-actor transform | Aim both controller rays at the mesh and hold both grips, then move the controllers to translate and rotate it; unlock scale to also resize it uniformly. | Aim both hand rays at the mesh and hold both pinches; unlock scale to enable uniform resizing. |
 | Edit mesh scale | Open `Mesh scale`, unlock scale, then select `−` or `+`; Reset remains available while locked. | Use the same screen with aim and pinch. |
-| Toggle UI visibility | Press X on the left controller. | Bring both valid, mutually facing palms together in a deliberate clap. |
+| Toggle UI visibility | Press X on the left controller. | Touch both mutually facing palms together in a prayer/clap pose; separate them before repeating the gesture. |
 | Pause or resume playback | Press A at any time, or select the centered `⏸`/`▶` control in the bottom bar while the UI is visible. | Aim at the bottom `⏸`/`▶` control and pinch while the UI is visible. |
 | Select color-matching tier | Open `Color matching`, aim at an available Disabled, Global, or Spatial row, and press the index trigger. | Open `Color matching`, aim at an available tier, and pinch the index finger and thumb. |
 | Edit color-matching settings | Select `Edit settings`, then use the `-`, value, and `+` controls. Select Save on the overview to persist the preview. | Use the same controls with an aim pinch; leaving the overview without Save restores the prior values. |
@@ -404,8 +404,9 @@ enabled in the headset, the optional hand-tracking permission is granted, and bo
 poses are visible to the headset cameras. If controller interaction works without vibration,
 make sure the application is focused and test each Touch controller independently; unsupported
 haptics do not block input. For clap toggles, first separate both hands, face the palms toward one
-another, and bring them together deliberately while no mesh grab is active. Keep idle hands
-separated if unintended clap toggles occur.
+another, then touch the palm surfaces together in a prayer pose while no mesh grab is active. The
+gesture does not require a fast clap. Separate the hands before repeating it, and keep idle hands
+separated if unintended toggles occur.
 
 Use `adb logcat` to inspect native input, hand-tracking, OpenXR, haptic, and loading diagnostics
 while reproducing an issue:

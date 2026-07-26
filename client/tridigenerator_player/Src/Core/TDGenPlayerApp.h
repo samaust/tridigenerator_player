@@ -23,6 +23,7 @@
 #include "../Components/ColorMatchingSettings.h"
 
 namespace OVRFW {
+class SimpleBeamRenderer;
 class TinyUI;
 class VRMenuObject;
 }
@@ -52,6 +53,7 @@ private:
     std::unique_ptr<UnlitGeometryRenderSystem> unlitGeometryRenderSystem_;
     std::unique_ptr<OVRFW::TinyUI> ui_;
     std::unique_ptr<OVRFW::TinyUI> playbackUi_;
+    std::unique_ptr<OVRFW::SimpleBeamRenderer> pointerRenderer_;
     OVRFW::VRMenuObject* uiStatusLabel_ = nullptr;
     OVRFW::VRMenuObject* playbackButton_ = nullptr;
     OVRFW::VRMenuObject* meshScaleValueLabel_ = nullptr;
@@ -67,6 +69,7 @@ private:
     LightEstimateTier colorMatchingUiActive_ = LightEstimateTier::Unavailable;
     TierAvailability colorMatchingUiGlobal_ = TierAvailability::Checking;
     TierAvailability colorMatchingUiSpatial_ = TierAvailability::Checking;
+    std::string colorMatchingUiAvailabilityMessage_;
     ColorMatchingSettings colorMatchingSaved_;
     ColorMatchingSettings colorMatchingDraft_;
     ColorMatchingSettings colorMatchingPreviewed_;
@@ -77,11 +80,14 @@ private:
     bool meshScaleUiLockedSnapshot_ = true;
     float meshScaleUiValueSnapshot_ = -1.0f;
     bool uiVisible_ = true;
+    bool uiAnchorInitialized_ = false;
+    OVR::Posef uiAnchorPose_ = OVR::Posef::Identity();
     double lastUpdateSeconds_ = 0.0;
     EntityID objectEntity_ = 0;
     XrAction hapticAction_ = XR_NULL_HANDLE;
 
     void ShutdownUi();
+    bool PrepareUi();
     void BuildPlaybackControls();
     void ShutdownPlaybackControls();
     void TogglePlayback();

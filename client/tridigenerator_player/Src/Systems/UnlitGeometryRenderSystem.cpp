@@ -234,6 +234,23 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                  InteractableComponent& interactable,
                  UnlitGeometryRenderComponent &ugrC,
                  UnlitGeometryRenderState &ugrS) {
+        // ViPE geometry is expressed relative to the capture camera. On Android,
+        // align that camera with the headset once so the mesh is not left at the
+        // stage origin (usually floor level and therefore fully depth-occluded).
+        if (!ugrC.poseInitialized) {
+            if (ugrC.poseParent == "HeadPose") {
+                OVR::Posef pose = in.HeadPose;
+                pose.Translation = in.HeadPose.Translate(ugrC.poseTranslationOffset);
+                TransformSystem::SetPose(tC, tS, pose);
+                LOGI(
+                    "Placed dataset at initial head pose (%f, %f, %f)",
+                    pose.Translation.x,
+                    pose.Translation.y,
+                    pose.Translation.z);
+            }
+            ugrC.poseInitialized = true;
+        }
+
         UpdateEnvironmentDepthUniforms(ugrC, ugrS, environmentDepthState);
         if (ugrS.datasetReferenceSequence_ != flC.dataset.sequence ||
             ugrS.datasetReferenceSchemaVersion_ != flC.dataset.schemaVersion) {

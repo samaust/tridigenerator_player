@@ -33,7 +33,12 @@ public class MainActivity extends android.app.Activity {
     // be made explicitly in code.
     private static final String REQUIRED_PERMISSION = "com.oculus.permission.USE_SCENE";
     private static final String OPTIONAL_CAMERA_PERMISSION = "horizonos.permission.HEADSET_CAMERA";
-    private static final String PERMISSIONS[] = {REQUIRED_PERMISSION, OPTIONAL_CAMERA_PERMISSION};
+    private static final String OPTIONAL_ANDROID_CAMERA_PERMISSION = "android.permission.CAMERA";
+    private static final String PERMISSIONS[] = {
+        REQUIRED_PERMISSION,
+        OPTIONAL_CAMERA_PERMISSION,
+        OPTIONAL_ANDROID_CAMERA_PERMISSION
+    };
 
     private static final int PERMISSION_REQUEST_CODE = 1;
 
@@ -41,12 +46,20 @@ public class MainActivity extends android.app.Activity {
 
     private Set<String> getMissingPermissions() {
         Set<String> missingPermissions = new HashSet<>();
-        for (String permission : PERMISSIONS) {
-            Log.d(TAG, String.format("Checking permission %s", permission));
-            if (checkSelfPermission(permission) != PackageManager.PERMISSION_GRANTED) {
-                Log.d(TAG, String.format("Requesting permission %s", permission));
-                missingPermissions.add(permission);
-            }
+        if (checkSelfPermission(REQUIRED_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
+            missingPermissions.add(REQUIRED_PERMISSION);
+        }
+        boolean hasHeadsetCamera =
+            checkSelfPermission(OPTIONAL_CAMERA_PERMISSION) == PackageManager.PERMISSION_GRANTED;
+        boolean hasAndroidCamera =
+            checkSelfPermission(OPTIONAL_ANDROID_CAMERA_PERMISSION) ==
+                PackageManager.PERMISSION_GRANTED;
+        if (!hasHeadsetCamera && !hasAndroidCamera) {
+            missingPermissions.add(OPTIONAL_CAMERA_PERMISSION);
+            missingPermissions.add(OPTIONAL_ANDROID_CAMERA_PERMISSION);
+        }
+        for (String permission : missingPermissions) {
+            Log.d(TAG, String.format("Requesting permission %s", permission));
         }
         return missingPermissions;
     }
@@ -88,7 +101,8 @@ public class MainActivity extends android.app.Activity {
                 finish();
                 return;
             } else {
-                Log.w(TAG, "Headset camera permission denied; color matching will be disabled");
+                Log.w(TAG, String.format(
+                    "Optional camera permission %s denied", permission));
                 requestedPermissions.remove(permission);
             }
         }

@@ -21,6 +21,7 @@
       />
   <uses-permission android:name="com.oculus.permission.USE_SCENE" />
   <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
+  <uses-permission android:name="android.permission.CAMERA" />
   <!-- Tell the system this app can handle tracked remotes and hands -->
   <uses-feature
       android:name="oculus.software.handtracking"
@@ -53,7 +54,6 @@
       <!-- This filter lets the apk show up as a launchable icon -->
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />
-        <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
         <category android:name="android.intent.category.LAUNCHER" />
       </intent-filter>
     </activity>

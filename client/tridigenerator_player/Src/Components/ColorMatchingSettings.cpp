@@ -30,7 +30,7 @@ bool ValidateColorMatchingSettings(const ColorMatchingSettings& settings, std::s
                !InRange(settings.maxTint, 1.0f, 3.0f) ||
                settings.minTint > settings.maxTint) {
         error = "tint limits are invalid";
-    } else if (!InRange(settings.minExposure, 0.1f, 1.0f) ||
+    } else if (!InRange(settings.minExposure, 0.02f, 1.0f) ||
                !InRange(settings.maxExposure, 1.0f, 4.0f) ||
                settings.minExposure > settings.maxExposure) {
         error = "exposure limits are invalid";
@@ -43,7 +43,7 @@ bool ValidateColorMatchingSettings(const ColorMatchingSettings& settings, std::s
 
 std::string SerializeColorMatchingSettings(const ColorMatchingSettings& settings) {
     Json::Value root(Json::objectValue);
-    root["version"] = 1;
+    root["version"] = 2;
     root["tier"] = static_cast<int>(settings.requestedTier);
     root["matching_strength"] = settings.matchingStrength;
     root["temporal_smoothing"] = settings.temporalSmoothing;
@@ -66,12 +66,14 @@ bool ParseColorMatchingSettings(
         error = "invalid settings JSON: " + error;
         return false;
     }
-    if (!root["version"].isInt() || root["version"].asInt() != 1 ||
+    if (!root["version"].isInt() ||
+        (root["version"].asInt() != 1 && root["version"].asInt() != 2) ||
         !root["tier"].isInt()) {
         error = "unsupported or missing settings version/tier";
         return false;
     }
     ColorMatchingSettings parsed;
+    const int version = root["version"].asInt();
     parsed.requestedTier = static_cast<ColorMatchingTier>(root["tier"].asInt());
     if (!ReadFloat(root, "matching_strength", parsed.matchingStrength) ||
         !ReadFloat(root, "temporal_smoothing", parsed.temporalSmoothing) ||
@@ -83,7 +85,12 @@ bool ParseColorMatchingSettings(
         if (error.empty()) error = "settings fields must be finite numbers";
         return false;
     }
+    // Version 1 used 0.35 as the default exposure floor, which prevented
+    // matching genuinely dark rooms. Preserve custom values while migrating
+    // datasets that still have that exact legacy default.
+    if (version == 1 && std::abs(parsed.minExposure - 0.35f) < 0.0001f) {
+        parsed.minExposure = ColorMatchingSettings{}.minExposure;
+    }
     settings = parsed;
     return true;
 }
-

@@ -909,6 +909,7 @@ class VRMenuSurface {
     bool HasTexturesOfType(eSurfaceTextureType const t, int const requiredCount) const;
     // Returns the index in Textures[] of the n-th occurence of type t.
     int IndexForTextureType(eSurfaceTextureType const t, int const occurenceCount) const;
+    void SelectProgramType();
     void SetTextureSampling(eGUIProgramType const pt);
 };
 

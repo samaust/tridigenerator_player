@@ -1,6 +1,7 @@
 #include "InteractionSystem.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 #include "InteractionMath.h"
@@ -18,9 +19,8 @@ constexpr float kStickDeadZone = 0.18f;
 constexpr float kDepthSpeed = 1.25f;
 constexpr float kMinimumRayDistance = 0.05f;
 constexpr float kMinimumTwoHandDistance = 0.025f;
-constexpr float kClapCloseDistance = 0.075f;
-constexpr float kClapResetDistance = 0.16f;
-constexpr float kClapClosingDelta = 0.008f;
+constexpr float kClapResetDistance = 0.14f;
+constexpr float kContactJointDistance = 0.070f;
 constexpr uint8_t ControllerMask(size_t side) { return static_cast<uint8_t>(1u << side); }
 
 OVR::Vector3f RayDirection(const OVR::Posef& aimPose) {
@@ -31,6 +31,67 @@ bool PoseValid(const XrHandJointLocationEXT& joint) {
     constexpr XrSpaceLocationFlags required =
             XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
     return (joint.locationFlags & required) == required;
+}
+
+OVR::Vector3f JointPosition(const HandInput& hand, XrHandJointEXT joint) {
+    const XrVector3f& position = hand.joints[joint].pose.position;
+    return {position.x, position.y, position.z};
+}
+
+OVR::Vector3f PalmPlaneNormal(const HandInput& hand) {
+    const OVR::Vector3f wrist = JointPosition(hand, XR_HAND_JOINT_WRIST_EXT);
+    const OVR::Vector3f index =
+            JointPosition(hand, XR_HAND_JOINT_INDEX_METACARPAL_EXT);
+    const OVR::Vector3f little =
+            JointPosition(hand, XR_HAND_JOINT_LITTLE_METACARPAL_EXT);
+    const OVR::Vector3f across = index - little;
+    const OVR::Vector3f along = (index + little) * 0.5f - wrist;
+    if (across.LengthSq() < 1e-6f || along.LengthSq() < 1e-6f) {
+        return OVR::Vector3f::ZERO;
+    }
+    return across.Cross(along).Normalized();
+}
+
+bool HandsInPrayerContact(const HandInput& left, const HandInput& right) {
+    const OVR::Vector3f between =
+            right.palmPose.Translation - left.palmPose.Translation;
+    if (between.LengthSq() < 1e-6f) {
+        return false;
+    }
+    const OVR::Vector3f betweenNormal = between.Normalized();
+    const OVR::Vector3f leftNormal = PalmPlaneNormal(left);
+    const OVR::Vector3f rightNormal = PalmPlaneNormal(right);
+    if (leftNormal.LengthSq() < 0.5f || rightNormal.LengthSq() < 0.5f) {
+        return false;
+    }
+
+    // Ignore the sign of each computed normal because the mirrored left/right
+    // joint winding may reverse it. In a prayer pose both palm planes are
+    // approximately perpendicular to the line between their centers.
+    const bool palmPlanesFacing =
+            std::abs(leftNormal.Dot(betweenNormal)) > 0.35f &&
+            std::abs(rightNormal.Dot(betweenNormal)) > 0.35f;
+    if (!palmPlanesFacing) {
+        return false;
+    }
+
+    constexpr std::array<XrHandJointEXT, 5> contactJoints = {
+            XR_HAND_JOINT_PALM_EXT,
+            XR_HAND_JOINT_INDEX_METACARPAL_EXT,
+            XR_HAND_JOINT_MIDDLE_METACARPAL_EXT,
+            XR_HAND_JOINT_RING_METACARPAL_EXT,
+            XR_HAND_JOINT_LITTLE_METACARPAL_EXT};
+    int closeJointPairs = 0;
+    for (const XrHandJointEXT joint : contactJoints) {
+        if (!PoseValid(left.joints[joint]) || !PoseValid(right.joints[joint])) {
+            continue;
+        }
+        if ((JointPosition(left, joint) - JointPosition(right, joint)).Length() <=
+            kContactJointDistance) {
+            ++closeJointPairs;
+        }
+    }
+    return closeJointPairs >= 2;
 }
 
 OVR::Posef ActorPose(const InputComponent& input, const InteractionActor& actor) {
@@ -271,20 +332,12 @@ void InteractionSystem::Update(EntityManager& ecs, float deltaSeconds) {
     if (left.active && right.active &&
         PoseValid(left.joints[XR_HAND_JOINT_PALM_EXT]) && PoseValid(right.joints[XR_HAND_JOINT_PALM_EXT])) {
         const float distance = (left.palmPose.Translation - right.palmPose.Translation).Length();
-        const OVR::Vector3f leftNormal = left.palmPose.Rotation.Rotate({0.0f, 0.0f, 1.0f});
-        const OVR::Vector3f rightNormal = right.palmPose.Rotation.Rotate({0.0f, 0.0f, 1.0f});
-        const bool facing = leftNormal.Dot(rightNormal) < -0.45f;
-        const bool closing = inputState->previousPalmDistance > 0.0f &&
-                inputState->previousPalmDistance - distance > kClapClosingDelta;
-        if (inputState->clapArmed && facing && closing && distance < kClapCloseDistance &&
+        if (inputState->clapArmed && HandsInPrayerContact(left, right) &&
             !IsManipulating(ecs)) {
             input->uiToggleRequested = true;
             inputState->clapArmed = false;
         } else if (distance > kClapResetDistance) {
             inputState->clapArmed = true;
         }
-        inputState->previousPalmDistance = distance;
-    } else {
-        inputState->previousPalmDistance = 0.0f;
     }
 }

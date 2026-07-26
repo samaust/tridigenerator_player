@@ -15,7 +15,10 @@ struct InputState {
     std::array<bool, 2> handRendererInitialized{false, false};
     std::array<bool, 2> previousPinch{false, false};
     std::array<bool, 2> previousGrip{false, false};
-    float previousPalmDistance{0.0f};
+    std::array<OVR::Posef, 2> previousControllerPose{};
+    std::array<bool, 2> previousControllerPoseValid{false, false};
+    std::array<double, 2> lastControllerActivitySeconds{-1.0, -1.0};
+    double lastHandTrackingActiveSeconds{-1.0};
     bool clapArmed{true};
     bool sessionInitialized{false};
 };
