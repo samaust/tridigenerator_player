@@ -224,7 +224,7 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs, int meshDetailDivisor) 
         auto planeDescriptor = OVRFW::BuildTesselatedQuadDescriptor(
                 static_cast<OVRFW::TriangleIndex>(tessX),
                 static_cast<OVRFW::TriangleIndex>(tessY),
-                true,
+                false,
                 false);
         OVR::Vector4f planeColor = {1.0f, 0.0f, 0.0f, 1.0f};
         OVRFW::GeometryBuilder planeGeometry;
@@ -293,6 +293,7 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs, int meshDetailDivisor) 
             /// gpu state needs alpha blending
             gc.GpuState.depthEnable = gc.GpuState.depthMaskEnable = true;
             gc.GpuState.blendEnable = OVRFW::ovrGpuState::BLEND_ENABLE;
+            gc.GpuState.cullEnable = true;
         }
     });
     return true;
@@ -315,7 +316,7 @@ bool UnlitGeometryRenderSystem::RebuildGeometry(
             auto planeDescriptor = OVRFW::BuildTesselatedQuadDescriptor(
                 static_cast<OVRFW::TriangleIndex>(meshWidth - 1),
                 static_cast<OVRFW::TriangleIndex>(meshHeight - 1),
-                true,
+                false,
                 false);
             OVRFW::GeometryBuilder planeGeometry;
             planeGeometry.Add(
