@@ -54,46 +54,6 @@ static inline std::chrono::steady_clock::time_point timing_start(bool enabled) {
         : std::chrono::steady_clock::time_point{};
 }
 
-static bool guess_full_range_from_samples(
-        const VideoFrame& frame, int /*ss_hor*/, int /*ss_ver*/) {
-    if (frame.textureYWidth == 0 || frame.textureYHeight == 0 ||
-        frame.textureUWidth == 0 || frame.textureUHeight == 0 ||
-        frame.textureVWidth == 0 || frame.textureVHeight == 0 ||
-        frame.textureYData.empty() || frame.textureUData.empty() || frame.textureVData.empty()) {
-        return false;
-    }
-
-    const int w = static_cast<int>(frame.textureYWidth);
-    const int h = static_cast<int>(frame.textureYHeight);
-    const int step_x = std::max(1, w / 32);
-    const int step_y = std::max(1, h / 32);
-
-    int samples = 0;
-    int minY = 255;
-    int maxY = 0;
-
-    for (int y = 0; y < h; y += step_y) {
-        for (int x = 0; x < w; x += step_x) {
-            const size_t y_idx = static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x);
-            if (y_idx >= frame.textureYData.size()) {
-                continue;
-            }
-            const int y8 = static_cast<int>(frame.textureYData[y_idx]);
-            minY = std::min(minY, y8);
-            maxY = std::max(maxY, y8);
-            samples++;
-        }
-    }
-
-    if (samples <= 0) return false;
-
-    // Heuristic: limited range nominally maps luma to [16,235]. If we see
-    // samples outside that band, treat it as full range. Keep margins to avoid
-    // misclassification due to noise/dithering.
-    if (minY <= 12 || maxY >= 239) return true;
-    return false;
-}
-
 // ---------- Static callback forwarders ----------
 int WebmInMemoryDemuxer::read_callback(void* opaque, uint8_t* buf, int bufSize) {
     auto* self = reinterpret_cast<WebmInMemoryDemuxer*>(opaque);
@@ -249,11 +209,55 @@ bool WebmInMemoryDemuxer::init(std::string* error) {
         }
 
         // --- INITIALIZE DECODERS ---
-        // dav1d for color
-        Dav1dSettings s;
-        dav1d_default_settings(&s);
-        s.n_threads = 0; // auto
-        if (dav1d_open(&dav1dCtx_, &s) < 0) throw std::runtime_error("dav1d_open failed");
+#if defined(__ANDROID__)
+        if (threadConfig_.preferHardwareColor) {
+            mediaCodecColorDecoder_ =
+                std::make_unique<AndroidMediaCodecColorDecoder>();
+        }
+        AVStream* colorStream = fmtCtx_->streams[colorStreamIndex_];
+        std::string hardwareError;
+        const AVRational guessedRate = av_guess_frame_rate(
+            fmtCtx_, colorStream, nullptr);
+        const double sourceFps =
+            guessedRate.num > 0 && guessedRate.den > 0
+            ? av_q2d(guessedRate)
+            : 30.0;
+        if (mediaCodecColorDecoder_ && mediaCodecColorDecoder_->Initialize(
+                colorStream->codecpar,
+                colorStream->time_base,
+                sourceFps,
+                threadConfig_.hardwareLowLatency,
+                hardwareError)) {
+            colorDecoderHardware_ = true;
+            colorDecoderName_ = mediaCodecColorDecoder_->DecoderName();
+            LOGI("Color decoder=MediaCodec hardware name=%s low-latency=%s",
+                 colorDecoderName_.c_str(),
+                 threadConfig_.hardwareLowLatency ? "on" : "off");
+        } else {
+            if (!threadConfig_.preferHardwareColor) {
+                hardwareError = "hardware decoder disabled by benchmark mode";
+            }
+            colorDecoderFallbackReason_ = hardwareError;
+            mediaCodecColorDecoder_.reset();
+            LOGW("Hardware AV1 unavailable; fallback=dav1d reason=%s",
+                 hardwareError.c_str());
+        }
+#endif
+        if (!colorDecoderHardware_) {
+            Dav1dSettings s;
+            dav1d_default_settings(&s);
+            s.n_threads = std::max(0, threadConfig_.colorThreads);
+            s.max_frame_delay = std::max(1, threadConfig_.colorFrameDelay);
+            s.apply_grain = 0;
+            if (dav1d_open(&dav1dCtx_, &s) < 0) {
+                throw std::runtime_error("dav1d_open failed");
+            }
+            colorDecoderName_ = "dav1d";
+            LOGI(
+                "Color fallback decoder=dav1d threads=%d frame-delay=%d film-grain=off",
+                s.n_threads,
+                s.max_frame_delay);
+        }
 
         // FFmpeg decoder for alpha stream
         AVStream* alphaStream = fmtCtx_->streams[alphaStreamIndex_];
@@ -559,32 +563,31 @@ bool WebmInMemoryDemuxer::get_next_dav1d_picture(
         const uint32_t cw = (uint32_t)((w + ss_hor) >> ss_hor);
         const uint32_t ch = (uint32_t)((h + ss_ver) >> ss_ver);
 
-        const auto copyStart = timing_start(timing != nullptr);
-        outFrame.textureYData.resize(static_cast<size_t>(w) * static_cast<size_t>(h));
-        outFrame.textureUData.resize(static_cast<size_t>(cw) * static_cast<size_t>(ch));
-        outFrame.textureVData.resize(static_cast<size_t>(cw) * static_cast<size_t>(ch));
-
-        // copy planes respecting stride; destination is tightly packed (row bytes == width)
-        const uint8_t* srcY = static_cast<const uint8_t*>(pic.data[0]);
-        const int strideY = pic.stride[0];
-        for (int row = 0; row < h; ++row) {
-            std::memcpy(outFrame.textureYData.data() + (size_t)row * w, srcY + (size_t)row * strideY, (size_t)w);
-        }
-        outFrame.textureYStride = strideY;
-
-        const uint8_t* srcU = static_cast<const uint8_t*>(pic.data[1]);
-        const int strideU = pic.stride[1];
-        for (uint32_t row = 0; row < ch; ++row) {
-            std::memcpy(outFrame.textureUData.data() + (size_t)row * cw, srcU + (size_t)row * strideU, (size_t)cw);
-        }
-        outFrame.textureUStride = strideU;
-
-        const uint8_t* srcV = static_cast<const uint8_t*>(pic.data[2]);
-        const int strideV = pic.stride[1];
-        for (uint32_t row = 0; row < ch; ++row) {
-            std::memcpy(outFrame.textureVData.data() + (size_t)row * cw, srcV + (size_t)row * strideV, (size_t)cw);
-        }
-        outFrame.textureVStride = strideV;
+        // Move the picture reference into the frame ring. The render thread
+        // performs the sole row copy directly into its mapped upload buffer.
+        auto* retained = new Dav1dPicture(pic);
+        std::memset(&pic, 0, sizeof(pic));
+        outFrame.colorPlaneOwner = std::shared_ptr<void>(
+            retained,
+            [](void* value) {
+                auto* picture = static_cast<Dav1dPicture*>(value);
+                dav1d_picture_unref(picture);
+                delete picture;
+            });
+        outFrame.textureYData.clear();
+        outFrame.textureUData.clear();
+        outFrame.textureVData.clear();
+        outFrame.colorPlaneViews = {{
+            {static_cast<const uint8_t*>(retained->data[0]), static_cast<uint32_t>(w),
+             static_cast<uint32_t>(h), static_cast<int>(retained->stride[0])},
+            {static_cast<const uint8_t*>(retained->data[1]), cw, ch,
+             static_cast<int>(retained->stride[1])},
+            {static_cast<const uint8_t*>(retained->data[2]), cw, ch,
+             static_cast<int>(retained->stride[1])},
+        }};
+        outFrame.textureYStride = static_cast<int>(retained->stride[0]);
+        outFrame.textureUStride = static_cast<int>(retained->stride[1]);
+        outFrame.textureVStride = static_cast<int>(retained->stride[1]);
 
         // fill output frame pointers and sizes
         outFrame.textureYWidth = static_cast<uint32_t>(w);
@@ -596,19 +599,17 @@ bool WebmInMemoryDemuxer::get_next_dav1d_picture(
         outFrame.textureVWidth = cw;
         outFrame.textureVHeight = ch;
 
-        outFrame.ts_us = pic.m.timestamp;
+        outFrame.ts_us = retained->m.timestamp;
         if (colorRangeKnown_) {
             outFrame.yuvFullRange = colorFullRange_;
         } else {
-            outFrame.yuvFullRange = guess_full_range_from_samples(outFrame, ss_hor, ss_ver);
+            // Schema 4 requires limited range. Containers without range
+            // signalling are therefore interpreted as limited, rather than
+            // forcing a decoder-thread scan/copy.
+            outFrame.yuvFullRange = false;
         }
-        if (timing) {
-            timing->colorCopyMilliseconds +=
-                std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - copyStart).count();
-        }
-
-        dav1d_picture_unref(&pic);
+        // colorCopyMilliseconds intentionally remains zero here: ownership
+        // was transferred, not copied.
         return true;
     } else if (r == -EAGAIN) {
         return false; // no picture available now
@@ -619,6 +620,49 @@ bool WebmInMemoryDemuxer::get_next_dav1d_picture(
         }
         return false;
     }
+}
+
+bool WebmInMemoryDemuxer::get_next_color_picture(
+        VideoFrame& outFrame,
+        DecodeInvocationTiming* timing) {
+#if defined(__ANDROID__)
+    if (mediaCodecColorDecoder_) {
+        double waitMilliseconds = 0.0;
+        if (!mediaCodecColorDecoder_->TryGetFrame(
+                outFrame.hardwareColorImage,
+                outFrame.ts_us,
+                waitMilliseconds)) {
+            return false;
+        }
+        outFrame.colorPlaneOwner.reset();
+        outFrame.colorPlaneViews = {};
+        outFrame.textureYData.clear();
+        outFrame.textureUData.clear();
+        outFrame.textureVData.clear();
+        outFrame.textureYWidth = static_cast<uint32_t>(width_);
+        outFrame.textureYHeight = static_cast<uint32_t>(height_);
+        outFrame.textureUWidth = static_cast<uint32_t>((width_ + 1) / 2);
+        outFrame.textureUHeight = static_cast<uint32_t>((height_ + 1) / 2);
+        outFrame.textureVWidth = outFrame.textureUWidth;
+        outFrame.textureVHeight = outFrame.textureUHeight;
+        outFrame.yuvFullRange = false;
+        if (timing) {
+            timing->colorHardwareOutputWaitMilliseconds += waitMilliseconds;
+        }
+        return true;
+    }
+#endif
+    outFrame.hardwareColorImage.reset();
+    return get_next_dav1d_picture(outFrame, timing);
+}
+
+bool WebmInMemoryDemuxer::submit_color_packet(const AVPacket* packet) {
+#if defined(__ANDROID__)
+    if (mediaCodecColorDecoder_) {
+        return mediaCodecColorDecoder_->QueuePacket(packet);
+    }
+#endif
+    return submit_packet_to_dav1d(packet);
 }
 
 bool WebmInMemoryDemuxer::receive_alpha_frame(
@@ -759,7 +803,7 @@ bool WebmInMemoryDemuxer::send_or_queue_packet(
 }
 
 bool WebmInMemoryDemuxer::submit_or_queue_color_packet(const AVPacket* packet) {
-    if (pendingColorPackets_.empty() && submit_packet_to_dav1d(packet)) {
+    if (pendingColorPackets_.empty() && submit_color_packet(packet)) {
         return true;
     }
     if (pendingColorPackets_.size() >= 16) {
@@ -788,7 +832,8 @@ void WebmInMemoryDemuxer::clear_pending_packets() {
 bool WebmInMemoryDemuxer::decode_next_frame(
         VideoFrame& outFrame,
         DecodeInvocationTiming* timing) {
-    if (!fmtCtx_ || !dav1dCtx_ || !alphaCodecCtx_ || !depthCodecCtx_) {
+    if (!fmtCtx_ || (!dav1dCtx_ && !colorDecoderHardware_) ||
+        !alphaCodecCtx_ || !depthCodecCtx_) {
         throw std::runtime_error("Decoders not initialized");
     }
     if (timing) *timing = {};
@@ -808,7 +853,7 @@ bool WebmInMemoryDemuxer::decode_next_frame(
         while (true) {
             bool received_any = false;
             if (!has_color) {
-                if (get_next_dav1d_picture(outFrame, timing)) {
+                if (get_next_color_picture(outFrame, timing)) {
                     has_color = true;
                     received_any = true;
                 }
@@ -848,7 +893,7 @@ bool WebmInMemoryDemuxer::decode_next_frame(
                 return true;
             };
         if (!has_color && !pendingColorPackets_.empty() &&
-            submit_packet_to_dav1d(pendingColorPackets_.front())) {
+            submit_color_packet(pendingColorPackets_.front())) {
             AVPacket* packet = pendingColorPackets_.front();
             pendingColorPackets_.pop_front();
             av_packet_free(&packet);
@@ -960,7 +1005,10 @@ bool WebmInMemoryDemuxer::decode_next_frame(
         if (!timestampsMatch(outFrame.ts_us, lastAlphaTimestampUs_) ||
             !timestampsMatch(outFrame.ts_us, lastDepthTimestampUs_)) {
             throw std::runtime_error(
-                "Decoded color, alpha, and depth timestamps are not synchronized");
+                "Decoded timestamps are not synchronized: color=" +
+                std::to_string(outFrame.ts_us) + "us alpha=" +
+                std::to_string(lastAlphaTimestampUs_) + "us depth=" +
+                std::to_string(lastDepthTimestampUs_) + "us");
         }
         outFrame.frameIndex = nextFrameIndex_++;
     }
@@ -975,6 +1023,9 @@ bool WebmInMemoryDemuxer::decode_next_frame(
 // ---------- flush / reset ----------
 void WebmInMemoryDemuxer::flush_decoders() {
     if (dav1dCtx_) dav1d_flush(dav1dCtx_);
+#if defined(__ANDROID__)
+    if (mediaCodecColorDecoder_) mediaCodecColorDecoder_->Flush();
+#endif
     if (alphaCodecCtx_) avcodec_flush_buffers(alphaCodecCtx_);
     if (depthCodecCtx_) avcodec_flush_buffers(depthCodecCtx_);
     if (audioCodecCtx_) avcodec_flush_buffers(audioCodecCtx_);

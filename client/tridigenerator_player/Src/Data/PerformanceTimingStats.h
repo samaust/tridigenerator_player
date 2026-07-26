@@ -19,6 +19,7 @@ enum class PerformanceSubsystem : std::size_t {
     IndexUpload,
     ColorDecode,
     ColorCopy,
+    ColorHardwareOutputWait,
     AlphaDecode,
     AlphaCopy,
     DepthDecode,

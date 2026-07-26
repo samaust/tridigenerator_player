@@ -47,6 +47,7 @@ struct UnlitGeometryRenderState {
     OVRFW::GlProgram ProgramGlobalHardLimited_;
     OVRFW::GlProgram ProgramGlobalHardFullRange_;
     int useFullRangeYuv_ = 0;
+    int colorIsRgb_ = 0;
     bool useGlobalHardVariant_ = false;
 
     OVR::Vector4f intrinsics_ = OVR::Vector4f(1.0f, 1.0f, 0.0f, 0.0f);

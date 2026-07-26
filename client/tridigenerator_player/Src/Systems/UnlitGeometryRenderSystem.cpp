@@ -38,6 +38,15 @@
 #include <array>
 #include <cstring>
 
+#if defined(__ANDROID__)
+#include <android/hardware_buffer.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES3/gl3.h>
+#include <GLES2/gl2ext.h>
+#include <media/NdkImage.h>
+#endif
+
 #include "UnlitGeometryRenderSystem.h"
 
 #include "Render/GeometryBuilder.h"
@@ -68,6 +77,132 @@ using OVR::Vector3f;
 using OVR::Vector4f;
 
 namespace {
+
+#if defined(__ANDROID__)
+bool ConvertHardwareColorImage(
+        const std::shared_ptr<void>& owner,
+        const OVRFW::GlTexture& destination) {
+    if (!owner) return false;
+    const auto getNativeClientBuffer =
+        reinterpret_cast<PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC>(
+            eglGetProcAddress("eglGetNativeClientBufferANDROID"));
+    const auto imageTargetTexture =
+        reinterpret_cast<PFNGLEGLIMAGETARGETTEXTURE2DOESPROC>(
+            eglGetProcAddress("glEGLImageTargetTexture2DOES"));
+    const auto createImage =
+        reinterpret_cast<PFNEGLCREATEIMAGEKHRPROC>(
+            eglGetProcAddress("eglCreateImageKHR"));
+    const auto destroyImage =
+        reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
+            eglGetProcAddress("eglDestroyImageKHR"));
+    if (!getNativeClientBuffer || !imageTargetTexture ||
+        !createImage || !destroyImage) return false;
+    AHardwareBuffer* hardwareBuffer = nullptr;
+    if (AImage_getHardwareBuffer(
+            static_cast<AImage*>(owner.get()), &hardwareBuffer) != AMEDIA_OK ||
+        !hardwareBuffer) {
+        return false;
+    }
+    const EGLDisplay display = eglGetCurrentDisplay();
+    const EGLClientBuffer clientBuffer =
+        getNativeClientBuffer(hardwareBuffer);
+    const EGLint attributes[] = {
+        EGL_IMAGE_PRESERVED_KHR, EGL_TRUE,
+        EGL_NONE};
+    EGLImageKHR image = createImage(
+        display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
+        clientBuffer, attributes);
+    if (image == EGL_NO_IMAGE_KHR) return false;
+
+    static GLuint program = 0;
+    static GLuint framebuffer = 0;
+    static GLuint externalTexture = 0;
+    static GLuint vertexArray = 0;
+    if (program == 0) {
+        const char* vertexSource =
+            "#version 300 es\n"
+            "out vec2 uv;\n"
+            "void main(){"
+            "vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);"
+            "uv=p;gl_Position=vec4(p*2.0-1.0,0,1);}";
+        const char* fragmentSource =
+            "#version 300 es\n"
+            "#extension GL_OES_EGL_image_external_essl3 : require\n"
+            "precision mediump float;"
+            "uniform samplerExternalOES sourceImage;"
+            "in vec2 uv;out vec4 color;"
+            "void main(){color=texture(sourceImage,uv);}";
+        const auto compile = [](GLenum type, const char* source) {
+            GLuint shader = glCreateShader(type);
+            glShaderSource(shader, 1, &source, nullptr);
+            glCompileShader(shader);
+            GLint compiled = GL_FALSE;
+            glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
+            if (compiled != GL_TRUE) {
+                glDeleteShader(shader);
+                return static_cast<GLuint>(0);
+            }
+            return shader;
+        };
+        const GLuint vertex = compile(GL_VERTEX_SHADER, vertexSource);
+        const GLuint fragment = compile(GL_FRAGMENT_SHADER, fragmentSource);
+        if (!vertex || !fragment) {
+            destroyImage(display, image);
+            return false;
+        }
+        program = glCreateProgram();
+        glAttachShader(program, vertex);
+        glAttachShader(program, fragment);
+        glLinkProgram(program);
+        glDeleteShader(vertex);
+        glDeleteShader(fragment);
+        GLint linked = GL_FALSE;
+        glGetProgramiv(program, GL_LINK_STATUS, &linked);
+        if (linked != GL_TRUE) {
+            glDeleteProgram(program);
+            program = 0;
+            destroyImage(display, image);
+            return false;
+        }
+        glGenFramebuffers(1, &framebuffer);
+        glGenTextures(1, &externalTexture);
+        glGenVertexArrays(1, &vertexArray);
+    }
+
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, externalTexture);
+    imageTargetTexture(
+        GL_TEXTURE_EXTERNAL_OES, reinterpret_cast<GLeglImageOES>(image));
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    glFramebufferTexture2D(
+        GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+        destination.texture, 0);
+    const bool complete =
+        glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    if (complete) {
+        glViewport(0, 0, destination.Width, destination.Height);
+        glUseProgram(program);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_EXTERNAL_OES, externalTexture);
+        glUniform1i(glGetUniformLocation(program, "sourceImage"), 0);
+        glBindVertexArray(vertexArray);
+        glDrawArrays(GL_TRIANGLES, 0, 3);
+        // The AImage and its decoder surface cannot be returned until the
+        // sampling pass completes. This fence wait is intentionally scoped to
+        // this one conversion pass; the owned RGB texture remains asynchronous
+        // for the application's later rendering.
+        GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        glFlush();
+        glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ULL);
+        glDeleteSync(fence);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, 0);
+    destroyImage(display, image);
+    return complete;
+}
+#endif
 
 const std::vector<uint16_t>* PreparedDepthPixels(
         const VideoFrame& frame,
@@ -101,22 +236,27 @@ bool StageFrameTextureUpload(
         const std::vector<uint16_t>& depthData,
         UnlitGeometryRenderState& renderState,
         std::array<TextureUploadSlice, 5>& slices) {
+    const bool retainedColor = frame.colorPlaneOwner != nullptr;
+    const bool hardwareColor = frame.hardwareColorImage != nullptr;
     const std::array<const void*, 5> sources{
-        frame.textureYData.data(),
-        frame.textureUData.data(),
-        frame.textureVData.data(),
+        retainedColor ? frame.colorPlaneViews[0].data : frame.textureYData.data(),
+        retainedColor ? frame.colorPlaneViews[1].data : frame.textureUData.data(),
+        retainedColor ? frame.colorPlaneViews[2].data : frame.textureVData.data(),
         frame.textureAlphaData.data(),
         depthData.data()};
     const std::array<size_t, 5> availableBytes{
-        frame.textureYData.size(),
-        frame.textureUData.size(),
-        frame.textureVData.size(),
+        retainedColor ? static_cast<size_t>(frame.textureYWidth) * frame.textureYHeight
+                      : frame.textureYData.size(),
+        retainedColor ? static_cast<size_t>(frame.textureUWidth) * frame.textureUHeight
+                      : frame.textureUData.size(),
+        retainedColor ? static_cast<size_t>(frame.textureVWidth) * frame.textureVHeight
+                      : frame.textureVData.size(),
         frame.textureAlphaData.size(),
         depthData.size() * sizeof(uint16_t)};
     const std::array<size_t, 5> requiredBytes{
-        static_cast<size_t>(frame.textureYWidth) * frame.textureYHeight,
-        static_cast<size_t>(frame.textureUWidth) * frame.textureUHeight,
-        static_cast<size_t>(frame.textureVWidth) * frame.textureVHeight,
+        hardwareColor ? 0 : static_cast<size_t>(frame.textureYWidth) * frame.textureYHeight,
+        hardwareColor ? 0 : static_cast<size_t>(frame.textureUWidth) * frame.textureUHeight,
+        hardwareColor ? 0 : static_cast<size_t>(frame.textureVWidth) * frame.textureVHeight,
         static_cast<size_t>(frame.textureAlphaWidth) * frame.textureAlphaHeight,
         static_cast<size_t>(renderState.meshWidth_) *
             renderState.meshHeight_ * sizeof(uint16_t)};
@@ -170,10 +310,21 @@ bool StageFrameTextureUpload(
     }
     auto* destination = static_cast<uint8_t*>(mapped);
     for (size_t plane = 0; plane < slices.size(); ++plane) {
-        std::memcpy(
-            destination + slices[plane].offset,
-            sources[plane],
-            slices[plane].size);
+        if (retainedColor && plane < 3) {
+            const auto& view = frame.colorPlaneViews[plane];
+            for (uint32_t row = 0; row < view.height; ++row) {
+                std::memcpy(
+                    destination + slices[plane].offset +
+                        static_cast<size_t>(row) * view.width,
+                    view.data + static_cast<size_t>(row) * view.stride,
+                    view.width);
+            }
+        } else {
+            std::memcpy(
+                destination + slices[plane].offset,
+                sources[plane],
+                slices[plane].size);
+        }
     }
     if (glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER) != GL_TRUE) {
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
@@ -294,6 +445,7 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs, int meshDetailDivisor) 
                 {"u_datasetColorReference", OVRFW::ovrProgramParmType::TEXTURE_SAMPLED},
                 {"u_matchingLimits", OVRFW::ovrProgramParmType::FLOAT_VECTOR4},
                 {"u_maskVisibility[0]", OVRFW::ovrProgramParmType::INT},
+                {"u_colorIsRgb", OVRFW::ovrProgramParmType::INT},
         };
 
         std::string programDefsLimited;
@@ -346,6 +498,7 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs, int meshDetailDivisor) 
             gc.BindUniformTextures();
             gc.UniformData[18].Data = ugrC.maskVisibility_.ShaderValues();
             gc.UniformData[18].Count = 256;
+            gc.UniformData[19].Data = &ugrS.colorIsRgb_;
 
             /// gpu state needs alpha blending
             gc.GpuState.depthEnable = gc.GpuState.depthMaskEnable = true;
@@ -729,7 +882,8 @@ void UnlitGeometryRenderSystem::CreateTextures(
     for (int i = 0; i < 2; ++i) {
         // YUV textures
         ugrS.textures_[i][TEX_Y] = CreateGlTexture(
-            ugrC.texture_internal_formats_[TEX_Y],
+            (*framePtr)->hardwareColorImage ? GL_RGB8
+                                            : ugrC.texture_internal_formats_[TEX_Y],
             (*framePtr)->textureYWidth,
             (*framePtr)->textureYHeight);
         ugrS.textures_[i][TEX_U] = CreateGlTexture(
@@ -958,6 +1112,7 @@ void UnlitGeometryRenderSystem::UpdateTextures(
         return;
     }
     const int desiredFullRange = (*framePtr)->yuvFullRange ? 1 : 0;
+    ugrS.colorIsRgb_ = (*framePtr)->hardwareColorImage ? 1 : 0;
     if (desiredFullRange != ugrS.useFullRangeYuv_) {
         ugrS.useFullRangeYuv_ = desiredFullRange;
         RefreshGeometryPrograms(ugrS);
@@ -969,6 +1124,11 @@ void UnlitGeometryRenderSystem::UpdateTextures(
     std::array<TextureUploadSlice, 5> slices;
     const bool staged = StageFrameTextureUpload(
         **framePtr, *depthData, ugrS, slices);
+    if (!staged && (*framePtr)->colorPlaneOwner != nullptr) {
+        LOGE("PBO staging is required for retained strided color planes");
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        return;
+    }
     if (!staged && !ugrS.pboFailureLogged_) {
         LOGW("PBO texture staging failed; using direct uploads");
         ugrS.pboFailureLogged_ = true;
@@ -980,24 +1140,38 @@ void UnlitGeometryRenderSystem::UpdateTextures(
             : direct;
     };
 
-    UpdateGl8Texture(
-        ugrS.textures_[ugrS.currentSurfaceSet_][TEX_Y],
-        GL_RED,
-        uploadAddress(0, (*framePtr)->textureYData.data()),
-        ugrC.texture_unpack_alignments_[TEX_Y],
-        (*framePtr)->textureYStride);
-    UpdateGl8Texture(
-        ugrS.textures_[ugrS.currentSurfaceSet_][TEX_U],
-        GL_RED,
-        uploadAddress(1, (*framePtr)->textureUData.data()),
-        ugrC.texture_unpack_alignments_[TEX_U],
-        (*framePtr)->textureUStride);
-    UpdateGl8Texture(
-        ugrS.textures_[ugrS.currentSurfaceSet_][TEX_V],
-        GL_RED,
-        uploadAddress(2, (*framePtr)->textureVData.data()),
-        ugrC.texture_unpack_alignments_[TEX_V],
-        (*framePtr)->textureVStride);
+#if defined(__ANDROID__)
+    if ((*framePtr)->hardwareColorImage) {
+        if (!ConvertHardwareColorImage(
+                (*framePtr)->hardwareColorImage,
+                ugrS.textures_[ugrS.currentSurfaceSet_][TEX_Y])) {
+            LOGE("Failed to import/convert MediaCodec color output");
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            return;
+        }
+        (*framePtr)->hardwareColorImage.reset();
+    } else
+#endif
+    {
+        UpdateGl8Texture(
+            ugrS.textures_[ugrS.currentSurfaceSet_][TEX_Y],
+            GL_RED,
+            uploadAddress(0, (*framePtr)->textureYData.data()),
+            ugrC.texture_unpack_alignments_[TEX_Y],
+            (*framePtr)->textureYStride);
+        UpdateGl8Texture(
+            ugrS.textures_[ugrS.currentSurfaceSet_][TEX_U],
+            GL_RED,
+            uploadAddress(1, (*framePtr)->textureUData.data()),
+            ugrC.texture_unpack_alignments_[TEX_U],
+            (*framePtr)->textureUStride);
+        UpdateGl8Texture(
+            ugrS.textures_[ugrS.currentSurfaceSet_][TEX_V],
+            GL_RED,
+            uploadAddress(2, (*framePtr)->textureVData.data()),
+            ugrC.texture_unpack_alignments_[TEX_V],
+            (*framePtr)->textureVStride);
+    }
     UpdateGl8Texture(
         ugrS.textures_[ugrS.currentSurfaceSet_][TEX_ALPHA],
         GL_RED_INTEGER,

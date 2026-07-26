@@ -41,8 +41,16 @@ int main() {
     Expect(dataset.maskLabels.at(0) == "background", "background mask label");
     Expect(dataset.maskLabels.at(2) == "animal", "animal mask label");
     Expect(dataset.maskLabels.at(3) == "pet", "pet mask label");
-    Expect(dataset.HasColorReference(), "schema-v2 dataset has color reference");
-    Expect(!dataset.hasAudio, "legacy manifest remains valid without audio");
+    Expect(dataset.HasColorReference(), "schema-v4 dataset has color reference");
+    Expect(dataset.colorDecodeProfile == "quest_av1_fast_v1",
+        "Quest color decode profile parsed");
+    Expect(dataset.colorCodecProfile == "Main" && dataset.colorBitDepth == 8,
+        "AV1 Main 8-bit contract parsed");
+    Expect(dataset.colorPrimaries == "bt709" &&
+        dataset.colorTransfer == "bt709" &&
+        dataset.colorMatrix == "bt709" &&
+        dataset.colorRange == "limited", "BT.709 limited metadata parsed");
+    Expect(!dataset.hasAudio, "manifest remains valid without audio");
     Expect(dataset.depthCodec == "png" &&
         dataset.depthPixelFormat == "gray16be", "legacy depth stream parsed");
 
@@ -98,48 +106,37 @@ int main() {
     error.clear();
     Expect(!ParseVipeDataset(mismatched, invalid, error), "mismatched frame metadata rejected");
 
-    std::string versionTwo = ReadFile(VIPE_TEST_MANIFEST);
-    const size_t schemaPosition = versionTwo.find("\"schema_version\": 1");
-    if (schemaPosition != std::string::npos) versionTwo.replace(
-        schemaPosition, std::string("\"schema_version\": 1").size(), "\"schema_version\": 2");
-    if (versionTwo.find("\"color_reference\"") == std::string::npos) {
-        const size_t finalBrace = versionTwo.find_last_of('}');
-        if (finalBrace != std::string::npos) versionTwo.insert(finalBrace,
-            R"(,"color_reference":{"color_space":"linear_srgb","aggregation":"sequence","global":{"chromaticity":[1.0,1.0,1.0],"log_average_luminance":0.25,"sample_count":4096},"masks":{"2":{"chromaticity":[1.2,0.95,0.85],"log_average_luminance":0.2,"sample_count":2048}}}})");
-    }
+    std::string legacy = ReadFile(VIPE_TEST_MANIFEST);
+    const size_t schemaPosition = legacy.find("\"schema_version\": 4");
+    if (schemaPosition != std::string::npos) legacy.replace(
+        schemaPosition, std::string("\"schema_version\": 4").size(), "\"schema_version\": 3");
     error.clear();
-    Expect(ParseVipeDataset(versionTwo, invalid, error), error.c_str());
-    Expect(invalid.HasColorReference(), "schema-v2 dataset has color reference");
-    Expect(!invalid.colorReferences.masks.empty(), "per-mask color reference parsed");
+    Expect(!ParseVipeDataset(legacy, invalid, error),
+        "older manifests require re-encoding");
+    Expect(error.find("Re-encode") != std::string::npos,
+        "older manifest error explains the required action");
 
-    std::string versionThree = versionTwo;
-    const size_t v3Schema = versionThree.find("\"schema_version\": 2");
-    if (v3Schema != std::string::npos) {
-        versionThree.replace(
-            v3Schema,
-            std::string("\"schema_version\": 2").size(),
-            "\"schema_version\": 3");
-    }
-    const size_t pngCodec = versionThree.find("\"codec\": \"png\"");
+    std::string versionFourFfv1 = ReadFile(VIPE_TEST_MANIFEST);
+    const size_t pngCodec = versionFourFfv1.find("\"codec\": \"png\"");
     if (pngCodec != std::string::npos) {
-        versionThree.replace(
+        versionFourFfv1.replace(
             pngCodec,
             std::string("\"codec\": \"png\"").size(),
             "\"codec\": \"ffv1\"");
     }
-    const size_t bigEndian = versionThree.find("\"pixel_format\": \"gray16be\"");
+    const size_t bigEndian = versionFourFfv1.find("\"pixel_format\": \"gray16be\"");
     if (bigEndian != std::string::npos) {
-        versionThree.replace(
+        versionFourFfv1.replace(
             bigEndian,
             std::string("\"pixel_format\": \"gray16be\"").size(),
             "\"pixel_format\": \"gray16le\"");
     }
     error.clear();
-    Expect(ParseVipeDataset(versionThree, invalid, error), error.c_str());
+    Expect(ParseVipeDataset(versionFourFfv1, invalid, error), error.c_str());
     Expect(invalid.depthCodec == "ffv1" &&
-        invalid.depthPixelFormat == "gray16le", "schema-v3 FFV1 depth parsed");
+        invalid.depthPixelFormat == "gray16le", "schema-v4 FFV1 depth parsed");
 
-    std::string missingReference = versionTwo;
+    std::string missingReference = ReadFile(VIPE_TEST_MANIFEST);
     const size_t referencePosition = missingReference.find("\"color_reference\"");
     if (referencePosition != std::string::npos) {
         missingReference.replace(
@@ -149,7 +146,7 @@ int main() {
     }
     error.clear();
     Expect(!ParseVipeDataset(missingReference, invalid, error),
-        "schema-v2 dataset without color reference rejected");
+        "schema-v4 dataset without color reference rejected");
 
     return failures == 0 ? 0 : 1;
 }

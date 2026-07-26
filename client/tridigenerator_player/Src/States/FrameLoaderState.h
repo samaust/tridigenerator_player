@@ -61,6 +61,10 @@ struct FrameLoaderState {
     std::atomic<std::uint64_t> ringStarvationCount{0};
     std::atomic<int> ringLowWaterMark{8};
     std::atomic<std::int64_t> producerStartNanoseconds{0};
+    std::string colorDecoderName{"not initialized"};
+    std::string colorDecoderFallbackReason;
+    bool colorDecoderHardware = false;
+    mutable std::mutex decoderDiagnosticsMutex;
 
     // Writer thread
     std::thread writerThread;

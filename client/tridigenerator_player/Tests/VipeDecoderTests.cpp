@@ -49,6 +49,22 @@ int main(int argc, char** argv) {
             std::cerr << "Decoded frame metadata is not synchronized at " << index << '\n';
             return 1;
         }
+        if (!frame.colorPlaneOwner || !frame.textureYData.empty() ||
+            !frame.textureUData.empty() || !frame.textureVData.empty() ||
+            !frame.colorPlaneViews[0].data ||
+            frame.colorPlaneViews[0].stride <
+                static_cast<int>(frame.colorPlaneViews[0].width) ||
+            frame.colorPlaneViews[1].stride <
+                static_cast<int>(frame.colorPlaneViews[1].width) ||
+            frame.colorPlaneViews[2].stride <
+                static_cast<int>(frame.colorPlaneViews[2].width)) {
+            std::cerr << "dav1d planes were not retained with valid strides\n";
+            return 1;
+        }
+        if (timing.colorCopyMilliseconds != 0.0) {
+            std::cerr << "dav1d performed an unexpected decoder-thread color copy\n";
+            return 1;
+        }
         if (timing.totalMilliseconds <= 0.0 ||
             timing.colorCodecMilliseconds < 0.0 ||
             timing.alphaCodecMilliseconds < 0.0 ||

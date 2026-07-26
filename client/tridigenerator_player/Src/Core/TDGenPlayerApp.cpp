@@ -784,6 +784,13 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
     // its left edge at 0.98 m, leaving an exact 0.08 m horizontal gap.
     constexpr float diagnosticCenterX = 1.48f;
     constexpr float diagnosticWidthTexels = 520.0f;
+    constexpr float primaryDiagnosticCenterY = 0.24f;
+    constexpr float primaryDiagnosticHeightTexels = 800.0f;
+    constexpr float secondaryDiagnosticHeightTexels = 700.0f;
+    // TinyUI positions label text independently of the full backing bounds.
+    // This is a modest offset from the original -0.48 m placement: enough to
+    // separate the text blocks without introducing a large visual gap.
+    constexpr float secondaryDiagnosticCenterY = -0.64f;
     ShutdownDiagnosticOverlay();
     diagnosticUi_ = std::make_unique<OVRFW::TinyUI>();
     if (!diagnosticUi_->Init(GetContext(), GetFileSys())) {
@@ -809,8 +816,8 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
         "Texture upload      --      --\n"
         "Rendering           --      --\n"
         "Other update        --     N/A",
-        {diagnosticCenterX, 0.24f, -1.48f},
-        {diagnosticWidthTexels, 800.0f});
+        {diagnosticCenterX, primaryDiagnosticCenterY, -1.48f},
+        {diagnosticWidthTexels, primaryDiagnosticHeightTexels});
     diagnosticCameraLabel_ = diagnosticUi_->AddLabel(
         "Decode avg/p95 ms\n"
         " Color codec/copy: --/--  --/--\n"
@@ -822,8 +829,8 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
         "Camera: --\n"
         "cb/proc/super/drop: --/--/--/--\n"
         "age/cb95/import95: --/--/-- ms copy: --",
-        {diagnosticCenterX, -0.48f, -1.48f},
-        {diagnosticWidthTexels, 520.0f});
+        {diagnosticCenterX, secondaryDiagnosticCenterY, -1.48f},
+        {diagnosticWidthTexels, secondaryDiagnosticHeightTexels});
     RefreshDiagnosticOverlay();
 #endif
 }
@@ -885,6 +892,9 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
     int ringLowWater = 0;
     int ringOccupancy = 0;
     std::int64_t producerStartNanoseconds = 0;
+    std::string colorDecoderName = "not initialized";
+    std::string colorDecoderFallbackReason;
+    bool colorDecoderHardware = false;
     if (entityManager_) {
         entityManager_->ForEach<FrameLoaderComponent>(
             [&](EntityID, FrameLoaderComponent& loader) {
@@ -903,6 +913,14 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
                 producerStartNanoseconds =
                     state.producerStartNanoseconds.load(
                         std::memory_order_acquire);
+                {
+                    std::lock_guard<std::mutex> lock(
+                        state.decoderDiagnosticsMutex);
+                    colorDecoderName = state.colorDecoderName;
+                    colorDecoderFallbackReason =
+                        state.colorDecoderFallbackReason;
+                    colorDecoderHardware = state.colorDecoderHardware;
+                }
                 for (const FrameSlot& slot : state.ring) {
                     if (slot.ready.load(std::memory_order_acquire)) {
                         ++ringOccupancy;
@@ -1009,9 +1027,13 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
 
     std::ostringstream cameraText;
     cameraText << "Decode avg/p95 ms\n"
+         << " Color decoder: " << colorDecoderName
+         << (colorDecoderHardware ? " [hardware]" : " [software]") << "\n"
          << " Color codec/copy: "
          << cpuAverageP95(PerformanceSubsystem::ColorDecode) << "  "
          << cpuAverageP95(PerformanceSubsystem::ColorCopy) << "\n"
+         << " HW output wait: "
+         << cpuAverageP95(PerformanceSubsystem::ColorHardwareOutputWait) << "\n"
          << " Alpha codec/copy: "
          << cpuAverageP95(PerformanceSubsystem::AlphaDecode) << "  "
          << cpuAverageP95(PerformanceSubsystem::AlphaCopy) << "\n"
@@ -1020,6 +1042,9 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
          << cpuAverageP95(PerformanceSubsystem::DepthConvertCopy) << "\n"
          << " Demux/audio: "
          << cpuAverageP95(PerformanceSubsystem::DemuxAudio) << "\n"
+         << (colorDecoderFallbackReason.empty()
+                ? std::string()
+                : " Fallback: " + colorDecoderFallbackReason + "\n")
          << "Producer: " << std::fixed << std::setprecision(1)
          << producerFps << " fps  ring "
          << ringOccupancy << "/" << ringLowWater

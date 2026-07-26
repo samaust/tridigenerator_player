@@ -18,6 +18,7 @@
 
 #if defined(ANDROID)
 #include <curl/curl.h>
+#include <sys/system_properties.h>
 #endif
 
 #include "Videos/WebmInMemoryDemuxer.h"
@@ -517,7 +518,33 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
     }
 
     // Create and init demuxer
-    WebmInMemoryDemuxer demuxer(fetched);
+    DecoderThreadConfig decoderConfig;
+#if defined(__ANDROID__)
+    const auto property = [](const char* name, const char* fallback) {
+        char value[PROP_VALUE_MAX]{};
+        return std::string(
+            __system_property_get(name, value) > 0 ? value : fallback);
+    };
+    const std::string decoderMode =
+        property("debug.tridi.color_decoder", "auto");
+    decoderConfig.preferHardwareColor = decoderMode != "software";
+    decoderConfig.hardwareLowLatency =
+        property("debug.tridi.av1_low_latency", "1") != "0";
+    decoderConfig.colorThreads =
+        std::stoi(property("debug.tridi.dav1d_threads", "6"));
+    decoderConfig.colorFrameDelay =
+        std::stoi(property("debug.tridi.dav1d_frame_delay", "2"));
+    if (decoderConfig.colorThreads != 0 &&
+        decoderConfig.colorThreads != 4 &&
+        decoderConfig.colorThreads != 6) {
+        decoderConfig.colorThreads = 6;
+    }
+    if (decoderConfig.colorFrameDelay != 2 &&
+        decoderConfig.colorFrameDelay != 3) {
+        decoderConfig.colorFrameDelay = 2;
+    }
+#endif
+    WebmInMemoryDemuxer demuxer(fetched, decoderConfig);
     std::string error;
     if (!demuxer.init(&error)) {
         LOGE("Failed to init demuxer: %s", error.c_str());
@@ -525,6 +552,13 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
         return;
     }
     LOGI("Demuxer initialized: video %dx%d", demuxer.width(), demuxer.height());
+    {
+        std::lock_guard<std::mutex> lock(flS.decoderDiagnosticsMutex);
+        flS.colorDecoderName = demuxer.color_decoder_name();
+        flS.colorDecoderHardware = demuxer.color_decoder_is_hardware();
+        flS.colorDecoderFallbackReason =
+            demuxer.color_decoder_fallback_reason();
+    }
     flS.audioAvailable.store(demuxer.has_audio(), std::memory_order_release);
     flS.audioSampleRate.store(demuxer.audio_sample_rate(), std::memory_order_release);
 
@@ -570,8 +604,22 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
                 const bool collectTiming =
                     performanceTiming_ && performanceTiming_->IsEnabled();
                 DecodeInvocationTiming decodeTiming;
-                const bool decoded = demuxer.decode_next_frame(
-                    *(s.frame), collectTiming ? &decodeTiming : nullptr);
+                bool decoded = false;
+                try {
+                    decoded = demuxer.decode_next_frame(
+                        *(s.frame), collectTiming ? &decodeTiming : nullptr);
+                } catch (const std::exception& exception) {
+                    flC.errorMessage =
+                        "Video decoder failed: " + std::string(exception.what());
+                    LOGE("%s", flC.errorMessage.c_str());
+                    flC.writerRunning.store(false, std::memory_order_release);
+                    break;
+                } catch (...) {
+                    flC.errorMessage = "Video decoder failed with an unknown error";
+                    LOGE("%s", flC.errorMessage.c_str());
+                    flC.writerRunning.store(false, std::memory_order_release);
+                    break;
+                }
                 if (collectTiming) {
                     const auto record = [&](PerformanceSubsystem subsystem,
                                             double milliseconds) {
@@ -586,6 +634,9 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
                     record(
                         PerformanceSubsystem::ColorCopy,
                         decodeTiming.colorCopyMilliseconds);
+                    record(
+                        PerformanceSubsystem::ColorHardwareOutputWait,
+                        decodeTiming.colorHardwareOutputWaitMilliseconds);
                     record(
                         PerformanceSubsystem::AlphaDecode,
                         decodeTiming.alphaCodecMilliseconds);

@@ -33,6 +33,14 @@ struct VipeDataset {
     int frameCount = 0;
     int frameRateNumerator = 0;
     int frameRateDenominator = 1;
+    std::string colorDecodeProfile;
+    std::string colorCodecProfile;
+    int colorBitDepth = 0;
+    std::string colorPixelFormat;
+    std::string colorPrimaries;
+    std::string colorTransfer;
+    std::string colorMatrix;
+    std::string colorRange;
     float depthUnitsPerMetre = 0.0f;
     uint16_t invalidDepthValue = 0;
     std::string depthCodec;

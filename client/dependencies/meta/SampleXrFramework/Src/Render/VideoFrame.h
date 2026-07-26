@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "DynamicCellCullingData.h"
@@ -11,6 +12,12 @@
  * All planes are tightly packed (row stride == width for each plane).
  */
 struct VideoFrame {
+    struct PlaneView {
+        const uint8_t* data = nullptr;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        int stride = 0;
+    };
     int frameIndex = -1;
     // --- COLOR DATA (YUV) ---
     std::vector<uint8_t> textureYData;
@@ -25,6 +32,13 @@ struct VideoFrame {
     uint32_t textureVWidth = 0;
     uint32_t textureVHeight = 0;
     int textureVStride = 0;
+    // Keeps decoder-owned color planes alive until this ring entry has been
+    // uploaded. This avoids a decoder-thread Y/U/V copy.
+    std::shared_ptr<void> colorPlaneOwner;
+    std::array<PlaneView, 3> colorPlaneViews{};
+    // Android MediaCodec output. The renderer imports the AImage's private
+    // hardware buffer and releases this owner after its GL fence.
+    std::shared_ptr<void> hardwareColorImage;
 
     // --- ALPHA DATA ---
     std::vector<uint8_t> textureAlphaData;

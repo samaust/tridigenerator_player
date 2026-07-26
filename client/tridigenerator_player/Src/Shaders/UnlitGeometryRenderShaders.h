@@ -56,6 +56,7 @@ static const char* UnlitGeometryFragmentShaderSrc = R"glsl(
 uniform sampler2D u_texY;
 uniform sampler2D u_texU;
 uniform sampler2D u_texV;
+uniform lowp int u_colorIsRgb;
 	uniform highp usampler2D u_texAlpha;
 	uniform highp usampler2D u_texDepth;
 	uniform highp int u_maskVisibility[256];
@@ -116,10 +117,15 @@ void main()
         texture(u_texDepth, oTexCoord).r == uint(0)) discard;
 
 	// Get color value from YUV textures
-	float y = texture(u_texY, oTexCoord).r;
-	float u = texture(u_texU, oTexCoord).r;
-	float v = texture(u_texV, oTexCoord).r;
-	vec3 rgb = srgb_to_linear(yuv_to_rgb(y, u, v));
+	vec3 rgb;
+	if (u_colorIsRgb != 0) {
+	    rgb = srgb_to_linear(texture(u_texY, oTexCoord).rgb);
+	} else {
+	    float y = texture(u_texY, oTexCoord).r;
+	    float u = texture(u_texU, oTexCoord).r;
+	    float v = texture(u_texV, oTexCoord).r;
+	    rgb = srgb_to_linear(yuv_to_rgb(y, u, v));
+	}
 
 	// u_lightParams is authored as rows in OVR::Matrix4f. GLSL matrix
 	// subscripting returns columns, so explicitly reconstruct those rows.

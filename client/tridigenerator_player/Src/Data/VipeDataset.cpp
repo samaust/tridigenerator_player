@@ -118,9 +118,10 @@ bool ParseVipeDataset(const std::string& jsonText, VipeDataset& dataset, std::st
     }
     VipeDataset parsed;
     if (!root["schema_version"].isInt() ||
-        (root["schema_version"].asInt() < 1 ||
-         root["schema_version"].asInt() > 3)) {
-        error = "Only ViPE manifest schema_version 1, 2, and 3 are supported";
+        root["schema_version"].asInt() != 4) {
+        error =
+            "This player requires ViPE manifest schema_version 4. "
+            "Re-encode this dataset with the quest_av1_fast_v1 color profile.";
         return false;
     }
     parsed.schemaVersion = root["schema_version"].asInt();
@@ -163,21 +164,36 @@ bool ParseVipeDataset(const std::string& jsonText, VipeDataset& dataset, std::st
         return stream.isObject() && stream["index"].asInt() == index &&
             stream["codec"].asString() == codec && stream["pixel_format"].asString() == format;
     };
+    const Json::Value& colorStream = streams["color"];
     const Json::Value& depthStream = streams["depth"];
-    const bool legacyDepth =
-        streamMatches("depth", 2, "png", "gray16be");
-    const bool ffv1Depth =
-        parsed.schemaVersion >= 3 &&
-        streamMatches("depth", 2, "ffv1", "gray16le");
-    if (!streams.isObject() || !streamMatches("color", 0, "av1", "yuv420p") ||
+    const bool pngDepth = streamMatches("depth", 2, "png", "gray16be");
+    const bool ffv1Depth = streamMatches("depth", 2, "ffv1", "gray16le");
+    const bool validColor =
+        streamMatches("color", 0, "av1", "yuv420p") &&
+        colorStream["decode_profile"].asString() == "quest_av1_fast_v1" &&
+        colorStream["profile"].asString() == "Main" &&
+        colorStream["bit_depth"].asInt() == 8 &&
+        colorStream["color_primaries"].asString() == "bt709" &&
+        colorStream["color_transfer"].asString() == "bt709" &&
+        colorStream["color_matrix"].asString() == "bt709" &&
+        colorStream["color_range"].asString() == "limited";
+    if (!streams.isObject() || !validColor ||
         !streamMatches("mask", 1, "ffv1", "gray") ||
-        (!legacyDepth && !ffv1Depth)) {
+        (!pngDepth && !ffv1Depth)) {
         error =
-            "Manifest stream contract must use AV1 color, FFV1 gray mask, "
-            "and PNG gray16be depth (schemas 1-3) or FFV1 gray16le depth "
-            "(schema 3)";
+            "Schema 4 requires quest_av1_fast_v1 AV1 Main 8-bit yuv420p "
+            "BT.709 limited-range color, FFV1 gray mask, and PNG gray16be "
+            "or FFV1 gray16le depth. Re-encode this dataset.";
         return false;
     }
+    parsed.colorDecodeProfile = colorStream["decode_profile"].asString();
+    parsed.colorCodecProfile = colorStream["profile"].asString();
+    parsed.colorBitDepth = colorStream["bit_depth"].asInt();
+    parsed.colorPixelFormat = colorStream["pixel_format"].asString();
+    parsed.colorPrimaries = colorStream["color_primaries"].asString();
+    parsed.colorTransfer = colorStream["color_transfer"].asString();
+    parsed.colorMatrix = colorStream["color_matrix"].asString();
+    parsed.colorRange = colorStream["color_range"].asString();
     parsed.depthCodec = depthStream["codec"].asString();
     parsed.depthPixelFormat = depthStream["pixel_format"].asString();
     const Json::Value& audio = streams["audio"];
@@ -294,7 +310,7 @@ bool ParseVipeDataset(const std::string& jsonText, VipeDataset& dataset, std::st
             references["aggregation"].asString() != "sequence" ||
             !ReadColorReference(references["global"], parsed.colorReferences.global) ||
             !references["masks"].isObject()) {
-            error = "Schema versions 2 and 3 require valid sequence-aggregated linear_srgb color_reference metadata";
+            error = "Schema 4 requires valid sequence-aggregated linear_srgb color_reference metadata";
             return false;
         }
         parsed.colorReferences.colorSpace = "linear_srgb";

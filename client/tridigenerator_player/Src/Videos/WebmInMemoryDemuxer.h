@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <memory>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -20,10 +21,14 @@ extern "C" {
 
 #include "Render/VideoFrame.h"
 #include "AudioPcmBlock.h"
+#if defined(__ANDROID__)
+#include "AndroidMediaCodecColorDecoder.h"
+#endif
 
 struct DecodeInvocationTiming {
     double colorCodecMilliseconds = 0.0;
     double colorCopyMilliseconds = 0.0;
+    double colorHardwareOutputWaitMilliseconds = 0.0;
     double alphaCodecMilliseconds = 0.0;
     double alphaCopyMilliseconds = 0.0;
     double depthCodecMilliseconds = 0.0;
@@ -33,6 +38,12 @@ struct DecodeInvocationTiming {
 };
 
 struct DecoderThreadConfig {
+    // Quest benchmark values are 4, 6, and 0 (dav1d auto).
+    int colorThreads = 6;
+    // Benchmark 2 and 3; lower delay reduces latency and retained surfaces.
+    int colorFrameDelay = 2;
+    bool preferHardwareColor = true;
+    bool hardwareLowLatency = true;
     int alphaThreads = 2;
     int depthThreads = 2;
 };
@@ -91,6 +102,11 @@ public:
     bool has_audio() const { return audioStreamIndex_ >= 0 && audioCodecCtx_ != nullptr; }
     int audio_sample_rate() const { return audioOutputSampleRate_; }
     std::vector<AudioPcmBlock> take_audio_blocks();
+    const std::string& color_decoder_name() const { return colorDecoderName_; }
+    bool color_decoder_is_hardware() const { return colorDecoderHardware_; }
+    const std::string& color_decoder_fallback_reason() const {
+        return colorDecoderFallbackReason_;
+    }
 
 private:
     // Core initialization steps
@@ -107,6 +123,10 @@ private:
     bool get_next_dav1d_picture(
         VideoFrame& outFrame,
         DecodeInvocationTiming* timing);
+    bool get_next_color_picture(
+        VideoFrame& outFrame,
+        DecodeInvocationTiming* timing);
+    bool submit_color_packet(const AVPacket* packet);
 
     // Convert Dav1dPicture → tightly packed YUV420 buffers
     void decode_audio_packet(const AVPacket* pkt);
@@ -143,6 +163,12 @@ private:
     // --- DECODER CONTEXTS ---
     // dav1d for AV1 color stream
     Dav1dContext* dav1dCtx_ = nullptr;
+#if defined(__ANDROID__)
+    std::unique_ptr<AndroidMediaCodecColorDecoder> mediaCodecColorDecoder_;
+#endif
+    std::string colorDecoderName_ = "dav1d";
+    std::string colorDecoderFallbackReason_;
+    bool colorDecoderHardware_ = false;
     // FFmpeg AVCodec for FFV1 alpha stream
     AVCodecContext* alphaCodecCtx_ = nullptr;
     // FFmpeg AVCodec for PNG depth stream

@@ -97,7 +97,7 @@ This single-frame example shows the complete structure accepted by the player:
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 4,
   "file": "example.mkv",
   "sequence": "example",
   "frame_count": 1,
@@ -113,7 +113,18 @@ This single-frame example shows the complete structure accepted by the player:
     "roll": 0.0
   },
   "streams": {
-    "color": {"index": 0, "codec": "av1", "pixel_format": "yuv420p"},
+    "color": {
+      "index": 0,
+      "codec": "av1",
+      "decode_profile": "quest_av1_fast_v1",
+      "profile": "Main",
+      "bit_depth": 8,
+      "pixel_format": "yuv420p",
+      "color_primaries": "bt709",
+      "color_transfer": "bt709",
+      "color_matrix": "bt709",
+      "color_range": "limited"
+    },
     "mask": {"index": 1, "codec": "ffv1", "pixel_format": "gray"},
     "depth": {"index": 2, "codec": "png", "pixel_format": "gray16be"},
     "audio": {"index": 3, "codec": "aac", "sample_rate": 44100, "channels": 2}
@@ -315,8 +326,15 @@ Android retains HTTP loading. The configured server must expose `/catalog.json`:
 
 Each manifest's `file` is resolved relative to its manifest URL. See
 [ViPE encoded data format](#vipe-encoded-data-format) for the Matroska stream contract and
-manifest fields. New preprocessing output uses schema v2; legacy schema-v1 manifests play without
-color matching.
+manifest fields. The player requires schema v4; older assets must be re-encoded
+with the `quest_av1_fast_v1` profile.
+
+Quest benchmark builds use the vendor AV1 decoder by default. Benchmark
+overrides can be set before launch with Android properties:
+`debug.tridi.color_decoder=auto|software`,
+`debug.tridi.av1_low_latency=0|1`,
+`debug.tridi.dav1d_threads=0|4|6`, and
+`debug.tridi.dav1d_frame_delay=2|3`.
 
 ### Input controls
 
