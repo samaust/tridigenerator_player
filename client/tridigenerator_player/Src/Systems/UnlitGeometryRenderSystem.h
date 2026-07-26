@@ -50,12 +50,12 @@ public:
             UnlitGeometryRenderState &ugrS);
     void UpdateGl8Texture(
             OVRFW::GlTexture texture, GLenum format,
-            const uint8_t* textureData,
+            const void* textureData,
             int unpack_alignment,
             int stride);
     void UpdateGl16Texture(
             OVRFW::GlTexture texture, GLenum format,
-            const uint16_t* textureData,
+            const void* textureData,
             int unpack_alignment,
             int stride);
     void UpdateEnvironmentDepthUniforms(

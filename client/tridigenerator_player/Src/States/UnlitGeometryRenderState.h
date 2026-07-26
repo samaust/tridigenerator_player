@@ -1,7 +1,9 @@
 #pragma once
 
-#include <string>
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "OVR_Math.h"
 
@@ -25,6 +27,11 @@ struct UnlitGeometryRenderState {
     uint32_t meshWidth_ = 2;
     uint32_t meshHeight_ = 2;
     bool depthTextureReady_ = false;
+
+    static constexpr size_t UploadPboCount = 3;
+    std::array<unsigned, UploadPboCount> uploadPbos_{};
+    size_t nextUploadPbo_ = 0;
+    bool pboFailureLogged_ = false;
 
     // Shader programs (limited-range and full-range YUV)
     OVRFW::GlProgram ProgramLimited_;

@@ -36,6 +36,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 
 #include "UnlitGeometryRenderSystem.h"
 
@@ -82,6 +83,102 @@ const std::vector<uint16_t>* PreparedDepthPixels(
         return &frame.textureDepthData;
     }
     return nullptr;
+}
+
+struct TextureUploadSlice {
+    size_t offset = 0;
+    size_t size = 0;
+};
+
+constexpr size_t AlignUploadOffset(size_t value) {
+    constexpr size_t alignment = 8;
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+bool StageFrameTextureUpload(
+        const VideoFrame& frame,
+        const std::vector<uint16_t>& depthData,
+        UnlitGeometryRenderState& renderState,
+        std::array<TextureUploadSlice, 5>& slices) {
+    const std::array<const void*, 5> sources{
+        frame.textureYData.data(),
+        frame.textureUData.data(),
+        frame.textureVData.data(),
+        frame.textureAlphaData.data(),
+        depthData.data()};
+    const std::array<size_t, 5> availableBytes{
+        frame.textureYData.size(),
+        frame.textureUData.size(),
+        frame.textureVData.size(),
+        frame.textureAlphaData.size(),
+        depthData.size() * sizeof(uint16_t)};
+    const std::array<size_t, 5> requiredBytes{
+        static_cast<size_t>(frame.textureYWidth) * frame.textureYHeight,
+        static_cast<size_t>(frame.textureUWidth) * frame.textureUHeight,
+        static_cast<size_t>(frame.textureVWidth) * frame.textureVHeight,
+        static_cast<size_t>(frame.textureAlphaWidth) * frame.textureAlphaHeight,
+        static_cast<size_t>(renderState.meshWidth_) *
+            renderState.meshHeight_ * sizeof(uint16_t)};
+
+    size_t totalBytes = 0;
+    for (size_t plane = 0; plane < slices.size(); ++plane) {
+        if (availableBytes[plane] < requiredBytes[plane]) return false;
+        totalBytes = AlignUploadOffset(totalBytes);
+        slices[plane] = {totalBytes, requiredBytes[plane]};
+        totalBytes += requiredBytes[plane];
+    }
+    if (totalBytes == 0) return false;
+
+    if (renderState.uploadPbos_[0] == 0) {
+        glGenBuffers(
+            static_cast<GLsizei>(renderState.uploadPbos_.size()),
+            renderState.uploadPbos_.data());
+        for (unsigned pbo : renderState.uploadPbos_) {
+            if (pbo == 0) {
+                glDeleteBuffers(
+                    static_cast<GLsizei>(renderState.uploadPbos_.size()),
+                    renderState.uploadPbos_.data());
+                renderState.uploadPbos_.fill(0);
+                return false;
+            }
+        }
+        LOGI(
+            "Created %zu-buffer asynchronous texture upload ring",
+            renderState.uploadPbos_.size());
+    }
+
+    const unsigned pbo =
+        renderState.uploadPbos_[renderState.nextUploadPbo_];
+    renderState.nextUploadPbo_ =
+        (renderState.nextUploadPbo_ + 1) %
+        renderState.uploadPbos_.size();
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+    glBufferData(
+        GL_PIXEL_UNPACK_BUFFER,
+        static_cast<GLsizeiptr>(totalBytes),
+        nullptr,
+        GL_STREAM_DRAW);
+    void* mapped = glMapBufferRange(
+        GL_PIXEL_UNPACK_BUFFER,
+        0,
+        static_cast<GLsizeiptr>(totalBytes),
+        GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+    if (mapped == nullptr) {
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        return false;
+    }
+    auto* destination = static_cast<uint8_t*>(mapped);
+    for (size_t plane = 0; plane < slices.size(); ++plane) {
+        std::memcpy(
+            destination + slices[plane].offset,
+            sources[plane],
+            slices[plane].size);
+    }
+    if (glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER) != GL_TRUE) {
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -286,6 +383,12 @@ void UnlitGeometryRenderSystem::Shutdown(EntityManager& ecs) {
         OVRFW::GlProgram::Free(ugrS.ProgramLimited_);
         OVRFW::GlProgram::Free(ugrS.ProgramFullRange_);
         OVRFW::FreeTexture(ugrS.datasetReferenceTexture_);
+        glDeleteBuffers(
+            static_cast<GLsizei>(ugrS.uploadPbos_.size()),
+            ugrS.uploadPbos_.data());
+        ugrS.uploadPbos_.fill(0);
+        ugrS.nextUploadPbo_ = 0;
+        ugrS.pboFailureLogged_ = false;
         ugrS.ProgramLimited_ = {};
         ugrS.ProgramFullRange_ = {};
         ugrS.currentSurfaceSet_ = 0;
@@ -748,27 +851,53 @@ void UnlitGeometryRenderSystem::UpdateTextures(
     // Swap the current surface set index to point to the other set.
     ugrS.currentSurfaceSet_ = (ugrS.currentSurfaceSet_ + 1) % 2;
 
-    // UPLOAD ALL TEXTURES
-    UpdateGl8Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_Y], GL_RED,
-                    (*framePtr)->textureYData.data(),
-                    ugrC.texture_unpack_alignments_[TEX_Y],
-                    (*framePtr)->textureYStride);
-    UpdateGl8Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_U], GL_RED,
-                    (*framePtr)->textureUData.data(),
-                    ugrC.texture_unpack_alignments_[TEX_U],
-                    (*framePtr)->textureUStride);
-    UpdateGl8Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_V], GL_RED,
-                    (*framePtr)->textureVData.data(),
-                    ugrC.texture_unpack_alignments_[TEX_V],
-                    (*framePtr)->textureVStride);
-    UpdateGl8Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_ALPHA], GL_RED_INTEGER,
-                    (*framePtr)->textureAlphaData.data(),
-                    ugrC.texture_unpack_alignments_[TEX_ALPHA],
-                    (*framePtr)->textureAlphaStride);
-    UpdateGl16Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_DEPTH], GL_RED_INTEGER,
-                    depthData->data(),
-                    ugrC.texture_unpack_alignments_[TEX_DEPTH],
-                    0);
+    std::array<TextureUploadSlice, 5> slices;
+    const bool staged = StageFrameTextureUpload(
+        **framePtr, *depthData, ugrS, slices);
+    if (!staged && !ugrS.pboFailureLogged_) {
+        LOGW("PBO texture staging failed; using direct uploads");
+        ugrS.pboFailureLogged_ = true;
+    }
+    const auto uploadAddress = [&](size_t plane, const void* direct) {
+        return staged
+            ? reinterpret_cast<const void*>(
+                static_cast<uintptr_t>(slices[plane].offset))
+            : direct;
+    };
+
+    UpdateGl8Texture(
+        ugrS.textures_[ugrS.currentSurfaceSet_][TEX_Y],
+        GL_RED,
+        uploadAddress(0, (*framePtr)->textureYData.data()),
+        ugrC.texture_unpack_alignments_[TEX_Y],
+        (*framePtr)->textureYStride);
+    UpdateGl8Texture(
+        ugrS.textures_[ugrS.currentSurfaceSet_][TEX_U],
+        GL_RED,
+        uploadAddress(1, (*framePtr)->textureUData.data()),
+        ugrC.texture_unpack_alignments_[TEX_U],
+        (*framePtr)->textureUStride);
+    UpdateGl8Texture(
+        ugrS.textures_[ugrS.currentSurfaceSet_][TEX_V],
+        GL_RED,
+        uploadAddress(2, (*framePtr)->textureVData.data()),
+        ugrC.texture_unpack_alignments_[TEX_V],
+        (*framePtr)->textureVStride);
+    UpdateGl8Texture(
+        ugrS.textures_[ugrS.currentSurfaceSet_][TEX_ALPHA],
+        GL_RED_INTEGER,
+        uploadAddress(3, (*framePtr)->textureAlphaData.data()),
+        ugrC.texture_unpack_alignments_[TEX_ALPHA],
+        (*framePtr)->textureAlphaStride);
+    UpdateGl16Texture(
+        ugrS.textures_[ugrS.currentSurfaceSet_][TEX_DEPTH],
+        GL_RED_INTEGER,
+        uploadAddress(4, depthData->data()),
+        ugrC.texture_unpack_alignments_[TEX_DEPTH],
+        0);
+    if (staged) {
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    }
 }
 
 /**
@@ -787,7 +916,7 @@ void UnlitGeometryRenderSystem::UpdateTextures(
  */
 void UnlitGeometryRenderSystem::UpdateGl8Texture(
        OVRFW::GlTexture texture, GLenum format,
-       const uint8_t* textureData, int unpack_alignment, int stride = 0) {
+       const void* textureData, int unpack_alignment, int stride = 0) {
     if (unpack_alignment != 4)
     {
         glPixelStorei(GL_UNPACK_ALIGNMENT, unpack_alignment);
@@ -837,7 +966,7 @@ void UnlitGeometryRenderSystem::UpdateGl8Texture(
  */
 void UnlitGeometryRenderSystem::UpdateGl16Texture(
        OVRFW::GlTexture texture, GLenum format,
-       const uint16_t* textureData, int unpack_alignment, int stride = 0) {
+       const void* textureData, int unpack_alignment, int stride = 0) {
     if (unpack_alignment != 4)
     {
         glPixelStorei(GL_UNPACK_ALIGNMENT, unpack_alignment);
