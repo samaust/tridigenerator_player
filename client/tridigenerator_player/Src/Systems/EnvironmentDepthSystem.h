@@ -20,7 +20,10 @@ public:
     void SessionInit(EntityManager& ecs, XrSession session);
     void SessionEnd(EntityManager& ecs);
 
-    void Update(EntityManager& ecs, const OVRFW::ovrApplFrameIn& in);
+    void Update(
+        EntityManager& ecs,
+        const OVRFW::ovrApplFrameIn& in,
+        bool contentVisible);
 
 private:
     XrInstance instance_ = XR_NULL_HANDLE;

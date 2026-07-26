@@ -23,9 +23,14 @@ int main() {
     assert(IsFrameFresh(900000000, 1000000000, 0.25f));
     assert(!IsFrameFresh(500000000, 1000000000, 0.25f));
     assert(!IsFrameFresh(1100000000, 1000000000, 0.25f));
-    assert(ShouldProcessUpdate(1.0, 0.0, 10.0f));
-    assert(!ShouldProcessUpdate(1.05, 1.0, 10.0f));
-    assert(ShouldProcessUpdate(1.1, 1.0, 10.0f));
+    assert(ShouldProcessUpdate(1.0, 0.0, 5.0f));
+    assert(!ShouldProcessUpdate(1.19, 1.0, 5.0f));
+    assert(ShouldProcessUpdate(1.21, 1.0, 5.0f));
     assert(!ShouldProcessUpdate(2.0, 1.0, 0.0f));
+
+    FpsRange selected{};
+    assert(SelectExactFpsRange({{15, 30}, {30, 30}, {15, 15}}, 15, selected));
+    assert(selected.minimum == 15 && selected.maximum == 15);
+    assert(!SelectExactFpsRange({{15, 30}, {30, 30}}, 15, selected));
     return 0;
 }

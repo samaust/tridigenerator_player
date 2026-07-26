@@ -27,3 +27,13 @@ void MaskVisibility::ShowAll() {
 void MaskVisibility::HideAll() {
     visibility_.fill(0);
 }
+
+bool MaskVisibility::HasVisibleEntries() const {
+    // An empty manifest predates labelled masks, so retain the historical
+    // behavior and render it. Otherwise only listed dataset masks constitute
+    // visible content.
+    if (entries_.empty()) return true;
+    return std::any_of(entries_.begin(), entries_.end(), [&](const auto& entry) {
+        return IsVisible(entry.id);
+    });
+}

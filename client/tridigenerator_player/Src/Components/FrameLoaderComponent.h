@@ -20,7 +20,7 @@ struct FrameLoaderComponent {
     VipeCatalog catalog;
     std::string selectedDatasetId;
     std::string errorMessage;
-    bool paused = false;
+    std::atomic<bool> paused{false};
 
     std::atomic<bool> looping{true};
     std::atomic<bool> writerRunning{false};
@@ -49,7 +49,7 @@ struct FrameLoaderComponent {
     selectedDatasetId(std::move(other.selectedDatasetId)),
     errorMessage(std::move(other.errorMessage))
     {
-        paused = other.paused;
+        paused.store(other.paused.load());
         // Manually move atomic values by loading from source and storing to destination
         looping.store(other.looping.load());
         writerRunning.store(other.writerRunning.load());
@@ -72,7 +72,7 @@ struct FrameLoaderComponent {
             catalog = std::move(other.catalog);
             selectedDatasetId = std::move(other.selectedDatasetId);
             errorMessage = std::move(other.errorMessage);
-            paused = other.paused;
+            paused.store(other.paused.load());
             // Manually move atomic values
             looping.store(other.looping.load());
             writerRunning.store(other.writerRunning.load());
@@ -101,9 +101,12 @@ inline void swap(FrameLoaderComponent& a, FrameLoaderComponent& b) noexcept {
     swap(a.catalog, b.catalog);
     swap(a.selectedDatasetId, b.selectedDatasetId);
     swap(a.errorMessage, b.errorMessage);
-    swap(a.paused, b.paused);
-
     // Manually swap the atomic members by loading and storing their values
+    bool pausedA = a.paused.load();
+    bool pausedB = b.paused.load();
+    a.paused.store(pausedB);
+    b.paused.store(pausedA);
+
     bool loopingA = a.looping.load();
     bool loopingB = b.looping.load();
     a.looping.store(loopingB);

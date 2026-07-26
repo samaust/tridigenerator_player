@@ -37,6 +37,15 @@
 static constexpr int RING_SIZE = 8;
 static constexpr size_t MAX_AUDIO_SAMPLES = 48000 * 2 * 2;
 
+static void NotifyWriter(FrameLoaderState& state) {
+    // Synchronize with the writer's predicate check so a state change cannot
+    // occur between that check and the writer entering its indefinite wait.
+    {
+        std::lock_guard<std::mutex> lock(state.writerMutex);
+    }
+    state.writerCv.notify_one();
+}
+
 static void ResetAudioState(FrameLoaderState& state) {
     std::lock_guard<std::mutex> lock(state.audioMutex);
     state.audioQueue.clear();
@@ -198,7 +207,8 @@ void FrameLoaderSystem::Update(EntityManager& ecs, double nowSeconds) {
                      FrameLoaderState &flS) {
         // Save framePtr to component state for use in rendering
         // based on fps and newReadTime
-        if (ShouldConsumePlaybackFrame(flC.paused)) {
+        if (ShouldConsumePlaybackFrame(
+                flC.paused.load(std::memory_order_acquire))) {
             SwapNextFrame(nowSeconds,flC, flS);
         }
     });
@@ -404,7 +414,7 @@ void FrameLoaderSystem::StopBackgroundWriter(FrameLoaderComponent& flC,
         // not running
         return;
     }
-    flS.writerCv.notify_all();
+    NotifyWriter(flS);
     if (flS.writerThread.joinable()) flS.writerThread.join();
 }
 
@@ -447,27 +457,31 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
     flS.audioSampleRate.store(demuxer.audio_sample_rate(), std::memory_order_release);
 
     while (flC.writerRunning.load(std::memory_order_relaxed)) {
-        // Wait until there is at least one free slot (or stop)
+        // Sleep until an actual state transition makes work possible. In
+        // particular, do not periodically wake while playback is paused or
+        // while the ring is full.
         {
             std::unique_lock<std::mutex> lk(flS.writerMutex);
-            flS.writerCv.wait_for(lk, std::chrono::milliseconds(10), [&]() {
-                return !flC.writerRunning.load(std::memory_order_relaxed) || ComputeFreeSlots(flS) > 0;
+            flS.writerCv.wait(lk, [&]() {
+                return ShouldWakeFrameWriter(
+                    flC.writerRunning.load(std::memory_order_acquire),
+                    flC.paused.load(std::memory_order_acquire),
+                    ComputeFreeSlots(flS));
             });
         }
-        if (!flC.writerRunning.load(std::memory_order_relaxed)) break;
+        if (!flC.writerRunning.load(std::memory_order_acquire)) break;
 
-        // Re-check free slots
+        // Re-check both conditions after releasing the condition-variable
+        // mutex. Pause can change while a decode is in flight.
+        if (flC.paused.load(std::memory_order_acquire)) continue;
         int freeSlots = ComputeFreeSlots(flS);
-        if (freeSlots == 0) {
-            // nothing to do
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
+        if (freeSlots == 0) continue;
 
         // Optionally limit how many frames we'll prefetch per loop to avoid hogging network
         int toFetch = std::min(freeSlots, TARGET_FILL);
 
         for (int i = 0; i < toFetch && flC.writerRunning.load(std::memory_order_relaxed); ++i) {
+            if (flC.paused.load(std::memory_order_acquire)) break;
             // Before fetching, check again to avoid racing with reader
             freeSlots = ComputeFreeSlots(flS);
             if (freeSlots == 0) break;
@@ -508,6 +522,13 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
                     ResetAudioState(flS);
                     flS.audioAvailable.store(demuxer.has_audio(), std::memory_order_release);
                     continue;
+                }
+                if (flC.paused.load(std::memory_order_acquire)) {
+                    // A pause may arrive during decode. Drain decoder-owned
+                    // audio without maintaining the playback queue, and leave
+                    // the slot unpublished.
+                    demuxer.take_audio_blocks();
+                    break;
                 }
                 bool prepared = false;
                 {
@@ -691,18 +712,25 @@ void FrameLoaderSystem::SetFPS(double newFps, FrameLoaderComponent& flC, FrameLo
 void FrameLoaderSystem::SetPaused(
         bool paused, double nowSeconds,
         FrameLoaderComponent& flC, FrameLoaderState& flS) {
-    const bool wasPaused = flC.paused;
+    const bool wasPaused = flC.paused.load(std::memory_order_acquire);
     if (wasPaused == paused) return;
-    flC.paused = paused;
-    std::lock_guard<std::mutex> lock(flS.timingMutex);
-    flS.nextReadTime = PlaybackDeadlineAfterPauseChange(
-        wasPaused, paused, nowSeconds, flS.nextReadTime);
+    flC.paused.store(paused, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(flS.timingMutex);
+        flS.nextReadTime = PlaybackDeadlineAfterPauseChange(
+            wasPaused, paused, nowSeconds, flS.nextReadTime);
+    }
+    NotifyWriter(flS);
     LOGI("Video playback %s", paused ? "paused" : "resumed");
 }
 
 void FrameLoaderSystem::TogglePaused(
         double nowSeconds, FrameLoaderComponent& flC, FrameLoaderState& flS) {
-    SetPaused(!flC.paused, nowSeconds, flC, flS);
+    SetPaused(
+        !flC.paused.load(std::memory_order_acquire),
+        nowSeconds,
+        flC,
+        flS);
 }
 
 /**
@@ -757,7 +785,7 @@ bool FrameLoaderSystem::SwapNextFrame(
             flS.ring[currentReadSlot].ready.store(false, std::memory_order_release);
             currentReadSlot = (currentReadSlot + 1) % RING_SIZE;
             flS.readIdx.store(currentReadSlot, std::memory_order_release);
-            flS.writerCv.notify_one();
+            NotifyWriter(flS);
         }
         if (!flS.ring[currentReadSlot].ready.load(std::memory_order_acquire)) return false;
         const VideoFrame* candidate = flS.ring[currentReadSlot].frame;
@@ -780,7 +808,7 @@ bool FrameLoaderSystem::SwapNextFrame(
     flS.readIdx.store((currentReadSlot + 1) % RING_SIZE, std::memory_order_release);
 
     // Notify the writer thread that a slot has become free.
-    flS.writerCv.notify_one();
+    NotifyWriter(flS);
 
     // Return true to signal that a new frame has been "consumed" and *framePtr is valid.
     return true;

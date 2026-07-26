@@ -44,14 +44,16 @@ void AudioSystem::Update(EntityManager& ecs) {
     state_.store(state, std::memory_order_release);
     if (!stream_ || !component || !state) return;
 
+    const bool paused =
+        component->paused.load(std::memory_order_acquire);
     bool hasQueuedAudio = false;
-    {
+    if (!paused) {
         std::lock_guard<std::mutex> lock(state->audioMutex);
         hasQueuedAudio = !state->audioQueue.empty();
     }
     const bool shouldRun =
         state->audioAvailable.load(std::memory_order_acquire) &&
-        hasQueuedAudio && !component->paused;
+        hasQueuedAudio && !paused;
     if (shouldRun && !running_) {
         if (AAudioStream_requestStart(stream_) == AAUDIO_OK) {
             running_ = true;

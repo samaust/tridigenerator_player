@@ -15,6 +15,26 @@ enum class LightEstimateTier : int {
     Spatial = 2,
 };
 
+enum class CameraPipelineMode : int {
+    Unavailable = 0,
+    RawExternalYuv = 1,
+    CpuYuvPlanes = 2,
+};
+
+struct CameraCaptureDiagnostics {
+    CameraPipelineMode pipeline = CameraPipelineMode::Unavailable;
+    uint64_t callbackCount = 0;
+    uint64_t processedCount = 0;
+    uint64_t supersededFrameCount = 0;
+    uint64_t queuePressureDrops = 0;
+    uint64_t bytesCopied = 0;
+    float latestFrameAgeMs = 0.0f;
+    float callbackP50Ms = 0.0f;
+    float callbackP95Ms = 0.0f;
+    float importP50Ms = 0.0f;
+    float importP95Ms = 0.0f;
+};
+
 struct CameraLightEstimationState {
     static constexpr int GridWidth = 16;
     static constexpr int GridHeight = 12;
@@ -22,6 +42,7 @@ struct CameraLightEstimationState {
 
     std::shared_ptr<CameraLightEstimationPlatformState> platform;
     unsigned int lightFieldTexture = 0;
+    unsigned int lightFieldScratchTexture = 0;
     unsigned int computeProgram = 0;
     unsigned int cameraTextures[3] = {0, 0, 0};
     int cameraTextureWidths[3] = {0, 0, 0};
@@ -48,4 +69,5 @@ struct CameraLightEstimationState {
     double lastDispatchSeconds = 0.0;
     bool cameraCalibrationValid = false;
     bool texturesReady = false;
+    CameraCaptureDiagnostics captureDiagnostics;
 };

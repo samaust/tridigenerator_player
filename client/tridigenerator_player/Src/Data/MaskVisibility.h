@@ -22,6 +22,7 @@ public:
     void SetVisible(uint8_t id, bool visible) { visibility_[id] = visible ? 1 : 0; }
     void ShowAll();
     void HideAll();
+    bool HasVisibleEntries() const;
     int* ShaderValues() { return visibility_.data(); }
     const int* ShaderValues() const { return visibility_.data(); }
 

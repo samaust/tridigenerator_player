@@ -19,6 +19,8 @@ void Expect(bool condition, const char* message) {
 
 int main() {
     MaskVisibility defaults;
+    Expect(defaults.HasVisibleEntries(),
+        "unlabelled legacy datasets remain renderable");
     for (int id = 0; id < 256; ++id) {
         Expect(defaults.IsVisible(static_cast<uint8_t>(id)),
             "default model makes every ID visible");
@@ -42,10 +44,12 @@ int main() {
     Expect(visibility.IsVisible(0), "background can be restored");
 
     visibility.HideAll();
+    Expect(!visibility.HasVisibleEntries(), "no listed mask remains renderable");
     for (int id = 0; id < 256; ++id) {
         Expect(!visibility.IsVisible(static_cast<uint8_t>(id)), "HideAll hides every ID");
     }
     visibility.ShowAll();
+    Expect(visibility.HasVisibleEntries(), "shown masks remain renderable");
     for (int id = 0; id < 256; ++id) {
         Expect(visibility.IsVisible(static_cast<uint8_t>(id)), "ShowAll shows every ID");
     }

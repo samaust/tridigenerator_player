@@ -12,6 +12,7 @@ struct EnvironmentDepthState {
     static constexpr int kNumEyes = 2;
 
     bool IsInitialized = false;
+    bool IsRunning = false;
     bool HasDepth = false;
 
     uint32_t SwapchainLength = 0;

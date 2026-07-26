@@ -5,10 +5,15 @@
 
 int main() {
     FrameLoaderComponent loader;
-    assert(!loader.paused);
-    assert(ShouldConsumePlaybackFrame(loader.paused));
-    loader.paused = true;
-    assert(!ShouldConsumePlaybackFrame(loader.paused));
+    assert(!loader.paused.load());
+    assert(ShouldConsumePlaybackFrame(loader.paused.load()));
+    loader.paused.store(true);
+    assert(!ShouldConsumePlaybackFrame(loader.paused.load()));
+
+    assert(ShouldWakeFrameWriter(false, true, 0));
+    assert(!ShouldWakeFrameWriter(true, true, 1));
+    assert(!ShouldWakeFrameWriter(true, false, 0));
+    assert(ShouldWakeFrameWriter(true, false, 1));
 
     constexpr uint32_t buttonA = 1u << 3;
     assert(ButtonPressedThisFrame(buttonA, 0, buttonA));

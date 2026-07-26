@@ -381,9 +381,10 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     performanceTimingStats_->BeginForegroundFrame();
     if (gpuTiming_) gpuTiming_->Poll();
     double nowSeconds = std::chrono::duration<double>(now.time_since_epoch()).count();
-    if (frameTimingStats_.AddFrame(now)) {
-        RefreshDiagnosticOverlay();
-    }
+    // Refresh the large TinyUI diagnostic label only when the performance
+    // window publishes below. Rebuilding it once here and again at the end of
+    // the same frame causes avoidable periodic GL-thread hitches.
+    frameTimingStats_.AddFrame(now);
 
     // if SkipInputHandling is True, we need to sync action sets ourselves
     // --- xrSyncAction
@@ -440,12 +441,20 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
     });
     transformSystem_->Update(*entityManager_);
     renderSystem_->Update(*entityManager_);
+    bool hasVisibleObjectContent = false;
+    entityManager_->ForEach<UnlitGeometryRenderComponent>(
+        [&](EntityID, UnlitGeometryRenderComponent& component) {
+            hasVisibleObjectContent =
+                hasVisibleObjectContent ||
+                component.maskVisibility_.HasVisibleEntries();
+        });
     {
         ScopedCpuTimer timer(
             performanceTimingStats_.get(),
             PerformanceSubsystem::EnvironmentDepth,
             true);
-        environmentDepthSystem_->Update(*entityManager_, in);
+        environmentDepthSystem_->Update(
+            *entityManager_, in, hasVisibleObjectContent);
     }
     {
         ScopedCpuTimer timer(
@@ -724,8 +733,11 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
         "Video decode        --     N/A\n"
         "Texture upload      --      --\n"
         "Rendering           --      --\n"
-        "Other update        --     N/A",
-        {1.02f, 0.18f, -1.48f}, {430.0f, 560.0f});
+        "Other update        --     N/A\n"
+        "Camera path: --\n"
+        "cb/processed/superseded/drop: --/--/--/--\n"
+        "age/cb95/import95: --/--/-- ms  copied: --",
+        {1.02f, 0.18f, -1.48f}, {520.0f, 680.0f});
     RefreshDiagnosticOverlay();
 #endif
 }
@@ -763,6 +775,18 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
     const auto gpu = [&](PerformanceSubsystem subsystem, bool applicable) {
         return metricText(subsystem, PerformanceDomain::Gpu, applicable);
     };
+    CameraCaptureDiagnostics cameraDiagnostics{};
+    if (entityManager_) {
+        entityManager_->ForEach<CameraLightEstimationState>(
+            [&](EntityID, CameraLightEstimationState& state) {
+                cameraDiagnostics = state.captureDiagnostics;
+            });
+    }
+    const char* cameraPath =
+        cameraDiagnostics.pipeline == CameraPipelineMode::RawExternalYuv
+            ? "RawExternalYuv" :
+        cameraDiagnostics.pipeline == CameraPipelineMode::CpuYuvPlanes
+            ? "CpuYuvPlanes" : "Unavailable";
 
     std::ostringstream text;
     if (frameTimingStats_.HasPublishedSample()) {
@@ -789,7 +813,18 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
          << "Rendering       " << cpu(PerformanceSubsystem::Rendering)
          << "  " << gpu(PerformanceSubsystem::Rendering, true) << "\n"
          << "Other update    " << cpu(PerformanceSubsystem::OtherUpdate)
-         << "  " << gpu(PerformanceSubsystem::OtherUpdate, false);
+         << "  " << gpu(PerformanceSubsystem::OtherUpdate, false) << "\n"
+         << "Camera path: " << cameraPath << "\n"
+         << "cb/processed/superseded/drop: "
+         << cameraDiagnostics.callbackCount << "/"
+         << cameraDiagnostics.processedCount << "/"
+         << cameraDiagnostics.supersededFrameCount << "/"
+         << cameraDiagnostics.queuePressureDrops << "\n"
+         << std::fixed << std::setprecision(2)
+         << "age/cb95/import95: " << cameraDiagnostics.latestFrameAgeMs << "/"
+         << cameraDiagnostics.callbackP95Ms << "/"
+         << cameraDiagnostics.importP95Ms << " ms  copied: "
+         << cameraDiagnostics.bytesCopied;
     diagnosticLabel_->SetText(text.str().c_str());
 }
 
@@ -823,7 +858,8 @@ void TDGenPlayerApp::TogglePlayback() {
 void TDGenPlayerApp::RefreshPlaybackControls() {
     if (!playbackButton_ || !entityManager_ || objectEntity_ == 0) return;
     const auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
-    const GLuint circularTexture = CreateCircularButtonTexture(loader.paused);
+    const GLuint circularTexture = CreateCircularButtonTexture(
+        loader.paused.load(std::memory_order_acquire));
     playbackButton_->SetSurfaceTextureTakeOwnership(
         0,
         0,

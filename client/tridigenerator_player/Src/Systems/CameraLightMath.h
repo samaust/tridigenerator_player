@@ -8,6 +8,7 @@
 namespace CameraLightMath {
 
 struct Rgb { float r, g, b; };
+struct FpsRange { int32_t minimum, maximum; };
 
 inline Rgb YuvToLinear(float y, float u, float v, bool fullRange) {
     const float d = u - 0.5f;
@@ -59,6 +60,20 @@ inline bool ShouldProcessUpdate(
     if (lastUpdateSeconds <= 0.0) return true;
     return nowSeconds - lastUpdateSeconds >=
         1.0 / static_cast<double>(updateRateHz);
+}
+
+inline bool SelectExactFpsRange(
+        const std::vector<FpsRange>& advertised,
+        int32_t requested,
+        FpsRange& selected) {
+    const auto it = std::find_if(
+        advertised.begin(), advertised.end(),
+        [requested](const FpsRange& range) {
+            return range.minimum == requested && range.maximum == requested;
+        });
+    if (it == advertised.end()) return false;
+    selected = *it;
+    return true;
 }
 
 } // namespace CameraLightMath

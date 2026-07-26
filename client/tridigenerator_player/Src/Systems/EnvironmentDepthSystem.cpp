@@ -173,6 +173,7 @@ void EnvironmentDepthSystem::SessionInit(EntityManager& ecs, XrSession session) 
                 return;
             }
             edS.IsInitialized = true;
+            edS.IsRunning = true;
 
             LOGI("Depth: provider+swapchain created (%ux%u, len=%u)",
                  edS.Width,
@@ -188,12 +189,44 @@ void EnvironmentDepthSystem::SessionEnd(EntityManager& ecs) {
         });
 }
 
-void EnvironmentDepthSystem::Update(EntityManager& ecs, const OVRFW::ovrApplFrameIn& in) {
+void EnvironmentDepthSystem::Update(
+        EntityManager& ecs,
+        const OVRFW::ovrApplFrameIn& in,
+        bool contentVisible) {
     ecs.ForEachMulti<CoreComponent, CoreState, EnvironmentDepthState>(
         [&](EntityID, CoreComponent& cC, CoreState& cS, EnvironmentDepthState& edS) {
             if (!cC.supportsDepth || !edS.IsInitialized || cS.EnvironmentDepthProvider == XR_NULL_HANDLE) {
                 edS.HasDepth = false;
                 return;
+            }
+            if (!contentVisible) {
+                edS.HasDepth = false;
+                if (edS.IsRunning &&
+                    cS.XrStopEnvironmentDepthProviderMETA != nullptr) {
+                    const XrResult result = OXR(
+                        cS.XrStopEnvironmentDepthProviderMETA(
+                            cS.EnvironmentDepthProvider));
+                    if (XR_SUCCEEDED(result)) {
+                        edS.IsRunning = false;
+                        LOGI("Depth: provider paused; no visible object content");
+                    }
+                }
+                return;
+            }
+            if (!edS.IsRunning) {
+                if (cS.XrStartEnvironmentDepthProviderMETA == nullptr) {
+                    edS.HasDepth = false;
+                    return;
+                }
+                const XrResult result = OXR(
+                    cS.XrStartEnvironmentDepthProviderMETA(
+                        cS.EnvironmentDepthProvider));
+                if (XR_FAILED(result)) {
+                    edS.HasDepth = false;
+                    return;
+                }
+                edS.IsRunning = true;
+                LOGI("Depth: provider resumed");
             }
             if (cS.XrAcquireEnvironmentDepthImageMETA == nullptr) {
                 edS.HasDepth = false;
@@ -246,9 +279,12 @@ void EnvironmentDepthSystem::DestroyDepthResources(CoreState& cS, EnvironmentDep
     edS.Width = 0;
     edS.Height = 0;
 
-    if (cS.EnvironmentDepthProvider != XR_NULL_HANDLE && cS.XrStopEnvironmentDepthProviderMETA != nullptr) {
+    if (edS.IsRunning &&
+        cS.EnvironmentDepthProvider != XR_NULL_HANDLE &&
+        cS.XrStopEnvironmentDepthProviderMETA != nullptr) {
         OXR(cS.XrStopEnvironmentDepthProviderMETA(cS.EnvironmentDepthProvider));
     }
+    edS.IsRunning = false;
     if (cS.EnvironmentDepthSwapchain != XR_NULL_HANDLE && cS.XrDestroyEnvironmentDepthSwapchainMETA != nullptr) {
         OXR(cS.XrDestroyEnvironmentDepthSwapchainMETA(cS.EnvironmentDepthSwapchain));
     }

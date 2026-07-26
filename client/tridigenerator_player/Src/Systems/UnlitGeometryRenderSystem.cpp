@@ -1125,7 +1125,8 @@ void UnlitGeometryRenderSystem::Render(EntityManager& ecs, std::vector<OVRFW::ov
             UnlitGeometryRenderComponent& ugrC,
             UnlitGeometryRenderState& ugrS) {
         // Get a reference to the graphics command of the ready surface.
-        if (!ugrS.depthTextureReady_) return;
+        if (!ugrS.depthTextureReady_ ||
+            !ugrC.maskVisibility_.HasVisibleEntries()) return;
         OVRFW::ovrSurfaceDef *surfaceDefToPush = &ugrS.surfaceDefs_[ugrS.currentSurfaceSet_];
 
         OVRFW::ovrGraphicsCommand &gc = surfaceDefToPush->graphicsCommand;

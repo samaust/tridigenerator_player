@@ -30,11 +30,14 @@ Camera2 NDK left passthrough RGB camera
         v
 AImageReader YUV_420_888 callback
         |
+        v
+AHardwareBuffer -> EGLImage -> raw external-YUV texture
+        |
         +-------------------------------+
         |                               |
         v                               v
-CPU global estimate             Environment depth + camera pose
-(tint and exposure)                     |
+Tiny async sample readback       Environment depth + camera pose
+CPU global estimator                    |
         |                               v
         |                       ES 3.1 compute shader
         |                       16 x 12 x 16 light field
@@ -94,7 +97,7 @@ configuration:
 | `requestedTier` | `Spatial` | Selects Disabled, Global, or Spatial as the maximum estimation tier. |
 | `diagnosticOverlay` | `false` | Reserved; no overlay currently consumes this field. |
 | `matchingStrength` | `1.0` | Multiplies the final fade amount in the render shader. |
-| `updateRateHz` | `10.0` | Maximum spatial compute dispatch rate. Global estimation is not rate-limited by this value. |
+| `updateRateHz` | `5.0` | Legacy/internal value; camera estimation is fixed at 5 Hz. |
 | `temporalSmoothing` | `0.85` | Fraction of the previous estimate retained during smoothing. |
 | `minExposure` / `maxExposure` | `0.05` / `2.0` | Bounds for the exposure multiplier. |
 | `minTint` / `maxTint` | `0.7` / `1.4` | Per-channel tint bounds. |
@@ -104,8 +107,11 @@ configuration:
 [`CameraLightEstimationState`](Src/States/CameraLightEstimationState.h) owns the runtime results and
 GPU resources:
 
-- Three `GL_R8` camera-plane textures for Y, U, and V.
-- The compute program and `GL_RGBA16F` 3D light-field texture.
+- A raw external-YUV texture on supported Android firmware, with three `GL_R8` Y/U/V textures
+  retained for the CPU fallback.
+- The compute program and two ping-ponged `GL_RGBA32F` 3D light-field textures. The shader samples
+  the previous field and writes the next field through a `writeonly` image because Quest's Adreno
+  driver rejects formatted 3D images declared for simultaneous read/write access.
 - `globalLight`, stored as tint RGB plus exposure in alpha.
 - Camera intrinsics, image dimensions, calibration status, and camera/local transforms.
 - The current `LightEstimateTier`, its transition blend, and update timestamps.
@@ -151,20 +157,23 @@ The smallest qualifying stream is selected. Lens distortion coefficients are rea
 missing coefficients remain zero and do not invalidate calibration. Intrinsics are adjusted from
 the sensor active array to the centered crop used by the selected output resolution.
 
-An `AImageReader` with a two-image queue receives `YUV_420_888` frames. `OnImageAvailable()` acquires
-the latest image, records its sensor timestamp, and copies all three planes into tightly packed CPU
-buffers. `CopyPlane()` honors each plane's row stride and pixel stride. A mutex protects publication
-of the latest frame, and a sequence number prevents the render thread from consuming it twice.
+When the required EGL and GL extensions are present, a four-image GPU-sampled `AImageReader`
+receives `YUV_420_888` frames. The callback uses `acquireLatestImage()` and only replaces the pending
+owning `AImage`; a superseded pending image is immediately returned. At the 5 Hz deadline the GL
+thread imports its `AHardwareBuffer` as an `EGLImage` bound to `GL_TEXTURE_EXTERNAL_OES`. The owning
+image remains alive until a nonblocking GL fence signals. If that fence is still pending at the next
+deadline, the new pending frame is dropped rather than stalling XR rendering.
 
-During `Update()`, a frame is rejected when it is not new, has an empty plane, has a future or
-non-positive timestamp, or is older than `maximumFrameAgeSeconds`. Accepted planes are uploaded to
-single-channel textures with linear filtering and clamp-to-edge wrapping. Texture storage is
-reallocated only when a plane's dimensions change.
+Capability, shader, reader, or first-image import failure restarts capture with the existing
+two-image CPU-readable reader. In that fallback, `CopyPlane()` honors row and pixel stride and the
+three tightly packed planes are uploaded to `GL_R8` textures.
 
 ## Global estimation
 
-Global estimation runs on the CPU for every accepted camera frame. It does not require environment
-depth or OpenXR time conversion.
+Global estimation runs at 5 Hz and does not require environment depth or OpenXR time conversion.
+The raw path renders only the existing sample grid to a small `RGBA8` target and transfers it through
+a three-entry asynchronous PBO ring. The same CPU estimator consumes a completed PBO while the
+previous valid result remains active during readback.
 
 The estimator samples pixels at 16-pixel intervals, starting at `(8, 8)`. Y is read at full
 resolution and U/V at half resolution. [`CameraLightMath::YuvToLinear()`](Src/Systems/CameraLightMath.h)
@@ -237,7 +246,8 @@ camera frame, it requires:
 - A valid OpenXR view space.
 - `EnvironmentDepthState::HasDepth` for the current update.
 - A valid object `TransformState`.
-- At least `1 / updateRateHz` seconds since the previous spatial dispatch.
+- The fixed 200 ms camera-processing deadline has elapsed. The spatial-dispatch timestamp is
+  tracked separately.
 
 The camera sensor timestamp is converted to `XrTime`, then `xrLocateSpace()` obtains the headset
 view pose at capture time. Both position and orientation flags must be valid. The calibrated lens
@@ -247,7 +257,7 @@ at the current render pose.
 
 The spatial grid is centered on the rendered object's current model translation. On first use, the
 system builds the embedded OpenGL ES 3.1 compute shader in `BuildComputeProgram()` and allocates a
-trilinearly filtered `16 x 12 x 16` `GL_RGBA16F` 3D texture.
+trilinearly filtered `16 x 12 x 16` `GL_RGBA32F` 3D texture.
 
 The shader declares `local_size_x/y/z = 4`; `glDispatchCompute(4, 3, 4)` therefore launches exactly
 one invocation for every voxel. Each invocation:
@@ -395,11 +405,13 @@ on-device validation.
 
 ## Known limitations
 
-- `diagnosticOverlay` is declared but not implemented.
+- The performance overlay reports the selected camera path, callback/processing/drop counters,
+  frame age, copied bytes, and callback/import p95 latency.
 - Camera timing, frame-age, estimate-hold, and diagnostic parameters remain internal rather than
   being exposed by the settings UI.
 - Headset camera YUV is always interpreted as limited range.
-- Global estimation runs for every accepted frame; `updateRateHz` limits only Spatial dispatches.
+- Global and Spatial camera estimation share a fixed 5 Hz processing deadline. Camera2 may run
+  faster so `acquireLatestImage()` can provide a fresh image at each deadline.
 - The compute shader samples environment-depth array layer zero rather than combining both views.
 - Spatial sampling uses a fixed `32 x 24` depth grid and a fixed `16 x 12 x 16` light-field size.
 - A failed camera start is not retried until focus or session state resets the start guard.
