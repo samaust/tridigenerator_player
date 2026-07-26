@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <iostream>
@@ -222,6 +223,9 @@ std::vector<const char *> TDGenPlayerApp::GetExtensions()
     extensions.push_back(XR_FB_TRIANGLE_MESH_EXTENSION_NAME);
     extensions.push_back(XR_META_ENVIRONMENT_DEPTH_EXTENSION_NAME);
     extensions.push_back("XR_KHR_convert_timespec_time");
+#if defined(__ANDROID__)
+    extensions.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+#endif
 
     return extensions;
 }
@@ -257,6 +261,7 @@ TDGenPlayerApp::GetSuggestedBindings(XrInstance instance) {
 bool TDGenPlayerApp::AppInit(const xrJava *context)
 {
     OVRFW::XrApp::AppInit(context);
+    InitDisplayRefreshRateExtension();
 
     // Initialize ECS and Systems
     entityManager_ = std::make_unique<EntityManager>();
@@ -365,8 +370,38 @@ bool TDGenPlayerApp::SessionInit()
     inputSystem_->SessionInit(*entityManager_, session);
     environmentDepthSystem_->SessionInit(*entityManager_, session);
     cameraLightEstimationSystem_->SessionInit(*entityManager_, session);
+    InitDisplayRefreshRateSession();
 
     return true;
+}
+
+void TDGenPlayerApp::AppHandleEvent(XrEventDataBaseHeader* baseEventHeader) {
+    if (!baseEventHeader ||
+        baseEventHeader->type !=
+            XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB) {
+        return;
+    }
+
+    const auto* event =
+        reinterpret_cast<const XrEventDataDisplayRefreshRateChangedFB*>(
+            baseEventHeader);
+    currentPanelRefreshRate_ = event->toDisplayRefreshRate;
+    currentPanelRefreshRateValid_ =
+        std::isfinite(currentPanelRefreshRate_) &&
+        currentPanelRefreshRate_ > 0.0f;
+    frameTimingStats_.SetPanelRefreshRate(
+        currentPanelRefreshRateValid_ ? currentPanelRefreshRate_ : 0.0);
+    std::ostringstream message;
+    message << std::fixed << std::setprecision(1)
+            << "Panel changed " << event->fromDisplayRefreshRate
+            << " -> " << event->toDisplayRefreshRate << " Hz";
+    displayRefreshRateMessage_ = message.str();
+    LOGI(
+        "Display refresh rate changed from %.1f Hz to %.1f Hz",
+        event->fromDisplayRefreshRate,
+        event->toDisplayRefreshRate);
+    RefreshDisplayRefreshRateUi();
+    RefreshDiagnosticOverlay();
 }
 
 // The update function is called every frame before the Render() function.
@@ -588,6 +623,11 @@ void TDGenPlayerApp::SessionEnd()
     StopHaptics();
     lastUpdateSeconds_ = 0.0;
     frameTimingStats_.Reset();
+    supportedDisplayRefreshRates_.clear();
+    requestedDisplayRefreshRate_ = 0.0f;
+    currentPanelRefreshRate_ = 0.0f;
+    currentPanelRefreshRateValid_ = false;
+    displayRefreshRateMessage_.clear();
     performanceTimingStats_->Reset();
     if (gpuTiming_) gpuTiming_->Shutdown();
     uiAnchorInitialized_ = false;
@@ -653,12 +693,16 @@ void TDGenPlayerApp::ShutdownUi() {
         ui_.reset();
     }
     uiStatusLabel_ = nullptr;
+    refreshRateStatusLabel_ = nullptr;
+    refreshRateMessageLabel_ = nullptr;
     meshScaleValueLabel_ = nullptr;
     meshScaleCurrentLabel_ = nullptr;
 }
 
 bool TDGenPlayerApp::PrepareUi() {
     uiStatusLabel_ = nullptr;
+    refreshRateStatusLabel_ = nullptr;
+    refreshRateMessageLabel_ = nullptr;
     meshScaleValueLabel_ = nullptr;
     meshScaleCurrentLabel_ = nullptr;
     if (ui_) {
@@ -724,7 +768,10 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
     }
     diagnosticUi_->SetPose(uiAnchorPose_);
     diagnosticLabel_ = diagnosticUi_->AddLabel(
-        "FPS: --.-  Frame: --.- ms\n"
+        "Panel refresh rate: --.- Hz\n"
+        "Application FPS: --.-\n"
+        "Missed frames (estimated, session): --\n"
+        "Frame interval p50/p95/p99: --/--/-- ms\n"
         "Subsystem       CPU ms  GPU ms\n"
         "Env depth           --     N/A\n"
         "Camera capture      --     N/A\n"
@@ -737,7 +784,7 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
         "Camera path: --\n"
         "cb/processed/superseded/drop: --/--/--/--\n"
         "age/cb95/import95: --/--/-- ms  copied: --",
-        {1.02f, 0.18f, -1.48f}, {520.0f, 680.0f});
+        {1.02f, 0.18f, -1.48f}, {560.0f, 780.0f});
     RefreshDiagnosticOverlay();
 #endif
 }
@@ -789,13 +836,32 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
             ? "CpuYuvPlanes" : "Unavailable";
 
     std::ostringstream text;
+    if (currentPanelRefreshRateValid_) {
+        text << std::fixed << std::setprecision(1)
+             << "Panel refresh rate: " << currentPanelRefreshRate_ << " Hz\n";
+    } else {
+        text << "Panel refresh rate: --.- Hz\n";
+    }
     if (frameTimingStats_.HasPublishedSample()) {
         text << std::fixed << std::setprecision(1)
-             << "FPS: " << frameTimingStats_.Fps()
-             << "  Frame: " << frameTimingStats_.AverageFrameMilliseconds()
-             << " ms\n";
+             << "Application FPS: " << frameTimingStats_.Fps() << "\n";
     } else {
-        text << "FPS: --.-  Frame: --.- ms\n";
+        text << "Application FPS: --.-\n";
+    }
+    if (frameTimingStats_.HasPanelRefreshRate()) {
+        text << "Missed frames (estimated, session): "
+             << frameTimingStats_.MissedFrameCount() << "\n";
+    } else {
+        text << "Missed frames (estimated, session): --\n";
+    }
+    if (frameTimingStats_.HasPublishedSample()) {
+        text << std::fixed << std::setprecision(2)
+             << "Frame interval p50/p95/p99: "
+             << frameTimingStats_.P50FrameMilliseconds() << "/"
+             << frameTimingStats_.P95FrameMilliseconds() << "/"
+             << frameTimingStats_.P99FrameMilliseconds() << " ms\n";
+    } else {
+        text << "Frame interval p50/p95/p99: --/--/-- ms\n";
     }
     text << "Subsystem       CPU ms  GPU ms\n"
          << "Env depth       " << cpu(PerformanceSubsystem::EnvironmentDepth)
@@ -831,18 +897,400 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
 void TDGenPlayerApp::BuildDiagnosticsControls() {
     if (!PrepareUi()) return;
     currentUiMode_ = UiMode::Diagnostics;
-    ui_->AddLabel("Diagnostics", {0.0f, 0.42f, -1.5f}, {500.0f, 70.0f});
-    ui_->AddButton("Back", {0.0f, 0.30f, -1.5f}, {500.0f, 60.0f},
+    ui_->AddLabel("Diagnostics", {0.0f, 0.48f, -1.5f}, {620.0f, 60.0f});
+    ui_->AddButton("Back", {0.0f, 0.39f, -1.5f}, {300.0f, 50.0f},
         [this]() { RequestUiMode(diagnosticsReturnMode_); });
     ui_->AddToggleButton(
         "Performance timings: On", "Performance timings: Off",
-        &diagnosticOverlayVisible_, {0.0f, 0.18f, -1.5f}, {500.0f, 60.0f},
+        &diagnosticOverlayVisible_, {0.0f, 0.30f, -1.5f}, {500.0f, 50.0f},
         [this]() { RefreshDiagnosticOverlay(); });
+
+    std::ostringstream supported;
+    supported << "Supported panel rates: ";
+    if (!displayRefreshRateExtensionAvailable_) {
+        supported << "unavailable";
+    } else if (supportedDisplayRefreshRates_.empty()) {
+        supported << "none";
+    } else {
+        supported << std::fixed << std::setprecision(1);
+        for (size_t index = 0;
+             index < supportedDisplayRefreshRates_.size();
+             ++index) {
+            if (index > 0) supported << ", ";
+            supported << supportedDisplayRefreshRates_[index];
+        }
+        supported << " Hz";
+    }
+    ui_->AddLabel(supported.str(), {0.0f, 0.21f, -1.5f}, {720.0f, 45.0f});
+    refreshRateStatusLabel_ = ui_->AddLabel(
+        "", {0.0f, 0.13f, -1.5f}, {720.0f, 45.0f});
+
+    const auto addRateChoice = [&](float refreshRate, float x) {
+        std::ostringstream label;
+        label << std::fixed << std::setprecision(0) << refreshRate << " Hz";
+        if (SupportsDisplayRefreshRate(refreshRate)) {
+            ui_->AddButton(
+                label.str(),
+                {x, 0.04f, -1.5f},
+                {180.0f, 50.0f},
+                [this, refreshRate]() {
+                    if (RequestDisplayRefreshRate(refreshRate, true)) {
+                        QueryCurrentPanelRefreshRate();
+                    }
+                    RefreshDisplayRefreshRateUi();
+                    RefreshDiagnosticOverlay();
+                });
+        } else {
+            label << " (unsupported)";
+            ui_->AddLabel(
+                label.str(), {x, 0.04f, -1.5f}, {240.0f, 50.0f});
+        }
+    };
+    addRateChoice(72.0f, -0.27f);
+    addRateChoice(90.0f, 0.27f);
+    refreshRateMessageLabel_ = ui_->AddLabel(
+        "", {0.0f, -0.05f, -1.5f}, {720.0f, 45.0f});
+    RefreshDisplayRefreshRateUi();
 }
 
 void TDGenPlayerApp::OpenDiagnosticsControls(UiMode returnMode) {
     diagnosticsReturnMode_ = returnMode;
     RequestUiMode(UiMode::Diagnostics);
+}
+
+void TDGenPlayerApp::InitDisplayRefreshRateExtension() {
+    displayRefreshRateExtensionAvailable_ = false;
+#if defined(__ANDROID__)
+    uint32_t extensionCount = 0;
+    XrResult result = xrEnumerateInstanceExtensionProperties(
+        nullptr, 0, &extensionCount, nullptr);
+    if (XR_FAILED(result)) {
+        LOGW(
+            "Could not enumerate OpenXR extensions for display refresh rate (%d)",
+            result);
+        return;
+    }
+    std::vector<XrExtensionProperties> extensions(
+        extensionCount, {XR_TYPE_EXTENSION_PROPERTIES});
+    result = xrEnumerateInstanceExtensionProperties(
+        nullptr,
+        extensionCount,
+        &extensionCount,
+        extensions.data());
+    if (XR_FAILED(result)) {
+        LOGW(
+            "Could not read OpenXR extensions for display refresh rate (%d)",
+            result);
+        return;
+    }
+    const bool extensionPresent = std::any_of(
+        extensions.begin(),
+        extensions.end(),
+        [](const XrExtensionProperties& extension) {
+            return std::strcmp(
+                extension.extensionName,
+                XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) == 0;
+        });
+    if (!extensionPresent) {
+        LOGW("XR_FB_display_refresh_rate is unavailable");
+        return;
+    }
+
+    const XrResult enumerateResult = xrGetInstanceProcAddr(
+        GetInstance(),
+        "xrEnumerateDisplayRefreshRatesFB",
+        reinterpret_cast<PFN_xrVoidFunction*>(
+            &xrEnumerateDisplayRefreshRatesFB_));
+    const XrResult getResult = xrGetInstanceProcAddr(
+        GetInstance(),
+        "xrGetDisplayRefreshRateFB",
+        reinterpret_cast<PFN_xrVoidFunction*>(&xrGetDisplayRefreshRateFB_));
+    const XrResult requestResult = xrGetInstanceProcAddr(
+        GetInstance(),
+        "xrRequestDisplayRefreshRateFB",
+        reinterpret_cast<PFN_xrVoidFunction*>(&xrRequestDisplayRefreshRateFB_));
+    displayRefreshRateExtensionAvailable_ =
+        XR_SUCCEEDED(enumerateResult) &&
+        XR_SUCCEEDED(getResult) &&
+        XR_SUCCEEDED(requestResult) &&
+        xrEnumerateDisplayRefreshRatesFB_ &&
+        xrGetDisplayRefreshRateFB_ &&
+        xrRequestDisplayRefreshRateFB_;
+    if (displayRefreshRateExtensionAvailable_) {
+        LOGI("XR_FB_display_refresh_rate initialized");
+    } else {
+        LOGW(
+            "XR_FB_display_refresh_rate functions unavailable (%d/%d/%d)",
+            enumerateResult,
+            getResult,
+            requestResult);
+    }
+#else
+    displayRefreshRateMessage_ = "Panel refresh control is Android-only";
+#endif
+}
+
+void TDGenPlayerApp::InitDisplayRefreshRateSession() {
+    supportedDisplayRefreshRates_.clear();
+    requestedDisplayRefreshRate_ = 0.0f;
+    currentPanelRefreshRate_ = 0.0f;
+    currentPanelRefreshRateValid_ = false;
+    displayRefreshRateMessage_.clear();
+    frameTimingStats_.SetPanelRefreshRate(0.0);
+
+    if (!displayRefreshRateExtensionAvailable_) {
+        displayRefreshRateMessage_ =
+            "XR_FB_display_refresh_rate unavailable";
+        return;
+    }
+
+    const bool enumerated = EnumerateDisplayRefreshRates();
+    if (enumerated) {
+        float preferred = ReadRequestedDisplayRefreshRate();
+        if (preferred != 72.0f && preferred != 90.0f) {
+            LOGW(
+                "Ignoring invalid stored refresh rate %.3f; using 72.0 Hz",
+                preferred);
+            preferred = 72.0f;
+        }
+
+        float target = 0.0f;
+        if (SupportsDisplayRefreshRate(preferred)) {
+            target = preferred;
+        } else if (SupportsDisplayRefreshRate(72.0f)) {
+            LOGW(
+                "Stored refresh rate %.1f Hz is unsupported; falling back to 72.0 Hz",
+                preferred);
+            target = 72.0f;
+        }
+        if (target > 0.0f) {
+            RequestDisplayRefreshRate(target, true);
+        } else {
+            displayRefreshRateMessage_ =
+                "Neither preferred rate nor 72.0 Hz is supported";
+        }
+    }
+
+    QueryCurrentPanelRefreshRate();
+    RefreshDisplayRefreshRateUi();
+    RefreshDiagnosticOverlay();
+}
+
+bool TDGenPlayerApp::EnumerateDisplayRefreshRates() {
+    supportedDisplayRefreshRates_.clear();
+    if (!displayRefreshRateExtensionAvailable_ ||
+        !xrEnumerateDisplayRefreshRatesFB_ ||
+        GetSession() == XR_NULL_HANDLE) {
+        return false;
+    }
+
+    uint32_t count = 0;
+    XrResult result = xrEnumerateDisplayRefreshRatesFB_(
+        GetSession(), 0, &count, nullptr);
+    if (XR_FAILED(result)) {
+        displayRefreshRateMessage_ =
+            "Failed to enumerate supported panel rates";
+        LOGW("xrEnumerateDisplayRefreshRatesFB(count) failed: %d", result);
+        return false;
+    }
+    supportedDisplayRefreshRates_.resize(count);
+    result = xrEnumerateDisplayRefreshRatesFB_(
+        GetSession(),
+        count,
+        &count,
+        supportedDisplayRefreshRates_.data());
+    if (XR_FAILED(result)) {
+        supportedDisplayRefreshRates_.clear();
+        displayRefreshRateMessage_ =
+            "Failed to enumerate supported panel rates";
+        LOGW("xrEnumerateDisplayRefreshRatesFB(values) failed: %d", result);
+        return false;
+    }
+    supportedDisplayRefreshRates_.resize(count);
+    std::sort(
+        supportedDisplayRefreshRates_.begin(),
+        supportedDisplayRefreshRates_.end());
+    std::ostringstream rates;
+    rates << std::fixed << std::setprecision(1);
+    for (size_t index = 0;
+         index < supportedDisplayRefreshRates_.size();
+         ++index) {
+        if (index > 0) rates << ", ";
+        rates << supportedDisplayRefreshRates_[index];
+    }
+    LOGI("Supported panel refresh rates: %s Hz", rates.str().c_str());
+    return true;
+}
+
+bool TDGenPlayerApp::QueryCurrentPanelRefreshRate() {
+    if (!displayRefreshRateExtensionAvailable_ ||
+        !xrGetDisplayRefreshRateFB_ ||
+        GetSession() == XR_NULL_HANDLE) {
+        return false;
+    }
+    float refreshRate = 0.0f;
+    const XrResult result =
+        xrGetDisplayRefreshRateFB_(GetSession(), &refreshRate);
+    if (XR_FAILED(result) ||
+        !std::isfinite(refreshRate) ||
+        refreshRate <= 0.0f) {
+        currentPanelRefreshRate_ = 0.0f;
+        currentPanelRefreshRateValid_ = false;
+        frameTimingStats_.SetPanelRefreshRate(0.0);
+        if (!displayRefreshRateMessage_.empty()) {
+            displayRefreshRateMessage_ += "; ";
+        }
+        displayRefreshRateMessage_ +=
+            "Failed to query current panel rate";
+        LOGW(
+            "xrGetDisplayRefreshRateFB failed or returned invalid rate: %d, %.3f",
+            result,
+            refreshRate);
+        return false;
+    }
+    currentPanelRefreshRate_ = refreshRate;
+    currentPanelRefreshRateValid_ = true;
+    frameTimingStats_.SetPanelRefreshRate(refreshRate);
+    LOGI("Current panel refresh rate: %.1f Hz", refreshRate);
+    return true;
+}
+
+bool TDGenPlayerApp::RequestDisplayRefreshRate(
+        float refreshRate,
+        bool persist) {
+    if (!displayRefreshRateExtensionAvailable_ ||
+        !xrRequestDisplayRefreshRateFB_ ||
+        GetSession() == XR_NULL_HANDLE) {
+        displayRefreshRateMessage_ =
+            "Panel refresh-rate requests are unavailable";
+        return false;
+    }
+    if (!SupportsDisplayRefreshRate(refreshRate)) {
+        std::ostringstream message;
+        message << std::fixed << std::setprecision(1)
+                << refreshRate << " Hz is not advertised";
+        displayRefreshRateMessage_ = message.str();
+        LOGW(
+            "Not requesting unadvertised display refresh rate %.1f Hz",
+            refreshRate);
+        return false;
+    }
+
+    const XrResult result =
+        xrRequestDisplayRefreshRateFB_(GetSession(), refreshRate);
+    if (XR_FAILED(result)) {
+        std::ostringstream message;
+        message << std::fixed << std::setprecision(1)
+                << "Request for " << refreshRate << " Hz failed ("
+                << result << ")";
+        displayRefreshRateMessage_ = message.str();
+        LOGW(
+            "xrRequestDisplayRefreshRateFB(%.1f) failed: %d",
+            refreshRate,
+            result);
+        return false;
+    }
+
+    requestedDisplayRefreshRate_ = refreshRate;
+    const bool saved = !persist || StoreRequestedDisplayRefreshRate(refreshRate);
+    std::ostringstream message;
+    message << std::fixed << std::setprecision(1)
+            << "Requested " << refreshRate << " Hz";
+    if (!saved) {
+        message << "; preference save failed";
+    }
+    displayRefreshRateMessage_ = message.str();
+    LOGI(
+        "Requested display refresh rate %.1f Hz%s",
+        refreshRate,
+        saved ? "" : " (preference save failed)");
+    return true;
+}
+
+bool TDGenPlayerApp::SupportsDisplayRefreshRate(float refreshRate) const {
+    return std::find(
+        supportedDisplayRefreshRates_.begin(),
+        supportedDisplayRefreshRates_.end(),
+        refreshRate) != supportedDisplayRefreshRates_.end();
+}
+
+void TDGenPlayerApp::RefreshDisplayRefreshRateUi() {
+    if (refreshRateStatusLabel_) {
+        std::ostringstream status;
+        status << std::fixed << std::setprecision(1) << "Requested: ";
+        if (requestedDisplayRefreshRate_ > 0.0f) {
+            status << requestedDisplayRefreshRate_ << " Hz";
+        } else {
+            status << "--";
+        }
+        status << " | Actual panel: ";
+        if (currentPanelRefreshRateValid_) {
+            status << currentPanelRefreshRate_ << " Hz";
+        } else {
+            status << "--";
+        }
+        refreshRateStatusLabel_->SetText(status.str().c_str());
+    }
+    if (refreshRateMessageLabel_) {
+        refreshRateMessageLabel_->SetText(
+            displayRefreshRateMessage_.c_str());
+    }
+}
+
+float TDGenPlayerApp::ReadRequestedDisplayRefreshRate() {
+#if defined(__ANDROID__)
+    const xrJava* java = GetContext();
+    if (!java || !java->Env || !java->ActivityObject) {
+        return 72.0f;
+    }
+    JNIEnv* env = java->Env;
+    jclass activityClass = env->GetObjectClass(java->ActivityObject);
+    jmethodID method = env->GetMethodID(
+        activityClass, "loadRequestedDisplayRefreshRate", "()F");
+    const float refreshRate = method
+        ? env->CallFloatMethod(java->ActivityObject, method)
+        : 72.0f;
+    env->DeleteLocalRef(activityClass);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return 72.0f;
+    }
+    return refreshRate;
+#else
+    return 72.0f;
+#endif
+}
+
+bool TDGenPlayerApp::StoreRequestedDisplayRefreshRate(float refreshRate) {
+#if defined(__ANDROID__)
+    if (refreshRate != 72.0f && refreshRate != 90.0f) {
+        return false;
+    }
+    const xrJava* java = GetContext();
+    if (!java || !java->Env || !java->ActivityObject) {
+        return false;
+    }
+    JNIEnv* env = java->Env;
+    jclass activityClass = env->GetObjectClass(java->ActivityObject);
+    jmethodID method = env->GetMethodID(
+        activityClass, "saveRequestedDisplayRefreshRate", "(F)Z");
+    const bool saved = method &&
+        env->CallBooleanMethod(
+            java->ActivityObject,
+            method,
+            refreshRate) == JNI_TRUE;
+    env->DeleteLocalRef(activityClass);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return false;
+    }
+    return saved;
+#else
+    (void)refreshRate;
+    return false;
+#endif
 }
 
 void TDGenPlayerApp::TogglePlayback() {

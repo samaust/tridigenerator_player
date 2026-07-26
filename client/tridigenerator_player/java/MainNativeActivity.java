@@ -32,6 +32,10 @@ public class MainNativeActivity extends android.app.NativeActivity {
     private static final String MESH_SETTINGS_PREFERENCES = "mesh_settings";
     private static final String MESH_DETAIL_DIVISOR = "detail_divisor";
     private static final int DEFAULT_MESH_DETAIL_DIVISOR = 2;
+    private static final String DISPLAY_SETTINGS_PREFERENCES = "display_settings";
+    private static final String REQUESTED_DISPLAY_REFRESH_RATE =
+        "requested_display_refresh_rate";
+    private static final float DEFAULT_DISPLAY_REFRESH_RATE = 72.0f;
     private static final String SCENE_PERMISSION = "com.oculus.permission.USE_SCENE";
     private static final String CAMERA_PERMISSION = "horizonos.permission.HEADSET_CAMERA";
     private static final String ANDROID_CAMERA_PERMISSION = "android.permission.CAMERA";
@@ -114,6 +118,23 @@ public class MainNativeActivity extends android.app.NativeActivity {
         return getSharedPreferences(MESH_SETTINGS_PREFERENCES, Context.MODE_PRIVATE)
             .edit()
             .putInt(MESH_DETAIL_DIVISOR, divisor)
+            .commit();
+    }
+
+    public float loadRequestedDisplayRefreshRate() {
+        return getSharedPreferences(DISPLAY_SETTINGS_PREFERENCES, Context.MODE_PRIVATE)
+            .getFloat(
+                REQUESTED_DISPLAY_REFRESH_RATE,
+                DEFAULT_DISPLAY_REFRESH_RATE);
+    }
+
+    public boolean saveRequestedDisplayRefreshRate(float refreshRate) {
+        if (refreshRate != 72.0f && refreshRate != 90.0f) {
+            return false;
+        }
+        return getSharedPreferences(DISPLAY_SETTINGS_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .putFloat(REQUESTED_DISPLAY_REFRESH_RATE, refreshRate)
             .commit();
     }
 

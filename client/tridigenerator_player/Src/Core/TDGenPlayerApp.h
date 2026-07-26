@@ -70,6 +70,8 @@ private:
     OVRFW::VRMenuObject* uiStatusLabel_ = nullptr;
     OVRFW::VRMenuObject* playbackButton_ = nullptr;
     OVRFW::VRMenuObject* diagnosticLabel_ = nullptr;
+    OVRFW::VRMenuObject* refreshRateStatusLabel_ = nullptr;
+    OVRFW::VRMenuObject* refreshRateMessageLabel_ = nullptr;
     OVRFW::VRMenuObject* meshScaleValueLabel_ = nullptr;
     OVRFW::VRMenuObject* meshScaleCurrentLabel_ = nullptr;
     std::array<bool, 256> maskToggleValues_{};
@@ -110,6 +112,15 @@ private:
     std::unique_ptr<GpuTimingManager> gpuTiming_;
     EntityID objectEntity_ = 0;
     XrAction hapticAction_ = XR_NULL_HANDLE;
+    PFN_xrEnumerateDisplayRefreshRatesFB xrEnumerateDisplayRefreshRatesFB_ = nullptr;
+    PFN_xrGetDisplayRefreshRateFB xrGetDisplayRefreshRateFB_ = nullptr;
+    PFN_xrRequestDisplayRefreshRateFB xrRequestDisplayRefreshRateFB_ = nullptr;
+    std::vector<float> supportedDisplayRefreshRates_;
+    float requestedDisplayRefreshRate_ = 0.0f;
+    float currentPanelRefreshRate_ = 0.0f;
+    bool displayRefreshRateExtensionAvailable_ = false;
+    bool currentPanelRefreshRateValid_ = false;
+    std::string displayRefreshRateMessage_;
 
     void ShutdownUi();
     bool PrepareUi();
@@ -120,6 +131,15 @@ private:
     void RefreshDiagnosticOverlay();
     void BuildDiagnosticsControls();
     void OpenDiagnosticsControls(UiMode returnMode);
+    void InitDisplayRefreshRateExtension();
+    void InitDisplayRefreshRateSession();
+    bool EnumerateDisplayRefreshRates();
+    bool QueryCurrentPanelRefreshRate();
+    bool RequestDisplayRefreshRate(float refreshRate, bool persist);
+    bool SupportsDisplayRefreshRate(float refreshRate) const;
+    void RefreshDisplayRefreshRateUi();
+    float ReadRequestedDisplayRefreshRate();
+    bool StoreRequestedDisplayRefreshRate(float refreshRate);
     void TogglePlayback();
     void RefreshPlaybackControls();
     void BuildDatasetPicker();
@@ -162,6 +182,7 @@ private:
         GetSuggestedBindings(XrInstance instance) override;
     virtual bool AppInit(const xrJava *context) override;
     virtual bool SessionInit() override;
+    virtual void AppHandleEvent(XrEventDataBaseHeader* baseEventHeader) override;
     virtual void Update(const OVRFW::ovrApplFrameIn &in) override;
     virtual void AppRenderFrame(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out) override;
     virtual void AppRenderEye(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out, int eye) override;
