@@ -44,6 +44,7 @@ struct CameraLightEstimationState {
     std::string availabilityMessage;
     float tierBlend = 0.0f;
     double lastEstimateSeconds = 0.0;
+    double lastCameraProcessingSeconds = 0.0;
     double lastDispatchSeconds = 0.0;
     bool cameraCalibrationValid = false;
     bool texturesReady = false;

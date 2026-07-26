@@ -23,5 +23,9 @@ int main() {
     assert(IsFrameFresh(900000000, 1000000000, 0.25f));
     assert(!IsFrameFresh(500000000, 1000000000, 0.25f));
     assert(!IsFrameFresh(1100000000, 1000000000, 0.25f));
+    assert(ShouldProcessUpdate(1.0, 0.0, 10.0f));
+    assert(!ShouldProcessUpdate(1.05, 1.0, 10.0f));
+    assert(ShouldProcessUpdate(1.1, 1.0, 10.0f));
+    assert(!ShouldProcessUpdate(2.0, 1.0, 0.0f));
     return 0;
 }

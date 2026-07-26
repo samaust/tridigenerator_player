@@ -650,6 +650,12 @@ void CameraLightEstimationSystem::Update(
                 state.tier = LightEstimateTier::Unavailable;
                 return;
             }
+            if (!CameraLightMath::ShouldProcessUpdate(
+                    now,
+                    state.lastCameraProcessingSeconds,
+                    component.updateRateHz)) {
+                return;
+            }
             CameraFrame frame;
             {
                 std::lock_guard<std::mutex> lock(state.platform->mutex);
@@ -659,6 +665,7 @@ void CameraLightEstimationSystem::Update(
             }
             if (!CameraLightMath::IsFrameFresh(frame.timestampNs, NowNanoseconds(), component.maximumFrameAgeSeconds)) return;
             if (frame.planes[0].empty() || frame.planes[1].empty() || frame.planes[2].empty()) return;
+            state.lastCameraProcessingSeconds = now;
 
             for (int plane = 0; plane < 3; ++plane) {
                 const int width = plane == 0 ? frame.width : (frame.width + 1) / 2;
@@ -697,7 +704,7 @@ void CameraLightEstimationSystem::Update(
             if (!state.platform->calibrationValid ||
                 !coreComponent || !coreState || !coreComponent->supportsTimeConversion ||
                 !coreState->XrConvertTimespecTimeToTimeKHR || coreState->viewSpace == XR_NULL_HANDLE ||
-                !depth || !depth->HasDepth || !transform || now-state.lastDispatchSeconds < 1.0/component.updateRateHz) return;
+                !depth || !depth->HasDepth || !transform) return;
             timespec ts{frame.timestampNs / 1000000000LL, frame.timestampNs % 1000000000LL};
             XrTime captureTime = 0;
             if (XR_FAILED(coreState->XrConvertTimespecTimeToTimeKHR(instance_, &ts, &captureTime))) return;

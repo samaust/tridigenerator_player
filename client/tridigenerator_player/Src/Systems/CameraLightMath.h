@@ -51,4 +51,14 @@ inline bool IsFrameFresh(int64_t sensorTimestampNs, int64_t nowNs, float maximum
             (nowNs - sensorTimestampNs) <= static_cast<int64_t>(maximumAgeSeconds * 1.0e9f);
 }
 
+inline bool ShouldProcessUpdate(
+        double nowSeconds,
+        double lastUpdateSeconds,
+        float updateRateHz) {
+    if (updateRateHz <= 0.0f) return false;
+    if (lastUpdateSeconds <= 0.0) return true;
+    return nowSeconds - lastUpdateSeconds >=
+        1.0 / static_cast<double>(updateRateHz);
+}
+
 } // namespace CameraLightMath
