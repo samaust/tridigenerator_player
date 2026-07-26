@@ -188,6 +188,72 @@ GLuint CreateCircularButtonTexture(const bool showPlayIcon) {
 } // namespace
 #endif
 
+namespace {
+
+class UpdateTimingCollector {
+public:
+    using Clock = std::chrono::steady_clock;
+
+    explicit UpdateTimingCollector(bool active)
+        : active_(active) {
+        if (active_) start_ = Clock::now();
+    }
+
+    bool IsActive() const { return active_; }
+
+    void Add(UpdatePhase phase, Clock::duration duration) {
+        if (!active_) return;
+        phaseMilliseconds_[static_cast<std::size_t>(phase)] +=
+            std::chrono::duration<double, std::milli>(duration).count();
+    }
+
+    double Finish() const {
+        if (!active_) return 0.0;
+        return std::chrono::duration<double, std::milli>(
+            Clock::now() - start_).count();
+    }
+
+    const std::array<double, UpdatePhaseCount>& Phases() const {
+        return phaseMilliseconds_;
+    }
+
+private:
+    bool active_ = false;
+    Clock::time_point start_{};
+    std::array<double, UpdatePhaseCount> phaseMilliseconds_{};
+};
+
+class ScopedUpdatePhaseTimer {
+public:
+    ScopedUpdatePhaseTimer(
+            UpdateTimingCollector& collector,
+            UpdatePhase phase)
+        : collector_(collector),
+          phase_(phase),
+          active_(collector.IsActive()) {
+        if (active_) start_ = UpdateTimingCollector::Clock::now();
+    }
+
+    ~ScopedUpdatePhaseTimer() {
+        if (active_) {
+            collector_.Add(
+                phase_,
+                UpdateTimingCollector::Clock::now() - start_);
+        }
+    }
+
+    ScopedUpdatePhaseTimer(const ScopedUpdatePhaseTimer&) = delete;
+    ScopedUpdatePhaseTimer& operator=(const ScopedUpdatePhaseTimer&) = delete;
+
+private:
+    UpdateTimingCollector& collector_;
+    UpdatePhase phase_;
+    bool active_ = false;
+    UpdateTimingCollector::Clock::time_point start_{};
+};
+
+} // namespace
+
 TDGenPlayerApp::TDGenPlayerApp() {
     BackgroundColor = OVR::Vector4f(0.0f, 0.0f, 0.0f, 0.0f);
 
@@ -418,25 +484,29 @@ void TDGenPlayerApp::AppHandleEvent(XrEventDataBaseHeader* baseEventHeader) {
 void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 {
     using clock = std::chrono::steady_clock;
+    UpdateTimingCollector updateTiming(diagnosticOverlayVisible_);
     const auto now = clock::now();
-    performanceTimingStats_->SetEnabled(diagnosticOverlayVisible_);
-    performanceTimingStats_->BeginForegroundFrame();
-    if (gpuTiming_) gpuTiming_->Poll();
     double nowSeconds = std::chrono::duration<double>(now.time_since_epoch()).count();
-    // Refresh the large TinyUI diagnostic label only when the performance
-    // window publishes below. Rebuilding it once here and again at the end of
-    // the same frame causes avoidable periodic GL-thread hitches.
-    frameTimingStats_.AddFrame(now);
-    // This timestamp comes directly from xrWaitFrame and cannot be tied to
-    // media timestamps. Reporting both clocks distinguishes compositor
-    // throttling from a wall-clock diagnostic anomaly.
-    if (std::isfinite(in.PredictedDisplayTime) &&
-        in.PredictedDisplayTime > 0.0) {
-        const auto xrTimestamp =
-            FrameTimingStats::TimePoint{} +
-            std::chrono::duration_cast<FrameTimingStats::Clock::duration>(
-                std::chrono::duration<double>(in.PredictedDisplayTime));
-        xrFrameTimingStats_.AddFrame(xrTimestamp);
+    {
+        ScopedUpdatePhaseTimer phase(
+            updateTiming, UpdatePhase::DiagnosticsBookkeeping);
+        performanceTimingStats_->SetEnabled(diagnosticOverlayVisible_);
+        if (gpuTiming_) gpuTiming_->Poll();
+        // Refresh the large TinyUI diagnostic label only when the performance
+        // window publishes below. Rebuilding it once here and again at the end
+        // of the same frame causes avoidable periodic GL-thread hitches.
+        frameTimingStats_.AddFrame(now);
+        // This timestamp comes directly from xrWaitFrame and cannot be tied to
+        // media timestamps. Reporting both clocks distinguishes compositor
+        // throttling from a wall-clock diagnostic anomaly.
+        if (std::isfinite(in.PredictedDisplayTime) &&
+            in.PredictedDisplayTime > 0.0) {
+            const auto xrTimestamp =
+                FrameTimingStats::TimePoint{} +
+                std::chrono::duration_cast<FrameTimingStats::Clock::duration>(
+                    std::chrono::duration<double>(in.PredictedDisplayTime));
+            xrFrameTimingStats_.AddFrame(xrTimestamp);
+        }
     }
 
     // if SkipInputHandling is True, we need to sync action sets ourselves
@@ -447,153 +517,221 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 
     // Application logic update here
 
-    coreSystem_->Update(*entityManager_);
-    sceneSystem_->Update(*entityManager_);
-    inputSystem_->Update(*entityManager_, in);
-    if (!uiAnchorInitialized_) {
-        uiAnchorPose_ = in.HeadPose;
-        uiAnchorInitialized_ = true;
-        const auto& loader =
-            entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
-        if (!loader.selectedDatasetId.empty() && loader.errorMessage.empty()) {
-            BuildMaskSelector();
-        } else {
-            BuildDatasetPicker();
-        }
-#if defined(__ANDROID__)
-        BuildPlaybackControls();
-        BuildDiagnosticOverlay();
-#endif
-    }
-    entityManager_->ForEach<InputComponent>([&](EntityID, InputComponent& input) {
-        if (Focused && input.rightAPressedThisFrame) {
-            TogglePlayback();
-            input.rightAPressedThisFrame = false;
-        }
-    });
-    frameLoaderSystem_->Update(*entityManager_, nowSeconds);
-    audioSystem_->Update(*entityManager_);
-    const float deltaSeconds = lastUpdateSeconds_ > 0.0
-            ? static_cast<float>(std::clamp(nowSeconds - lastUpdateSeconds_, 0.0, 0.1))
-            : 0.0f;
-    lastUpdateSeconds_ = nowSeconds;
-    interactionSystem_->Update(*entityManager_, deltaSeconds);
-    entityManager_->ForEach<InteractionState>([&](EntityID, InteractionState& state) {
-        for (const HapticRequest& request : state.hapticRequests) {
-            DispatchHaptic(request.event, request.controllerMask);
-        }
-    });
-    entityManager_->ForEach<InputComponent>([&](EntityID, InputComponent& input) {
-        if (input.uiToggleRequested) {
-            uiVisible_ = !uiVisible_;
-            if (input.leftXPressedThisFrame) {
-                DispatchHaptic(HapticEvent::UiToggled, 1u << InputComponent::Left);
-            }
-            input.uiToggleRequested = false;
-        }
-    });
-    transformSystem_->Update(*entityManager_);
-    renderSystem_->Update(*entityManager_);
-    bool hasVisibleObjectContent = false;
-    entityManager_->ForEach<UnlitGeometryRenderComponent>(
-        [&](EntityID, UnlitGeometryRenderComponent& component) {
-            hasVisibleObjectContent =
-                hasVisibleObjectContent ||
-                component.maskVisibility_.HasVisibleEntries();
-        });
     {
+        ScopedUpdatePhaseTimer phase(updateTiming, UpdatePhase::CoreScene);
+        coreSystem_->Update(*entityManager_);
+        sceneSystem_->Update(*entityManager_);
+    }
+    {
+        ScopedUpdatePhaseTimer phase(updateTiming, UpdatePhase::InputControl);
+        inputSystem_->Update(*entityManager_, in);
+        if (!uiAnchorInitialized_) {
+            uiAnchorPose_ = in.HeadPose;
+            uiAnchorInitialized_ = true;
+            const auto& loader =
+                entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+            if (!loader.selectedDatasetId.empty() && loader.errorMessage.empty()) {
+                BuildMaskSelector();
+            } else {
+                BuildDatasetPicker();
+            }
+#if defined(__ANDROID__)
+            BuildPlaybackControls();
+            BuildDiagnosticOverlay();
+#endif
+        }
+        entityManager_->ForEach<InputComponent>(
+            [&](EntityID, InputComponent& input) {
+                if (Focused && input.rightAPressedThisFrame) {
+                    TogglePlayback();
+                    input.rightAPressedThisFrame = false;
+                }
+            });
+    }
+    {
+        ScopedUpdatePhaseTimer phase(
+            updateTiming, UpdatePhase::FrameLoaderAudio);
+        frameLoaderSystem_->Update(*entityManager_, nowSeconds);
+        audioSystem_->Update(*entityManager_);
+    }
+    {
+        ScopedUpdatePhaseTimer phase(
+            updateTiming, UpdatePhase::InteractionHaptics);
+        const float deltaSeconds = lastUpdateSeconds_ > 0.0
+                ? static_cast<float>(
+                    std::clamp(nowSeconds - lastUpdateSeconds_, 0.0, 0.1))
+                : 0.0f;
+        lastUpdateSeconds_ = nowSeconds;
+        interactionSystem_->Update(*entityManager_, deltaSeconds);
+        entityManager_->ForEach<InteractionState>(
+            [&](EntityID, InteractionState& state) {
+                for (const HapticRequest& request : state.hapticRequests) {
+                    DispatchHaptic(request.event, request.controllerMask);
+                }
+            });
+        entityManager_->ForEach<InputComponent>(
+            [&](EntityID, InputComponent& input) {
+                if (input.uiToggleRequested) {
+                    uiVisible_ = !uiVisible_;
+                    if (input.leftXPressedThisFrame) {
+                        DispatchHaptic(
+                            HapticEvent::UiToggled,
+                            1u << InputComponent::Left);
+                    }
+                    input.uiToggleRequested = false;
+                }
+            });
+    }
+    bool hasVisibleObjectContent = false;
+    {
+        ScopedUpdatePhaseTimer phase(
+            updateTiming, UpdatePhase::ScenePreparation);
+        transformSystem_->Update(*entityManager_);
+        renderSystem_->Update(*entityManager_);
+        entityManager_->ForEach<UnlitGeometryRenderComponent>(
+            [&](EntityID, UnlitGeometryRenderComponent& component) {
+                hasVisibleObjectContent =
+                    hasVisibleObjectContent ||
+                    component.maskVisibility_.HasVisibleEntries();
+            });
+    }
+    {
+        ScopedUpdatePhaseTimer phase(
+            updateTiming, UpdatePhase::EnvironmentDepth);
         ScopedCpuTimer timer(
             performanceTimingStats_.get(),
-            PerformanceSubsystem::EnvironmentDepth,
-            true);
+            PerformanceSubsystem::EnvironmentDepth);
         environmentDepthSystem_->Update(
             *entityManager_, in, hasVisibleObjectContent);
     }
     {
+        ScopedUpdatePhaseTimer phase(
+            updateTiming, UpdatePhase::LightEstimation);
         ScopedCpuTimer timer(
             performanceTimingStats_.get(),
-            PerformanceSubsystem::LightEstimation,
-            true);
+            PerformanceSubsystem::LightEstimation);
         cameraLightEstimationSystem_->Update(*entityManager_, in, Focused);
     }
-    unlitGeometryRenderSystem_->Update(*entityManager_, in);
+    {
+        ScopedUpdatePhaseTimer phase(
+            updateTiming, UpdatePhase::UnlitGeometry);
+        unlitGeometryRenderSystem_->Update(*entityManager_, in);
+    }
+    {
+        ScopedUpdatePhaseTimer phase(updateTiming, UpdatePhase::UiPointer);
 #if defined(__ANDROID__)
-    RefreshColorMatchingUi();
-    RefreshMeshScaleUi();
+        RefreshColorMatchingUi();
+        RefreshMeshScaleUi();
 #endif
-    std::vector<OVRFW::TinyUI::HitTestDevice> pointerDevices;
-    if ((ui_ || playbackUi_) && uiVisible_) {
-        if (ui_) ui_->HitTestDevices().clear();
-        if (playbackUi_) playbackUi_->HitTestDevices().clear();
-        entityManager_->ForEach<InputComponent>([&](EntityID, InputComponent& input) {
-            for (size_t handIndex = 0; handIndex < input.hands.size(); ++handIndex) {
-                const HandInput& hand = input.hands[handIndex];
-                const ControllerInput& controller = input.controllers[handIndex];
-                if (hand.active && hand.aimValid) {
-                    if (ui_) ui_->AddHitTestRay(
-                        hand.aimPose, hand.indexPinching, static_cast<int>(handIndex));
-                    if (playbackUi_) playbackUi_->AddHitTestRay(
-                        hand.aimPose, hand.indexPinching, static_cast<int>(handIndex));
-                } else if (controller.tracked) {
-                    if (ui_) ui_->AddHitTestRay(
-                        controller.aimPose, controller.indexTrigger > 0.5f,
-                        static_cast<int>(handIndex));
-                    if (playbackUi_) playbackUi_->AddHitTestRay(
-                        controller.aimPose, controller.indexTrigger > 0.5f,
-                        static_cast<int>(handIndex));
+        std::vector<OVRFW::TinyUI::HitTestDevice> pointerDevices;
+        if ((ui_ || playbackUi_) && uiVisible_) {
+            if (ui_) ui_->HitTestDevices().clear();
+            if (playbackUi_) playbackUi_->HitTestDevices().clear();
+            entityManager_->ForEach<InputComponent>(
+                [&](EntityID, InputComponent& input) {
+                    for (size_t handIndex = 0;
+                         handIndex < input.hands.size();
+                         ++handIndex) {
+                        const HandInput& hand = input.hands[handIndex];
+                        const ControllerInput& controller =
+                            input.controllers[handIndex];
+                        if (hand.active && hand.aimValid) {
+                            if (ui_) ui_->AddHitTestRay(
+                                hand.aimPose,
+                                hand.indexPinching,
+                                static_cast<int>(handIndex));
+                            if (playbackUi_) playbackUi_->AddHitTestRay(
+                                hand.aimPose,
+                                hand.indexPinching,
+                                static_cast<int>(handIndex));
+                        } else if (controller.tracked) {
+                            if (ui_) ui_->AddHitTestRay(
+                                controller.aimPose,
+                                controller.indexTrigger > 0.5f,
+                                static_cast<int>(handIndex));
+                            if (playbackUi_) playbackUi_->AddHitTestRay(
+                                controller.aimPose,
+                                controller.indexTrigger > 0.5f,
+                                static_cast<int>(handIndex));
+                        }
+                    }
+                });
+            if (ui_) ui_->Update(in);
+            if (playbackUi_) playbackUi_->Update(in);
+            const auto mergePointerDevices =
+                [&pointerDevices](
+                        const std::vector<OVRFW::TinyUI::HitTestDevice>& devices) {
+                    for (const auto& device : devices) {
+                        auto existing = std::find_if(
+                            pointerDevices.begin(),
+                            pointerDevices.end(),
+                            [&device](
+                                    const OVRFW::TinyUI::HitTestDevice& candidate) {
+                                return candidate.deviceNum == device.deviceNum;
+                            });
+                        if (existing == pointerDevices.end()) {
+                            pointerDevices.push_back(device);
+                            continue;
+                        }
+                        const float existingDistance =
+                            (existing->pointerEnd - existing->pointerStart)
+                                .LengthSq();
+                        const float candidateDistance =
+                            (device.pointerEnd - device.pointerStart).LengthSq();
+                        if (device.hitObject &&
+                            (!existing->hitObject ||
+                             candidateDistance < existingDistance)) {
+                            *existing = device;
+                        }
+                    }
+                };
+            if (ui_) mergePointerDevices(ui_->HitTestDevices());
+            if (playbackUi_) {
+                mergePointerDevices(playbackUi_->HitTestDevices());
+            }
+#if defined(__ANDROID__)
+            PreviewColorMatchingDraft();
+#endif
+            if (uiRebuildPending_) {
+                const UiMode nextMode = pendingUiMode_;
+                uiRebuildPending_ = false;
+                if (nextMode == UiMode::Masks) BuildMaskSelector();
+                else if (nextMode == UiMode::ColorMatching) {
+                    BuildColorMatchingControls();
+                } else if (nextMode == UiMode::ColorMatchingSettings) {
+                    BuildColorMatchingSettingsControls();
+                } else if (nextMode == UiMode::MeshScale) {
+                    BuildMeshScaleControls();
+                } else if (nextMode == UiMode::MeshDetail) {
+                    BuildMeshDetailControls();
+                } else if (nextMode == UiMode::Diagnostics) {
+                    BuildDiagnosticsControls();
+                } else {
+                    BuildDatasetPicker();
                 }
             }
-        });
-        if (ui_) ui_->Update(in);
-        if (playbackUi_) playbackUi_->Update(in);
-        const auto mergePointerDevices =
-            [&pointerDevices](const std::vector<OVRFW::TinyUI::HitTestDevice>& devices) {
-                for (const auto& device : devices) {
-                    auto existing = std::find_if(
-                        pointerDevices.begin(),
-                        pointerDevices.end(),
-                        [&device](const OVRFW::TinyUI::HitTestDevice& candidate) {
-                            return candidate.deviceNum == device.deviceNum;
-                        });
-                    if (existing == pointerDevices.end()) {
-                        pointerDevices.push_back(device);
-                        continue;
-                    }
-                    const float existingDistance =
-                        (existing->pointerEnd - existing->pointerStart).LengthSq();
-                    const float candidateDistance =
-                        (device.pointerEnd - device.pointerStart).LengthSq();
-                    if (device.hitObject &&
-                        (!existing->hitObject || candidateDistance < existingDistance)) {
-                        *existing = device;
-                    }
-                }
-        };
-        if (ui_) mergePointerDevices(ui_->HitTestDevices());
-        if (playbackUi_) mergePointerDevices(playbackUi_->HitTestDevices());
-#if defined(__ANDROID__)
-        PreviewColorMatchingDraft();
-#endif
-        if (uiRebuildPending_) {
-            const UiMode nextMode = pendingUiMode_;
-            uiRebuildPending_ = false;
-            if (nextMode == UiMode::Masks) BuildMaskSelector();
-            else if (nextMode == UiMode::ColorMatching) BuildColorMatchingControls();
-            else if (nextMode == UiMode::ColorMatchingSettings) BuildColorMatchingSettingsControls();
-            else if (nextMode == UiMode::MeshScale) BuildMeshScaleControls();
-            else if (nextMode == UiMode::MeshDetail) BuildMeshDetailControls();
-            else if (nextMode == UiMode::Diagnostics) BuildDiagnosticsControls();
-            else BuildDatasetPicker();
+        }
+        if (pointerRenderer_) {
+            pointerRenderer_->Update(in, pointerDevices);
         }
     }
-    if (pointerRenderer_) {
-        pointerRenderer_->Update(in, pointerDevices);
+    {
+        ScopedUpdatePhaseTimer phase(
+            updateTiming, UpdatePhase::DiagnosticsBookkeeping);
+        const auto publicationTime = clock::now();
+        if (performanceTimingStats_->PublishIfReady(publicationTime)) {
+            RefreshDiagnosticOverlay();
+        }
     }
-    const auto updateEnd = clock::now();
-    performanceTimingStats_->EndForegroundFrame(
-        std::chrono::duration<double, std::milli>(updateEnd - now).count());
-    if (performanceTimingStats_->PublishIfReady(updateEnd)) {
-        RefreshDiagnosticOverlay();
+    if (updateTiming.IsActive()) {
+        const double budgetMilliseconds =
+            currentPanelRefreshRateValid_
+            ? 1000.0 / static_cast<double>(currentPanelRefreshRate_)
+            : 1000.0 / 72.0;
+        performanceTimingStats_->RecordUpdateFrame(
+            updateTiming.Phases(),
+            updateTiming.Finish(),
+            budgetMilliseconds);
     }
 }
 
@@ -611,6 +749,22 @@ void TDGenPlayerApp::AppRenderFrame(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrR
 void TDGenPlayerApp::AppRenderEye(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out, int eye)
 {
     OVRFW::XrApp::AppRenderEye(in, out, eye);
+}
+
+void TDGenPlayerApp::AppFramePacingTiming(
+        const ovrFramePacingTiming& timing) {
+    performanceTimingStats_->Record(
+        PerformanceSubsystem::XrWaitFrame,
+        PerformanceDomain::Cpu,
+        timing.xrWaitFrameMilliseconds);
+    performanceTimingStats_->Record(
+        PerformanceSubsystem::SwapchainAcquire,
+        PerformanceDomain::Cpu,
+        timing.swapchainAcquireMilliseconds);
+    performanceTimingStats_->Record(
+        PerformanceSubsystem::XrEndFrame,
+        PerformanceDomain::Cpu,
+        timing.xrEndFrameMilliseconds);
 }
 
 // Called by the XrApp framework after the Update function
@@ -813,8 +967,6 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
         "Geometry compact    --     N/A\n"
         "Index upload        --     N/A\n"
         "Video decode        --     N/A\n"
-        "Upload stage        --     N/A\n"
-        "HW color submit     --     N/A\n"
         "Texture upload      --      --\n"
         "Rendering           --      --\n"
         "Other update        --     N/A",
@@ -823,9 +975,12 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
     diagnosticCameraLabel_ = diagnosticUi_->AddLabel(
         "Decode avg/p95 ms\n"
         " Color codec/copy: --/--  --/--\n"
+        " Upload stage/HW submit: --/--\n"
         " Alpha codec/copy: --/--  --/--\n"
         " Depth codec/copy: --/--  --/--\n"
         " Demux/audio: --/--\n"
+        "XR wait/acquire/end: --/-- --/-- --/--\n"
+        "Diagnostic refresh: --/--\n"
         "Producer: -- fps  ring --/--  starve --\n"
         "HW upload pending/drop: --/--\n"
         "Cells K/R/M: --/--/--  EBO: --\n"
@@ -849,6 +1004,9 @@ void TDGenPlayerApp::ShutdownDiagnosticOverlay() {
 
 void TDGenPlayerApp::RefreshDiagnosticOverlay() {
     if (!diagnosticLabel_ || !diagnosticCameraLabel_) return;
+    ScopedCpuTimer refreshTimer(
+        performanceTimingStats_.get(),
+        PerformanceSubsystem::DiagnosticRefresh);
     const PerformanceTimingSnapshot snapshot =
         performanceTimingStats_->Snapshot();
     const bool gpuSupported = gpuTiming_ && gpuTiming_->IsSupported();
@@ -879,6 +1037,18 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
               << metric.p95Milliseconds;
         return value.str();
     };
+    const auto averageP95Maximum =
+        [&](const PerformanceTimingMetric& metric) {
+            if (!snapshot.valid || !metric.HasSamples()) {
+                return std::string("--/--/--");
+            }
+            std::ostringstream value;
+            value << std::fixed << std::setprecision(2)
+                  << metric.averageMilliseconds << "/"
+                  << metric.p95Milliseconds << "/"
+                  << metric.maximumMilliseconds;
+            return value.str();
+        };
     const auto gpu = [&](PerformanceSubsystem subsystem, bool applicable) {
         return metricText(subsystem, PerformanceDomain::Gpu, applicable);
     };
@@ -1027,12 +1197,6 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
          << "  " << gpu(PerformanceSubsystem::IndexUpload, false) << "\n"
          << "Video decode    " << cpu(PerformanceSubsystem::VideoDecode)
          << "  " << gpu(PerformanceSubsystem::VideoDecode, false) << "\n"
-         << "Upload stage    " << cpu(PerformanceSubsystem::TextureStaging)
-         << "  " << gpu(PerformanceSubsystem::TextureStaging, false) << "\n"
-         << "HW color submit "
-         << cpu(PerformanceSubsystem::HardwareColorConversion)
-         << "  " << gpu(PerformanceSubsystem::HardwareColorConversion, false)
-         << "\n"
          << "Texture upload  " << cpu(PerformanceSubsystem::TextureUpload)
          << "  " << gpu(PerformanceSubsystem::TextureUpload, true) << "\n"
          << "Rendering       " << cpu(PerformanceSubsystem::Rendering)
@@ -1042,49 +1206,113 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
     diagnosticLabel_->SetText(text.str().c_str());
 
     std::ostringstream cameraText;
-    cameraText << "Decode avg/p95 ms\n"
-         << " Color decoder: " << colorDecoderName
-         << (colorDecoderHardware ? " [hardware]" : " [software]") << "\n"
-         << " Color codec/copy: "
-         << cpuAverageP95(PerformanceSubsystem::ColorDecode) << "  "
-         << cpuAverageP95(PerformanceSubsystem::ColorCopy) << "\n"
-         << " HW output wait: "
-         << cpuAverageP95(PerformanceSubsystem::ColorHardwareOutputWait) << "\n"
-         << " Alpha codec/copy: "
-         << cpuAverageP95(PerformanceSubsystem::AlphaDecode) << "  "
-         << cpuAverageP95(PerformanceSubsystem::AlphaCopy) << "\n"
-         << " Depth codec/copy: "
-         << cpuAverageP95(PerformanceSubsystem::DepthDecode) << "  "
-         << cpuAverageP95(PerformanceSubsystem::DepthConvertCopy) << "\n"
-         << " Demux/audio: "
-         << cpuAverageP95(PerformanceSubsystem::DemuxAudio) << "\n"
-         << (colorDecoderFallbackReason.empty()
-                ? std::string()
-                : " Fallback: " + colorDecoderFallbackReason + "\n")
-         << "Producer: " << std::fixed << std::setprecision(1)
-         << producerFps << " fps  ring "
-         << ringOccupancy << "/" << ringLowWater
-         << " cur/low  starve " << ringStarvations << "\n"
-         << "HW upload pending/drop: "
-         << pendingHardwareColorUploads << "/"
-         << droppedHardwareColorUploads << "\n"
-         << "Cells K/R/M: "
-         << retainedCells << "/" << rejectedCells << "/" << mixedCells
-         << "  EBO: "
-         << (usingDynamicIndices
-                ? std::to_string(compactIndexBytes / 1024) + " KiB"
-                : std::string("full"))
-         << "\nCamera: " << cameraPath << "\n"
-         << "cb/proc/super/drop: "
-         << cameraDiagnostics.callbackCount << "/"
-         << cameraDiagnostics.processedCount << "/"
-         << cameraDiagnostics.supersededFrameCount << "/"
-         << cameraDiagnostics.queuePressureDrops << "\n"
-         << std::fixed << std::setprecision(2)
-         << "age/cb95/import95: " << cameraDiagnostics.latestFrameAgeMs << "/"
-         << cameraDiagnostics.callbackP95Ms << "/"
-         << cameraDiagnostics.importP95Ms << " ms copy: "
-         << cameraDiagnostics.bytesCopied;
+    if (diagnosticUpdateDetailVisible_) {
+        constexpr std::array<const char*, UpdatePhaseCount> phaseNames = {
+            "Diagnostics/book",
+            "Core/scene",
+            "Input/control",
+            "Loader/audio",
+            "Interaction/haptic",
+            "Scene preparation",
+            "Environment depth",
+            "Light estimation",
+            "Unlit geometry",
+            "UI/pointer",
+        };
+        const UpdateTimingSnapshot& update = snapshot.update;
+        std::string dominantName = "--";
+        double dominantMilliseconds = 0.0;
+        if (snapshot.valid && update.total.HasSamples()) {
+            if (update.slowestFrameDominantContributor < UpdatePhaseCount) {
+                dominantName =
+                    phaseNames[update.slowestFrameDominantContributor];
+                dominantMilliseconds = update.slowestFramePhases[
+                    update.slowestFrameDominantContributor];
+            } else {
+                dominantName = "Residual";
+                dominantMilliseconds =
+                    update.slowestFrameResidualMilliseconds;
+            }
+        }
+        cameraText
+            << "Update avg/p95/max ms\n"
+            << "Total: " << averageP95Maximum(update.total) << "\n"
+            << std::fixed << std::setprecision(2)
+            << "Over " << update.budgetMilliseconds << " ms: "
+            << update.overBudgetCount << "/" << update.total.sampleCount << "\n"
+            << "Slowest dominant: " << dominantName;
+        if (snapshot.valid && update.total.HasSamples()) {
+            cameraText << " " << dominantMilliseconds;
+        } else {
+            cameraText << " --";
+        }
+        for (std::size_t index = 0; index < UpdatePhaseCount; ++index) {
+            cameraText << "\n" << phaseNames[index] << ": "
+                       << averageP95Maximum(update.phases[index]);
+        }
+        cameraText
+            << "\nResidual: " << averageP95Maximum(update.residual)
+            << "\nDiagnostic refresh: "
+            << averageP95Maximum(snapshot.Get(
+                PerformanceSubsystem::DiagnosticRefresh,
+                PerformanceDomain::Cpu));
+    } else {
+        cameraText << "Decode avg/p95 ms\n"
+             << " Color decoder: " << colorDecoderName
+             << (colorDecoderHardware ? " [hardware]" : " [software]")
+             << (!colorDecoderFallbackReason.empty() ? " [fallback]" : "")
+             << "\n"
+             << " Color codec/copy: "
+             << cpuAverageP95(PerformanceSubsystem::ColorDecode) << "  "
+             << cpuAverageP95(PerformanceSubsystem::ColorCopy) << "\n"
+             << " Upload stage/HW submit: "
+             << cpu(PerformanceSubsystem::TextureStaging) << "/"
+             << cpu(PerformanceSubsystem::HardwareColorConversion) << "\n"
+             << " HW output wait: "
+             << cpuAverageP95(
+                    PerformanceSubsystem::ColorHardwareOutputWait) << "\n"
+             << " Alpha codec/copy: "
+             << cpuAverageP95(PerformanceSubsystem::AlphaDecode) << "  "
+             << cpuAverageP95(PerformanceSubsystem::AlphaCopy) << "\n"
+             << " Depth codec/copy: "
+             << cpuAverageP95(PerformanceSubsystem::DepthDecode) << "  "
+             << cpuAverageP95(
+                    PerformanceSubsystem::DepthConvertCopy) << "\n"
+             << " Demux/audio: "
+             << cpuAverageP95(PerformanceSubsystem::DemuxAudio) << "\n"
+             << "XR wait/acquire/end: "
+             << cpuAverageP95(PerformanceSubsystem::XrWaitFrame) << " "
+             << cpuAverageP95(PerformanceSubsystem::SwapchainAcquire) << " "
+             << cpuAverageP95(PerformanceSubsystem::XrEndFrame) << "\n"
+             << "Diagnostic refresh: "
+             << cpuAverageP95(
+                    PerformanceSubsystem::DiagnosticRefresh) << "\n"
+             << "Producer: " << std::fixed << std::setprecision(1)
+             << producerFps << " fps  ring "
+             << ringOccupancy << "/" << ringLowWater
+             << " cur/low  starve " << ringStarvations << "\n"
+             << "HW upload pending/drop: "
+             << pendingHardwareColorUploads << "/"
+             << droppedHardwareColorUploads << "\n"
+             << "Cells K/R/M: "
+             << retainedCells << "/" << rejectedCells << "/" << mixedCells
+             << "  EBO: "
+             << (usingDynamicIndices
+                    ? std::to_string(compactIndexBytes / 1024) + " KiB"
+                    : std::string("full"))
+             << "\nCamera: " << cameraPath << "\n"
+             << "cb/proc/super/drop: "
+             << cameraDiagnostics.callbackCount << "/"
+             << cameraDiagnostics.processedCount << "/"
+             << cameraDiagnostics.supersededFrameCount << "/"
+             << cameraDiagnostics.queuePressureDrops << "\n"
+             << std::fixed << std::setprecision(2)
+             << "age/cb95/import95: "
+             << cameraDiagnostics.latestFrameAgeMs << "/"
+             << cameraDiagnostics.callbackP95Ms << "/"
+             << cameraDiagnostics.importP95Ms << " ms copy: "
+             << cameraDiagnostics.bytesCopied;
+    }
     diagnosticCameraLabel_->SetText(cameraText.str().c_str());
 }
 
@@ -1109,6 +1337,11 @@ void TDGenPlayerApp::BuildDiagnosticsControls() {
             loader.dynamicIndexCullingEnabled.store(
                 dynamicIndexCullingEnabled_, std::memory_order_release);
         });
+    ui_->AddToggleButton(
+        "Detail view: Update", "Detail view: Pipeline",
+        &diagnosticUpdateDetailVisible_,
+        {0.0f, 0.16f, -1.5f}, {500.0f, 50.0f},
+        [this]() { RefreshDiagnosticOverlay(); });
 
     std::ostringstream supported;
     supported << "Supported panel rates: ";
@@ -1126,9 +1359,9 @@ void TDGenPlayerApp::BuildDiagnosticsControls() {
         }
         supported << " Hz";
     }
-    ui_->AddLabel(supported.str(), {0.0f, 0.15f, -1.5f}, {720.0f, 45.0f});
+    ui_->AddLabel(supported.str(), {0.0f, 0.09f, -1.5f}, {720.0f, 45.0f});
     refreshRateStatusLabel_ = ui_->AddLabel(
-        "", {0.0f, 0.08f, -1.5f}, {720.0f, 45.0f});
+        "", {0.0f, 0.03f, -1.5f}, {720.0f, 45.0f});
 
     const auto addRateChoice = [&](float refreshRate, float x) {
         std::ostringstream label;
@@ -1136,7 +1369,7 @@ void TDGenPlayerApp::BuildDiagnosticsControls() {
         if (SupportsDisplayRefreshRate(refreshRate)) {
             ui_->AddButton(
                 label.str(),
-                {x, -0.01f, -1.5f},
+                {x, -0.05f, -1.5f},
                 {180.0f, 50.0f},
                 [this, refreshRate]() {
                     if (RequestDisplayRefreshRate(refreshRate, true)) {
@@ -1148,13 +1381,13 @@ void TDGenPlayerApp::BuildDiagnosticsControls() {
         } else {
             label << " (unsupported)";
             ui_->AddLabel(
-                label.str(), {x, -0.01f, -1.5f}, {240.0f, 50.0f});
+                label.str(), {x, -0.05f, -1.5f}, {240.0f, 50.0f});
         }
     };
     addRateChoice(72.0f, -0.27f);
     addRateChoice(90.0f, 0.27f);
     refreshRateMessageLabel_ = ui_->AddLabel(
-        "", {0.0f, -0.08f, -1.5f}, {720.0f, 45.0f});
+        "", {0.0f, -0.12f, -1.5f}, {720.0f, 45.0f});
     RefreshDisplayRefreshRateUi();
 }
 

@@ -398,6 +398,13 @@ main-thread frame time.
 Geometry upload diagnostics split render-thread PBO staging from hardware-color conversion
 submission and report pending hardware-image releases and frames dropped rather than blocking on
 a busy conversion slot. Hardware-image completion is polled asynchronously on later XR updates.
+Frame-pacing diagnostics additionally report average/p95 wall time in `xrWaitFrame`, aggregate
+two-eye swapchain acquisition, `xrEndFrame`, and diagnostic-label refresh so compositor pacing can
+be distinguished from application update and rendering work.
+The `Detail view` control switches the secondary panel between pipeline diagnostics and a
+16-line `Update` breakdown. The latter reports average/p95/maximum wall time, refresh-budget
+overruns, the dominant contributor in the slowest frame, and non-overlapping timings for each
+top-level system group called by `TDGenPlayerApp::Update`.
 
 On devices supporting `GL_EXT_disjoint_timer_query`, the overlay also reports non-blocking GPU
 averages for camera/light GL work, geometry texture uploads, and the complete two-eye application

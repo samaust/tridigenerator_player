@@ -292,6 +292,12 @@ class XrApp {
         RENDER_STATE_RUNNING, // render frames
     };
 
+    struct ovrFramePacingTiming {
+        double xrWaitFrameMilliseconds = 0.0;
+        double swapchainAcquireMilliseconds = 0.0;
+        double xrEndFrameMilliseconds = 0.0;
+    };
+
     static const int CPU_LEVEL = 2;
     static const int GPU_LEVEL = 3;
     static const int NUM_MULTI_SAMPLES = 4;
@@ -418,6 +424,9 @@ class XrApp {
     AppRenderEye(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out, int eye);
     // Called once per eye each frame for default renderer
     virtual void AppEyeGLStateSetup(const ovrApplFrameIn& in, const ovrFramebuffer* fb, int eye);
+    // Called after xrEndFrame with wall-clock timings for the runtime-facing
+    // phases of the completed frame.
+    virtual void AppFramePacingTiming(const ovrFramePacingTiming&) {}
 
     virtual bool SessionInit();
     virtual void SessionEnd();
@@ -562,6 +571,8 @@ class XrApp {
 
     // Internal Input
     void HandleInput(ovrApplFrameIn& in);
+
+    double frameSwapchainAcquireMilliseconds_ = 0.0;
 
     // Internal Render
     void RenderFrame(const ovrApplFrameIn& in, ovrRendererOutput& out);

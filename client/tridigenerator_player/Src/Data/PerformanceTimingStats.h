@@ -30,6 +30,10 @@ enum class PerformanceSubsystem : std::size_t {
     HardwareColorConversion,
     TextureUpload,
     Rendering,
+    XrWaitFrame,
+    SwapchainAcquire,
+    XrEndFrame,
+    DiagnosticRefresh,
     OtherUpdate,
     Count,
 };
@@ -40,12 +44,41 @@ enum class PerformanceDomain : std::size_t {
     Count,
 };
 
+enum class UpdatePhase : std::size_t {
+    DiagnosticsBookkeeping = 0,
+    CoreScene,
+    InputControl,
+    FrameLoaderAudio,
+    InteractionHaptics,
+    ScenePreparation,
+    EnvironmentDepth,
+    LightEstimation,
+    UnlitGeometry,
+    UiPointer,
+    Count,
+};
+
+constexpr std::size_t UpdatePhaseCount =
+    static_cast<std::size_t>(UpdatePhase::Count);
+
 struct PerformanceTimingMetric {
     double averageMilliseconds = 0.0;
     double p95Milliseconds = 0.0;
+    double maximumMilliseconds = 0.0;
     std::uint64_t sampleCount = 0;
 
     bool HasSamples() const { return sampleCount != 0; }
+};
+
+struct UpdateTimingSnapshot {
+    PerformanceTimingMetric total{};
+    std::array<PerformanceTimingMetric, UpdatePhaseCount> phases{};
+    PerformanceTimingMetric residual{};
+    double budgetMilliseconds = 1000.0 / 72.0;
+    std::uint64_t overBudgetCount = 0;
+    std::array<double, UpdatePhaseCount> slowestFramePhases{};
+    double slowestFrameResidualMilliseconds = 0.0;
+    std::size_t slowestFrameDominantContributor = UpdatePhaseCount;
 };
 
 struct PerformanceTimingSnapshot {
@@ -54,6 +87,7 @@ struct PerformanceTimingSnapshot {
         static_cast<std::size_t>(PerformanceSubsystem::Count)>;
 
     MetricArray metrics{};
+    UpdateTimingSnapshot update{};
     std::uint64_t generation = 0;
     bool valid = false;
 
@@ -88,6 +122,7 @@ public:
         }
         published_ = {};
         published_.generation = generation_;
+        updateAccumulated_ = {};
         windowStart_ = {};
         foreground_ = {};
         foregroundActive_ = false;
@@ -142,6 +177,52 @@ public:
         foregroundActive_ = false;
     }
 
+    void RecordUpdateFrame(
+            const std::array<double, UpdatePhaseCount>& phaseMilliseconds,
+            double totalMilliseconds,
+            double budgetMilliseconds) {
+        if (!IsEnabled() || totalMilliseconds < 0.0 ||
+            budgetMilliseconds <= 0.0) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!enabled_.load(std::memory_order_relaxed)) return;
+
+        double accountedMilliseconds = 0.0;
+        for (std::size_t index = 0; index < UpdatePhaseCount; ++index) {
+            const double value = std::max(0.0, phaseMilliseconds[index]);
+            AddSample(updateAccumulated_.phases[index], value);
+            accountedMilliseconds += value;
+        }
+        const double residualMilliseconds =
+            std::max(0.0, totalMilliseconds - accountedMilliseconds);
+        AddSample(updateAccumulated_.total, totalMilliseconds);
+        AddSample(updateAccumulated_.residual, residualMilliseconds);
+        AddSample(
+            accumulated_[Index(PerformanceSubsystem::OtherUpdate)]
+                        [Index(PerformanceDomain::Cpu)],
+            residualMilliseconds);
+        updateAccumulated_.budgetMilliseconds = budgetMilliseconds;
+        if (totalMilliseconds > budgetMilliseconds) {
+            ++updateAccumulated_.overBudgetCount;
+        }
+        if (totalMilliseconds > updateAccumulated_.slowestFrameMilliseconds) {
+            updateAccumulated_.slowestFrameMilliseconds = totalMilliseconds;
+            updateAccumulated_.slowestFramePhases = phaseMilliseconds;
+            updateAccumulated_.slowestFrameResidualMilliseconds =
+                residualMilliseconds;
+            std::size_t dominant = UpdatePhaseCount;
+            double dominantMilliseconds = residualMilliseconds;
+            for (std::size_t index = 0; index < UpdatePhaseCount; ++index) {
+                if (phaseMilliseconds[index] > dominantMilliseconds) {
+                    dominantMilliseconds = phaseMilliseconds[index];
+                    dominant = index;
+                }
+            }
+            updateAccumulated_.slowestFrameDominantContributor = dominant;
+        }
+    }
+
     bool PublishIfReady(TimePoint now) {
         if (!IsEnabled()) return false;
         std::lock_guard<std::mutex> lock(mutex_);
@@ -159,34 +240,31 @@ public:
             for (std::size_t domain = 0; domain < accumulated_[subsystem].size(); ++domain) {
                 const auto& source = accumulated_[subsystem][domain];
                 auto& destination = published_.metrics[subsystem][domain];
-                destination.sampleCount = source.sampleCount;
-                if (source.sampleCount != 0) {
-                    destination.averageMilliseconds =
-                        source.totalMilliseconds / static_cast<double>(source.sampleCount);
-                    if (source.samples.empty()) {
-                        // Keep publication safe if a future accumulator path
-                        // records only totals. Such a metric has no
-                        // distribution, so its average is the best available
-                        // percentile estimate.
-                        destination.p95Milliseconds =
-                            destination.averageMilliseconds;
-                    } else {
-                        std::vector<double> sorted = source.samples;
-                        std::sort(sorted.begin(), sorted.end());
-                        const std::size_t rank = static_cast<std::size_t>(
-                            std::ceil(
-                                0.95 * static_cast<double>(sorted.size())));
-                        destination.p95Milliseconds = sorted[std::min(
-                            sorted.size() - 1,
-                            rank > 0 ? rank - 1 : 0)];
-                    }
-                }
+                PublishMetric(source, destination);
             }
         }
+        PublishMetric(updateAccumulated_.total, published_.update.total);
+        PublishMetric(updateAccumulated_.residual, published_.update.residual);
+        for (std::size_t index = 0; index < UpdatePhaseCount; ++index) {
+            PublishMetric(
+                updateAccumulated_.phases[index],
+                published_.update.phases[index]);
+        }
+        published_.update.budgetMilliseconds =
+            updateAccumulated_.budgetMilliseconds;
+        published_.update.overBudgetCount =
+            updateAccumulated_.overBudgetCount;
+        published_.update.slowestFramePhases =
+            updateAccumulated_.slowestFramePhases;
+        published_.update.slowestFrameResidualMilliseconds =
+            updateAccumulated_.slowestFrameResidualMilliseconds;
+        published_.update.slowestFrameDominantContributor =
+            updateAccumulated_.slowestFrameDominantContributor;
         accumulated_ = {};
         for (auto& subsystem : accumulated_) {
             for (auto& domain : subsystem) domain.samples.clear();
         }
+        updateAccumulated_ = {};
         windowStart_ = now;
         return true;
     }
@@ -212,6 +290,17 @@ private:
         std::uint64_t sampleCount = 0;
         std::vector<double> samples;
     };
+    struct UpdateAccumulator {
+        Accumulator total{};
+        std::array<Accumulator, UpdatePhaseCount> phases{};
+        Accumulator residual{};
+        double budgetMilliseconds = 1000.0 / 72.0;
+        std::uint64_t overBudgetCount = 0;
+        double slowestFrameMilliseconds = -1.0;
+        std::array<double, UpdatePhaseCount> slowestFramePhases{};
+        double slowestFrameResidualMilliseconds = 0.0;
+        std::size_t slowestFrameDominantContributor = UpdatePhaseCount;
+    };
     using AccumulatorArray = std::array<
         std::array<Accumulator, static_cast<std::size_t>(PerformanceDomain::Count)>,
         static_cast<std::size_t>(PerformanceSubsystem::Count)>;
@@ -224,10 +313,39 @@ private:
         return static_cast<std::size_t>(value);
     }
 
+    static void AddSample(Accumulator& accumulator, double milliseconds) {
+        accumulator.totalMilliseconds += milliseconds;
+        ++accumulator.sampleCount;
+        accumulator.samples.push_back(milliseconds);
+    }
+
+    static void PublishMetric(
+            const Accumulator& source,
+            PerformanceTimingMetric& destination) {
+        destination.sampleCount = source.sampleCount;
+        if (source.sampleCount == 0) return;
+        destination.averageMilliseconds =
+            source.totalMilliseconds / static_cast<double>(source.sampleCount);
+        if (source.samples.empty()) {
+            destination.p95Milliseconds = destination.averageMilliseconds;
+            destination.maximumMilliseconds = destination.averageMilliseconds;
+            return;
+        }
+        std::vector<double> sorted = source.samples;
+        std::sort(sorted.begin(), sorted.end());
+        const std::size_t rank = static_cast<std::size_t>(
+            std::ceil(0.95 * static_cast<double>(sorted.size())));
+        destination.p95Milliseconds = sorted[std::min(
+            sorted.size() - 1,
+            rank > 0 ? rank - 1 : 0)];
+        destination.maximumMilliseconds = sorted.back();
+    }
+
     mutable std::mutex mutex_;
     std::atomic<bool> enabled_{false};
     std::uint64_t generation_ = 1;
     AccumulatorArray accumulated_{};
+    UpdateAccumulator updateAccumulated_{};
     PerformanceTimingSnapshot published_{};
     TimePoint windowStart_{};
     std::array<double, static_cast<std::size_t>(PerformanceSubsystem::Count)> foreground_{};

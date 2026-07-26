@@ -28,6 +28,8 @@ Language    :   c++
 
 #include "XrApp.h"
 
+#include <chrono>
+
 #if defined(ANDROID)
 #include <android/window.h>
 #include <android/native_window_jni.h>
@@ -1354,7 +1356,11 @@ void XrApp::AppRenderFrame(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOu
 
     for (int eye = 0; eye < MAX_NUM_EYES; eye++) {
         ovrFramebuffer* frameBuffer = &FrameBuffer[eye];
+        const auto acquireStart = std::chrono::steady_clock::now();
         ovrFramebuffer_Acquire(frameBuffer);
+        frameSwapchainAcquireMilliseconds_ +=
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - acquireStart).count();
         ovrFramebuffer_SetCurrent(frameBuffer);
 
         AppEyeGLStateSetup(in, frameBuffer, eye);
@@ -1525,7 +1531,11 @@ void XrApp::MainLoop(MainLoopContext& loopContext) {
 
         XrFrameState frameState = {XR_TYPE_FRAME_STATE};
 
+        const auto waitFrameStart = std::chrono::steady_clock::now();
         OXR(xrWaitFrame(Session, &waitFrameInfo, &frameState));
+        const double waitFrameMilliseconds =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - waitFrameStart).count();
 
         // Get the HMD pose, predicted for the middle of the time period during which
         // the new eye images will be displayed. The number of frames predicted ahead
@@ -1602,6 +1612,7 @@ void XrApp::MainLoop(MainLoopContext& loopContext) {
         PreProjectionAddLayer(Layers, LayerCount);
 
         // Render the world-view layer (projection)
+        frameSwapchainAcquireMilliseconds_ = 0.0;
         AppRenderFrame(in, out);
         ProjectionAddLayer(Layers, LayerCount);
 
@@ -1620,7 +1631,15 @@ void XrApp::MainLoop(MainLoopContext& loopContext) {
         endFrameInfo.layerCount = LayerCount;
         endFrameInfo.layers = layers;
 
+        const auto endFrameStart = std::chrono::steady_clock::now();
         OXR(xrEndFrame(Session, &endFrameInfo));
+        const double endFrameMilliseconds =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - endFrameStart).count();
+        AppFramePacingTiming({
+            waitFrameMilliseconds,
+            frameSwapchainAcquireMilliseconds_,
+            endFrameMilliseconds});
     }
 
     EndSession();

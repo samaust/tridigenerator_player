@@ -104,6 +104,7 @@ private:
     bool meshDetailEditActive_ = false;
     bool uiVisible_ = true;
     bool diagnosticOverlayVisible_ = false;
+    bool diagnosticUpdateDetailVisible_ = false;
     bool dynamicIndexCullingEnabled_ = false;
     bool uiAnchorInitialized_ = false;
     OVR::Posef uiAnchorPose_ = OVR::Posef::Identity();
@@ -189,6 +190,8 @@ private:
     virtual void Update(const OVRFW::ovrApplFrameIn &in) override;
     virtual void AppRenderFrame(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out) override;
     virtual void AppRenderEye(const OVRFW::ovrApplFrameIn& in, OVRFW::ovrRendererOutput& out, int eye) override;
+    virtual void AppFramePacingTiming(
+        const ovrFramePacingTiming& timing) override;
     virtual void Render(const OVRFW::ovrApplFrameIn &in, OVRFW::ovrRendererOutput &out) override;
     virtual void SessionEnd() override;
     virtual void AppShutdown(const xrJava *context) override;
