@@ -1,5 +1,9 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
+#include <vector>
+
 /**
  * Struct returned for each decoded frame.
  * All planes are tightly packed (row stride == width for each plane).
@@ -31,6 +35,14 @@ struct VideoFrame {
     uint32_t textureDepthWidth = 0;
     uint32_t textureDepthHeight = 0;
     int textureDepthStride = 0;
+
+    // Depth resized and bounded by the decoder thread for the active mesh detail.
+    std::vector<uint16_t> preparedDepthData;
+    uint32_t preparedDepthWidth = 0;
+    uint32_t preparedDepthHeight = 0;
+    bool preparedDepthBoundsValid = false;
+    std::array<float, 3> preparedDepthBoundsMinimum{};
+    std::array<float, 3> preparedDepthBoundsMaximum{};
 
     int64_t ts_us = 0;
     bool yuvFullRange = false;

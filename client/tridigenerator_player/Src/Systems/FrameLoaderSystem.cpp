@@ -31,6 +31,8 @@
 #include "../States/FrameLoaderState.h"
 #include "../Data/VipeDataset.h"
 #include "../Data/PlaybackControl.h"
+#include "../Components/MeshDetailSettings.h"
+#include "DepthFramePreparation.h"
 
 static constexpr int RING_SIZE = 8;
 static constexpr size_t MAX_AUDIO_SAMPLES = 48000 * 2 * 2;
@@ -43,6 +45,52 @@ static void ResetAudioState(FrameLoaderState& state) {
     state.audioStarted.store(false, std::memory_order_release);
     state.audioPlayedFrames.store(0, std::memory_order_release);
     state.audioEpochUs.store(0, std::memory_order_release);
+}
+
+static bool PrepareDecodedDepth(
+        const FrameLoaderComponent& loader,
+        VideoFrame& frame,
+        DepthFramePreparer& preparer,
+        PreparedDepthFrame& prepared) {
+    if (frame.frameIndex < 0 ||
+        frame.frameIndex >= static_cast<int>(loader.dataset.frames.size())) {
+        frame.preparedDepthData.clear();
+        frame.preparedDepthWidth = 0;
+        frame.preparedDepthHeight = 0;
+        frame.preparedDepthBoundsValid = false;
+        return false;
+    }
+
+    const int divisor = MeshDetailControl::SanitizeDivisor(
+        loader.meshDetailDivisor.load(std::memory_order_acquire));
+    const uint32_t width = static_cast<uint32_t>(
+        MeshDetailControl::ReducedDimension(loader.width, divisor));
+    const uint32_t height = static_cast<uint32_t>(
+        MeshDetailControl::ReducedDimension(loader.height, divisor));
+    if (!preparer.Prepare(
+            frame.textureDepthData,
+            frame.textureDepthWidth,
+            frame.textureDepthHeight,
+            width,
+            height,
+            loader.dataset.invalidDepthValue,
+            loader.dataset.depthUnitsPerMetre,
+            loader.dataset.frames[frame.frameIndex].intrinsics,
+            prepared)) {
+        frame.preparedDepthData.clear();
+        frame.preparedDepthWidth = 0;
+        frame.preparedDepthHeight = 0;
+        frame.preparedDepthBoundsValid = false;
+        return false;
+    }
+
+    frame.preparedDepthData.swap(prepared.pixels);
+    frame.preparedDepthWidth = prepared.width;
+    frame.preparedDepthHeight = prepared.height;
+    frame.preparedDepthBoundsValid = prepared.boundsValid;
+    frame.preparedDepthBoundsMinimum = prepared.boundsMinimum;
+    frame.preparedDepthBoundsMaximum = prepared.boundsMaximum;
+    return true;
 }
 
 // ---------- writeBinary / writeString helpers for curl ----------
@@ -374,6 +422,8 @@ void FrameLoaderSystem::StopBackgroundWriter(FrameLoaderComponent& flC,
 void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& flS) {
     LOGI("Writer thread started");
     const int TARGET_FILL = RING_SIZE / 2; // keep half-filled
+    DepthFramePreparer depthPreparer;
+    PreparedDepthFrame preparedDepth;
 
     // Download video
     std::vector<uint8_t> fetched = LoadVideo(flC);
@@ -451,6 +501,12 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
                     ResetAudioState(flS);
                     flS.audioAvailable.store(demuxer.has_audio(), std::memory_order_release);
                     continue;
+                }
+                if (!PrepareDecodedDepth(
+                        flC, *s.frame, depthPreparer, preparedDepth)) {
+                    LOGW(
+                        "Failed to prepare depth for decoded frame %d",
+                        s.frame->frameIndex);
                 }
 
                 std::vector<AudioPcmBlock> audio = demuxer.take_audio_blocks();

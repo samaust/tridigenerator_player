@@ -1,6 +1,5 @@
 #pragma once
 
-#include <vector>
 #include <string>
 #include <cstdint>
 
@@ -25,7 +24,7 @@ struct UnlitGeometryRenderState {
     int meshDetailDivisor_ = 2;
     uint32_t meshWidth_ = 2;
     uint32_t meshHeight_ = 2;
-    std::vector<uint16_t> resizedDepthData_;
+    bool depthTextureReady_ = false;
 
     // Shader programs (limited-range and full-range YUV)
     OVRFW::GlProgram ProgramLimited_;

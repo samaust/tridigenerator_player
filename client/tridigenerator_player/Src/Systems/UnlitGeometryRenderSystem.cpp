@@ -36,7 +36,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cfloat>
 
 #include "UnlitGeometryRenderSystem.h"
 
@@ -46,7 +45,6 @@
 #include "../Shaders/UnlitGeometryRenderShaders.h"
 
 #include "../Systems/TransformSystem.h"
-#include "../Systems/DepthTextureResize.h"
 
 #include "../Components/TransformComponent.h"
 #include "../Components/InteractableComponent.h"
@@ -66,6 +64,27 @@ using OVR::Quatf;
 using OVR::Vector2f;
 using OVR::Vector3f;
 using OVR::Vector4f;
+
+namespace {
+
+const std::vector<uint16_t>* PreparedDepthPixels(
+        const VideoFrame& frame,
+        uint32_t expectedWidth,
+        uint32_t expectedHeight) {
+    const size_t expectedPixels =
+        static_cast<size_t>(expectedWidth) * expectedHeight;
+    if (frame.preparedDepthData.size() >= expectedPixels) {
+        return &frame.preparedDepthData;
+    }
+    if (frame.textureDepthWidth == expectedWidth &&
+        frame.textureDepthHeight == expectedHeight &&
+        frame.textureDepthData.size() >= expectedPixels) {
+        return &frame.textureDepthData;
+    }
+    return nullptr;
+}
+
+} // namespace
 
 /**
  * @brief Initialize the unlit geometry render system for entities that include
@@ -93,6 +112,7 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs, int meshDetailDivisor) 
         ugrS.meshDetailDivisor_ = divisor;
         ugrS.meshWidth_ = static_cast<uint32_t>(meshWidth);
         ugrS.meshHeight_ = static_cast<uint32_t>(meshHeight);
+        flC.meshDetailDivisor.store(divisor, std::memory_order_release);
         if (flC.width <= 1 || flC.height <= 1) {
             LOGW("Using fallback quad subdivisions (width=%d height=%d)", flC.width, flC.height);
         }
@@ -186,15 +206,11 @@ bool UnlitGeometryRenderSystem::RebuildGeometry(
     const int divisor = MeshDetailControl::SanitizeDivisor(meshDetailDivisor);
     bool rebuilt = false;
     ecs.ForEachMulti<
-        UnlitGeometryRenderComponent,
         UnlitGeometryRenderState,
-        FrameLoaderComponent,
-        FrameLoaderState>(
+        FrameLoaderComponent>(
         [&](EntityID,
-            UnlitGeometryRenderComponent& renderComponent,
             UnlitGeometryRenderState& renderState,
-            FrameLoaderComponent& loader,
-            FrameLoaderState& loaderState) {
+            FrameLoaderComponent& loader) {
             const int meshWidth =
                 MeshDetailControl::ReducedDimension(loader.width, divisor);
             const int meshHeight =
@@ -223,31 +239,14 @@ bool UnlitGeometryRenderSystem::RebuildGeometry(
                     return;
                 }
             }
-            const int previousDivisor = renderState.meshDetailDivisor_;
-            const uint32_t previousWidth = renderState.meshWidth_;
-            const uint32_t previousHeight = renderState.meshHeight_;
             renderState.meshDetailDivisor_ = divisor;
             renderState.meshWidth_ = static_cast<uint32_t>(meshWidth);
             renderState.meshHeight_ = static_cast<uint32_t>(meshHeight);
-            if (loaderState.framePtr != nullptr &&
-                *loaderState.framePtr != nullptr &&
-                TexturesCreated(renderState) &&
-                !RecreateDepthTextures(
-                    **loaderState.framePtr, renderComponent, renderState)) {
-                LOGE(
-                    "Failed to resize depth textures for mesh detail %s",
-                    MeshDetailControl::DisplayName(divisor));
-                renderState.meshDetailDivisor_ = previousDivisor;
-                renderState.meshWidth_ = previousWidth;
-                renderState.meshHeight_ = previousHeight;
-                PrepareDepthTextureData(**loaderState.framePtr, renderState);
-                for (auto& replacement : replacements) replacement.Free();
-                return;
-            }
             for (int surface = 0; surface < 2; ++surface) {
                 renderState.surfaceDefs_[surface].geo.Free();
                 renderState.surfaceDefs_[surface].geo = replacements[surface];
             }
+            loader.meshDetailDivisor.store(divisor, std::memory_order_release);
             LOGI(
                 "Rebuilt mesh detail %s: source=%dx%d mesh/depth=%dx%d vertices=%zu",
                 MeshDetailControl::DisplayName(divisor),
@@ -290,7 +289,7 @@ void UnlitGeometryRenderSystem::Shutdown(EntityManager& ecs) {
         ugrS.ProgramLimited_ = {};
         ugrS.ProgramFullRange_ = {};
         ugrS.currentSurfaceSet_ = 0;
-        ugrS.resizedDepthData_.clear();
+        ugrS.depthTextureReady_ = false;
     });
 }
 
@@ -412,11 +411,33 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
             //LOGI("Update textures with new frame");
             // A new frame is available, so update textures and matrices.
             const VideoFrame& frame = **flS.framePtr;
-            if (PrepareDepthTextureData(frame, ugrS)) {
+            if (frame.preparedDepthWidth == ugrS.meshWidth_ &&
+                frame.preparedDepthHeight == ugrS.meshHeight_ &&
+                PreparedDepthPixels(
+                    frame, ugrS.meshWidth_, ugrS.meshHeight_) != nullptr) {
+                if ((ugrS.textures_[0][TEX_DEPTH].Width !=
+                        static_cast<int>(ugrS.meshWidth_) ||
+                     ugrS.textures_[0][TEX_DEPTH].Height !=
+                        static_cast<int>(ugrS.meshHeight_)) &&
+                    !RecreateDepthTextures(ugrC, ugrS)) {
+                    LOGE(
+                        "Failed to create %dx%d depth textures",
+                        ugrS.meshWidth_,
+                        ugrS.meshHeight_);
+                    flS.frameReady.store(false, std::memory_order_relaxed);
+                    return;
+                }
                 UpdateFrameGeometry(flC, frame, tC, tS, ugrS, interactable);
                 UpdateTextures(ugrC, flS.framePtr, ugrS);
+                ugrS.depthTextureReady_ = true;
             } else {
-                LOGE("Failed to resize depth data for frame %d", frame.frameIndex);
+                LOGW(
+                    "Skipping frame %d prepared at %dx%d; waiting for mesh depth %dx%d",
+                    frame.frameIndex,
+                    frame.preparedDepthWidth,
+                    frame.preparedDepthHeight,
+                    ugrS.meshWidth_,
+                    ugrS.meshHeight_);
             }
 
             // Consume the flag by setting it back to false.
@@ -545,41 +566,12 @@ void UnlitGeometryRenderSystem::CreateTextures(
 
     // Start with set 0 as the one to be rendered.
     ugrS.currentSurfaceSet_ = 0;
-}
-
-bool UnlitGeometryRenderSystem::PrepareDepthTextureData(
-        const VideoFrame& frame,
-        UnlitGeometryRenderState& ugrS) {
-    const size_t sourcePixels =
-        static_cast<size_t>(frame.textureDepthWidth) * frame.textureDepthHeight;
-    if (frame.textureDepthWidth == 0 || frame.textureDepthHeight == 0 ||
-        frame.textureDepthData.size() < sourcePixels) {
-        ugrS.resizedDepthData_.clear();
-        return false;
-    }
-    if (frame.textureDepthWidth == ugrS.meshWidth_ &&
-        frame.textureDepthHeight == ugrS.meshHeight_) {
-        ugrS.resizedDepthData_.clear();
-        return true;
-    }
-    return DepthTextureResize::Nearest(
-        frame.textureDepthData,
-        frame.textureDepthWidth,
-        frame.textureDepthHeight,
-        ugrS.meshWidth_,
-        ugrS.meshHeight_,
-        ugrS.resizedDepthData_);
+    ugrS.depthTextureReady_ = false;
 }
 
 bool UnlitGeometryRenderSystem::RecreateDepthTextures(
-        const VideoFrame& frame,
         UnlitGeometryRenderComponent& ugrC,
         UnlitGeometryRenderState& ugrS) {
-    if (!PrepareDepthTextureData(frame, ugrS)) return false;
-    const std::vector<uint16_t>& depthData = ugrS.resizedDepthData_.empty()
-        ? frame.textureDepthData
-        : ugrS.resizedDepthData_;
-
     std::array<OVRFW::GlTexture, 2> replacements;
     for (int surface = 0; surface < 2; ++surface) {
         replacements[surface] = CreateGlTexture(
@@ -599,18 +591,13 @@ bool UnlitGeometryRenderSystem::RecreateDepthTextures(
     ugrC.texture_unpack_alignments_[TEX_DEPTH] =
         computeUnpackAlignment(bytesPerRow);
     for (int surface = 0; surface < 2; ++surface) {
-        UpdateGl16Texture(
-            replacements[surface],
-            GL_RED_INTEGER,
-            depthData.data(),
-            ugrC.texture_unpack_alignments_[TEX_DEPTH],
-            0);
         OVRFW::FreeTexture(ugrS.textures_[surface][TEX_DEPTH]);
         ugrS.textures_[surface][TEX_DEPTH] = replacements[surface];
         auto& command = ugrS.surfaceDefs_[surface].graphicsCommand;
         command.Textures[TEX_DEPTH] = ugrS.textures_[surface][TEX_DEPTH];
         command.BindUniformTextures();
     }
+    ugrS.depthTextureReady_ = false;
     return true;
 }
 
@@ -689,45 +676,16 @@ void UnlitGeometryRenderSystem::UpdateFrameGeometry(
     renderState.imageSize_ = OVR::Vector2f(
         static_cast<float>(flC.width), static_cast<float>(flC.height));
 
-    interactable.boundsValid = false;
-    const std::vector<uint16_t>& depthData =
-        renderState.resizedDepthData_.empty()
-        ? frame.textureDepthData
-        : renderState.resizedDepthData_;
-    if (renderState.meshWidth_ > 0 && renderState.meshHeight_ > 0 &&
-        depthData.size() >=
-            static_cast<size_t>(renderState.meshWidth_) * renderState.meshHeight_) {
-        OVR::Vector3f minimum(FLT_MAX, FLT_MAX, FLT_MAX);
-        OVR::Vector3f maximum(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-        for (uint32_t y = 0; y < renderState.meshHeight_; ++y) {
-            const uint32_t sourceY = DepthTextureResize::SourceCoordinate(
-                y, frame.textureDepthHeight, renderState.meshHeight_);
-            for (uint32_t x = 0; x < renderState.meshWidth_; ++x) {
-                const uint16_t encoded = depthData[
-                        static_cast<size_t>(y) * renderState.meshWidth_ + x];
-                if (encoded == flC.dataset.invalidDepthValue) continue;
-                const uint32_t sourceX = DepthTextureResize::SourceCoordinate(
-                    x, frame.textureDepthWidth, renderState.meshWidth_);
-                const float z = static_cast<float>(encoded) / flC.dataset.depthUnitsPerMetre;
-                const OVR::Vector3f point(
-                        (static_cast<float>(sourceX) - metadata.intrinsics[2]) *
-                            z / metadata.intrinsics[0],
-                        -(static_cast<float>(sourceY) - metadata.intrinsics[3]) *
-                            z / metadata.intrinsics[1],
-                        -z);
-                minimum.x = std::min(minimum.x, point.x);
-                minimum.y = std::min(minimum.y, point.y);
-                minimum.z = std::min(minimum.z, point.z);
-                maximum.x = std::max(maximum.x, point.x);
-                maximum.y = std::max(maximum.y, point.y);
-                maximum.z = std::max(maximum.z, point.z);
-                interactable.boundsValid = true;
-            }
-        }
-        if (interactable.boundsValid) {
-            interactable.localBoundsMin = minimum;
-            interactable.localBoundsMax = maximum;
-        }
+    interactable.boundsValid = frame.preparedDepthBoundsValid;
+    if (interactable.boundsValid) {
+        interactable.localBoundsMin = OVR::Vector3f(
+            frame.preparedDepthBoundsMinimum[0],
+            frame.preparedDepthBoundsMinimum[1],
+            frame.preparedDepthBoundsMinimum[2]);
+        interactable.localBoundsMax = OVR::Vector3f(
+            frame.preparedDepthBoundsMaximum[0],
+            frame.preparedDepthBoundsMaximum[1],
+            frame.preparedDepthBoundsMaximum[2]);
     }
     for (int i = 0; i < 2; ++i) {
         renderState.surfaceDefs_[i].graphicsCommand.UniformData[6].Data = &renderState.intrinsics_;
@@ -771,9 +729,12 @@ void UnlitGeometryRenderSystem::UpdateTextures(
         UnlitGeometryRenderComponent &ugrC,
         VideoFrame** framePtr,
         UnlitGeometryRenderState &ugrS) {
-    const std::vector<uint16_t>& depthData = ugrS.resizedDepthData_.empty()
-        ? (*framePtr)->textureDepthData
-        : ugrS.resizedDepthData_;
+    const std::vector<uint16_t>* depthData = PreparedDepthPixels(
+        **framePtr, ugrS.meshWidth_, ugrS.meshHeight_);
+    if (depthData == nullptr) {
+        LOGE("UpdateTextures called without prepared depth pixels");
+        return;
+    }
     const int desiredFullRange = (*framePtr)->yuvFullRange ? 1 : 0;
     if (desiredFullRange != ugrS.useFullRangeYuv_) {
         ugrS.useFullRangeYuv_ = desiredFullRange;
@@ -805,7 +766,7 @@ void UnlitGeometryRenderSystem::UpdateTextures(
                     ugrC.texture_unpack_alignments_[TEX_ALPHA],
                     (*framePtr)->textureAlphaStride);
     UpdateGl16Texture(ugrS.textures_[ugrS.currentSurfaceSet_][TEX_DEPTH], GL_RED_INTEGER,
-                    depthData.data(),
+                    depthData->data(),
                     ugrC.texture_unpack_alignments_[TEX_DEPTH],
                     0);
 }
@@ -978,6 +939,7 @@ void UnlitGeometryRenderSystem::Render(EntityManager& ecs, std::vector<OVRFW::ov
             UnlitGeometryRenderComponent& ugrC,
             UnlitGeometryRenderState& ugrS) {
         // Get a reference to the graphics command of the ready surface.
+        if (!ugrS.depthTextureReady_) return;
         OVRFW::ovrSurfaceDef *surfaceDefToPush = &ugrS.surfaceDefs_[ugrS.currentSurfaceSet_];
 
         OVRFW::ovrGraphicsCommand &gc = surfaceDefToPush->graphicsCommand;

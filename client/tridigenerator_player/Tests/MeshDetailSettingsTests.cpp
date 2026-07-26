@@ -1,5 +1,5 @@
 #include "Components/MeshDetailSettings.h"
-#include "Systems/DepthTextureResize.h"
+#include "Systems/DepthFramePreparation.h"
 
 #include <cassert>
 #include <vector>
@@ -29,17 +29,31 @@ int main() {
     assert(MeshDetailControl::VertexCount(1920, 1080, 3) == 230400);
     assert(MeshDetailControl::VertexCount(1920, 1080, 4) == 129600);
 
-    assert(DepthTextureResize::SourceCoordinate(0, 5, 3) == 0);
-    assert(DepthTextureResize::SourceCoordinate(1, 5, 3) == 2);
-    assert(DepthTextureResize::SourceCoordinate(2, 5, 3) == 4);
+    assert(DepthFramePreparer::SourceCoordinate(0, 5, 3) == 0);
+    assert(DepthFramePreparer::SourceCoordinate(1, 5, 3) == 2);
+    assert(DepthFramePreparer::SourceCoordinate(2, 5, 3) == 4);
     const std::vector<uint16_t> source{
         0, 1, 2, 3, 4,
         5, 6, 7, 8, 9,
         10, 11, 12, 13, 14};
-    std::vector<uint16_t> resized;
-    assert(DepthTextureResize::Nearest(source, 5, 3, 3, 2, resized));
-    assert((resized == std::vector<uint16_t>{0, 2, 4, 10, 12, 14}));
-    assert(!DepthTextureResize::Nearest(source, 0, 3, 3, 2, resized));
-    assert(resized.empty());
+    DepthFramePreparer preparer;
+    PreparedDepthFrame prepared;
+    assert(preparer.Prepare(
+        source, 5, 3, 3, 2, 65535, 1.0f, {1.0f, 1.0f, 0.0f, 0.0f},
+        prepared));
+    assert((prepared.pixels ==
+        std::vector<uint16_t>{0, 2, 4, 10, 12, 14}));
+    assert(prepared.boundsValid);
+    assert((prepared.boundsMinimum == std::array<float, 3>{0.0f, -28.0f, -14.0f}));
+    assert((prepared.boundsMaximum == std::array<float, 3>{56.0f, 0.0f, 0.0f}));
+    assert(preparer.Prepare(
+        source, 5, 3, 5, 3, 65535, 1.0f, {1.0f, 1.0f, 0.0f, 0.0f},
+        prepared));
+    assert(prepared.pixels.empty());
+    assert(prepared.boundsValid);
+    assert(!preparer.Prepare(
+        source, 0, 3, 3, 2, 65535, 1.0f, {1.0f, 1.0f, 0.0f, 0.0f},
+        prepared));
+    assert(prepared.pixels.empty());
     return 0;
 }

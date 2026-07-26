@@ -301,6 +301,13 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     entityManager_->AddComponent<UnlitGeometryRenderComponent>(ObjectEntity, {});
     entityManager_->AddComponent<UnlitGeometryRenderState>(ObjectEntity, {});
 
+#if defined(__ANDROID__)
+    LoadMeshDetailSettings();
+    entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_)
+        .meshDetailDivisor.store(
+            meshDetailSaved_.divisor, std::memory_order_release);
+#endif
+
     // ---------- Initialize Systems ----------
     coreSystem_->Init(*entityManager_);
     sceneSystem_->Init(*entityManager_);
@@ -312,9 +319,6 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     renderSystem_->Init(*entityManager_);
     environmentDepthSystem_->Init(*entityManager_);
     cameraLightEstimationSystem_->Init(*entityManager_);
-#if defined(__ANDROID__)
-    LoadMeshDetailSettings();
-#endif
     unlitGeometryRenderSystem_->Init(*entityManager_, meshDetailSaved_.divisor);
     pointerRenderer_ = std::make_unique<OVRFW::SimpleBeamRenderer>();
     pointerRenderer_->Init(

@@ -24,6 +24,7 @@ struct FrameLoaderComponent {
 
     std::atomic<bool> looping{true};
     std::atomic<bool> writerRunning{false};
+    std::atomic<int> meshDetailDivisor{2};
 
     // Default constructor
     FrameLoaderComponent() = default;
@@ -52,6 +53,7 @@ struct FrameLoaderComponent {
         // Manually move atomic values by loading from source and storing to destination
         looping.store(other.looping.load());
         writerRunning.store(other.writerRunning.load());
+        meshDetailDivisor.store(other.meshDetailDivisor.load());
     }
 
     // Explicitly define the Move Assignment Operator
@@ -74,6 +76,7 @@ struct FrameLoaderComponent {
             // Manually move atomic values
             looping.store(other.looping.load());
             writerRunning.store(other.writerRunning.load());
+            meshDetailDivisor.store(other.meshDetailDivisor.load());
         }
         return *this;
     }
@@ -110,4 +113,9 @@ inline void swap(FrameLoaderComponent& a, FrameLoaderComponent& b) noexcept {
     bool runningB = b.writerRunning.load();
     a.writerRunning.store(runningB);
     b.writerRunning.store(runningA);
+
+    int meshDetailA = a.meshDetailDivisor.load();
+    int meshDetailB = b.meshDetailDivisor.load();
+    a.meshDetailDivisor.store(meshDetailB);
+    b.meshDetailDivisor.store(meshDetailA);
 }
