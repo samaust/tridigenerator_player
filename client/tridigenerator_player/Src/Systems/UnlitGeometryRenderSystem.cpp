@@ -35,6 +35,7 @@
 #include "../Core/Logging.h"
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 
 #include "UnlitGeometryRenderSystem.h"
@@ -48,6 +49,7 @@
 
 #include "../Components/TransformComponent.h"
 #include "../Components/InteractableComponent.h"
+#include "../Components/MeshDetailSettings.h"
 
 #include "../States/EnvironmentDepthState.h"
 #include "../States/CameraLightEstimationState.h"
@@ -75,18 +77,29 @@ using OVR::Vector4f;
  * @param ecs Reference to the entity manager used to iterate entities.
  * @return true on successful initialization, false otherwise.
  */
-bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
+bool UnlitGeometryRenderSystem::Init(EntityManager& ecs, int meshDetailDivisor) {
+    const int divisor = MeshDetailControl::SanitizeDivisor(meshDetailDivisor);
     ecs.ForEachMulti<UnlitGeometryRenderComponent, UnlitGeometryRenderState, FrameLoaderComponent>(
             [&](EntityID e,
                      UnlitGeometryRenderComponent& ugrC,
                      UnlitGeometryRenderState& ugrS,
                      FrameLoaderComponent& flC) {
         // Create initial plane geometry and renderer
-        const int tessX = std::max(1, flC.width - 1);
-        const int tessY = std::max(1, flC.height - 1);
+        const int meshWidth = MeshDetailControl::ReducedDimension(flC.width, divisor);
+        const int meshHeight = MeshDetailControl::ReducedDimension(flC.height, divisor);
+        const int tessX = meshWidth - 1;
+        const int tessY = meshHeight - 1;
         if (flC.width <= 1 || flC.height <= 1) {
             LOGW("Using fallback quad subdivisions (width=%d height=%d)", flC.width, flC.height);
         }
+        LOGI(
+            "Creating mesh detail %s: source=%dx%d mesh=%dx%d vertices=%zu",
+            MeshDetailControl::DisplayName(divisor),
+            flC.width,
+            flC.height,
+            meshWidth,
+            meshHeight,
+            MeshDetailControl::VertexCount(flC.width, flC.height, divisor));
         auto planeDescriptor = OVRFW::BuildTesselatedQuadDescriptor(
                 static_cast<OVRFW::TriangleIndex>(tessX),
                 static_cast<OVRFW::TriangleIndex>(tessY),
@@ -162,6 +175,57 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs) {
         }
     });
     return true;
+}
+
+bool UnlitGeometryRenderSystem::RebuildGeometry(
+        EntityManager& ecs, int meshDetailDivisor) {
+    const int divisor = MeshDetailControl::SanitizeDivisor(meshDetailDivisor);
+    bool rebuilt = false;
+    ecs.ForEachMulti<UnlitGeometryRenderState, FrameLoaderComponent>(
+        [&](EntityID, UnlitGeometryRenderState& renderState, FrameLoaderComponent& loader) {
+            const int meshWidth =
+                MeshDetailControl::ReducedDimension(loader.width, divisor);
+            const int meshHeight =
+                MeshDetailControl::ReducedDimension(loader.height, divisor);
+            auto planeDescriptor = OVRFW::BuildTesselatedQuadDescriptor(
+                static_cast<OVRFW::TriangleIndex>(meshWidth - 1),
+                static_cast<OVRFW::TriangleIndex>(meshHeight - 1),
+                true,
+                false);
+            OVRFW::GeometryBuilder planeGeometry;
+            planeGeometry.Add(
+                planeDescriptor,
+                OVRFW::GeometryBuilder::kInvalidIndex,
+                OVR::Vector4f(1.0f, 0.0f, 0.0f, 1.0f));
+            auto descriptor = planeGeometry.ToGeometryDescriptor();
+            std::array<OVRFW::GlGeometry, 2> replacements;
+            for (int surface = 0; surface < 2; ++surface) {
+                replacements[surface] = OVRFW::GlGeometry(
+                    descriptor.attribs, descriptor.indices);
+                if (replacements[surface].vertexArrayObject == 0) {
+                    LOGE(
+                        "Failed to rebuild mesh detail %s for surface %d",
+                        MeshDetailControl::DisplayName(divisor),
+                        surface);
+                    for (auto& replacement : replacements) replacement.Free();
+                    return;
+                }
+            }
+            for (int surface = 0; surface < 2; ++surface) {
+                renderState.surfaceDefs_[surface].geo.Free();
+                renderState.surfaceDefs_[surface].geo = replacements[surface];
+            }
+            LOGI(
+                "Rebuilt mesh detail %s: source=%dx%d mesh=%dx%d vertices=%zu",
+                MeshDetailControl::DisplayName(divisor),
+                loader.width,
+                loader.height,
+                meshWidth,
+                meshHeight,
+                MeshDetailControl::VertexCount(loader.width, loader.height, divisor));
+            rebuilt = true;
+        });
+    return rebuilt;
 }
 
 /**

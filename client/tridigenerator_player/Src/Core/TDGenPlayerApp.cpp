@@ -53,6 +53,7 @@
 #include "../Components/UnlitGeometryRenderComponent.h"
 #include "../Components/CameraLightEstimationComponent.h"
 #include "../Components/ColorMatchingSettings.h"
+#include "../Components/MeshDetailSettings.h"
 
 #include "../States/TransformState.h"
 #include "../States/FrameLoaderState.h"
@@ -311,7 +312,10 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
     renderSystem_->Init(*entityManager_);
     environmentDepthSystem_->Init(*entityManager_);
     cameraLightEstimationSystem_->Init(*entityManager_);
-    unlitGeometryRenderSystem_->Init(*entityManager_);
+#if defined(__ANDROID__)
+    LoadMeshDetailSettings();
+#endif
+    unlitGeometryRenderSystem_->Init(*entityManager_, meshDetailSaved_.divisor);
     pointerRenderer_ = std::make_unique<OVRFW::SimpleBeamRenderer>();
     pointerRenderer_->Init(
         GetFileSys(), nullptr, OVR::Vector4f(0.35f, 0.75f, 1.0f, 1.0f), 1.0f, true);
@@ -481,6 +485,7 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
             else if (nextMode == UiMode::ColorMatching) BuildColorMatchingControls();
             else if (nextMode == UiMode::ColorMatchingSettings) BuildColorMatchingSettingsControls();
             else if (nextMode == UiMode::MeshScale) BuildMeshScaleControls();
+            else if (nextMode == UiMode::MeshDetail) BuildMeshDetailControls();
             else BuildDatasetPicker();
         }
     }
@@ -677,9 +682,16 @@ void TDGenPlayerApp::BuildDatasetPicker() {
         [this]() { OpenColorMatchingControls(UiMode::Datasets); });
     ui_->AddButton("Mesh scale", {0.0f, 0.22f, -1.5f}, {500.0f, 60.0f},
         [this]() { OpenMeshScaleControls(UiMode::Datasets); });
+    ui_->AddButton("Mesh detail", {0.0f, 0.13f, -1.5f}, {500.0f, 60.0f},
+        [this]() { OpenMeshDetailControls(UiMode::Datasets); });
 #endif
     auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
-    float y = 0.11f;
+    float y =
+#if defined(__ANDROID__)
+        0.02f;
+#else
+        0.11f;
+#endif
     for (const VipeCatalogEntry& entry : loader.catalog.datasets) {
         const std::string id = entry.id;
         ui_->AddButton(entry.displayName, {0.0f, y, -1.5f}, {500.0f, 70.0f},
@@ -707,13 +719,20 @@ void TDGenPlayerApp::BuildMaskSelector() {
         [this]() { OpenColorMatchingControls(UiMode::Masks); });
     ui_->AddButton("Mesh scale", {0.0f, 0.17f, -1.5f}, {620.0f, 60.0f},
         [this]() { OpenMeshScaleControls(UiMode::Masks); });
+    ui_->AddButton("Mesh detail", {0.0f, 0.07f, -1.5f}, {620.0f, 60.0f},
+        [this]() { OpenMeshDetailControls(UiMode::Masks); });
 #endif
 
     for (int id = 0; id < 256; ++id) {
         maskToggleValues_[static_cast<size_t>(id)] =
             render.maskVisibility_.IsVisible(static_cast<uint8_t>(id));
     }
-    float y = 0.06f;
+    float y =
+#if defined(__ANDROID__)
+        -0.04f;
+#else
+        0.06f;
+#endif
     for (const MaskVisibilityEntry& entry : render.maskVisibility_.Entries()) {
         const uint8_t id = entry.id;
         const std::string suffix = std::to_string(static_cast<unsigned int>(id)) +
@@ -810,6 +829,111 @@ void TDGenPlayerApp::StepMeshScale(int direction) {
 
 void TDGenPlayerApp::ResetMeshScale() {
     SetMeshScale(1.0f);
+}
+
+void TDGenPlayerApp::BuildMeshDetailControls() {
+    if (!PrepareUi()) return;
+    currentUiMode_ = UiMode::MeshDetail;
+    const auto& loader =
+        entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+    const int divisor = MeshDetailControl::SanitizeDivisor(meshDetailDraft_.divisor);
+    const int meshWidth =
+        MeshDetailControl::ReducedDimension(loader.width, divisor);
+    const int meshHeight =
+        MeshDetailControl::ReducedDimension(loader.height, divisor);
+    const std::size_t vertices =
+        MeshDetailControl::VertexCount(loader.width, loader.height, divisor);
+
+    ui_->AddLabel("Mesh detail", {0.0f, 0.48f, -1.5f}, {620.0f, 40.0f});
+    ui_->AddLabel(
+        "Video: " + std::to_string(loader.width) + " x " +
+            std::to_string(loader.height),
+        {0.0f, 0.38f, -1.5f},
+        {620.0f, 40.0f});
+    ui_->AddLabel(
+        std::string("Saved: ") +
+            MeshDetailControl::DisplayName(meshDetailSaved_.divisor) +
+            " | Preview: " + MeshDetailControl::DisplayName(divisor),
+        {0.0f, 0.28f, -1.5f},
+        {620.0f, 40.0f});
+    ui_->AddLabel(
+        "Mesh: " + std::to_string(meshWidth) + " x " +
+            std::to_string(meshHeight) + " | " +
+            std::to_string(vertices) + " vertices",
+        {0.0f, 0.18f, -1.5f},
+        {620.0f, 40.0f});
+
+    const auto addChoice = [&](int choice, float x, float y) {
+        const std::string name = MeshDetailControl::DisplayName(choice);
+        if (choice == divisor) {
+            ui_->AddLabel(name, {x, y, -1.5f}, {80.0f, 50.0f});
+        } else {
+            ui_->AddButton(name, {x, y, -1.5f}, {80.0f, 50.0f},
+                [this, choice]() { PreviewMeshDetail(choice); });
+        }
+    };
+    addChoice(1, -0.27f, 0.06f);
+    addChoice(2, -0.09f, 0.06f);
+    addChoice(3, 0.09f, 0.06f);
+    addChoice(4, 0.27f, 0.06f);
+    ui_->AddButton("Save", {-0.24f, -0.07f, -1.5f}, {220.0f, 50.0f},
+        [this]() { SaveMeshDetail(); });
+    ui_->AddButton("Back", {0.24f, -0.07f, -1.5f}, {220.0f, 50.0f},
+        [this]() {
+            CancelMeshDetailEdits();
+            RequestUiMode(meshDetailReturnMode_);
+        });
+    if (!meshDetailMessage_.empty()) {
+        ui_->AddLabel(
+            meshDetailMessage_, {0.0f, -0.18f, -1.5f}, {620.0f, 40.0f});
+    }
+}
+
+void TDGenPlayerApp::OpenMeshDetailControls(UiMode returnMode) {
+    meshDetailReturnMode_ = returnMode;
+    meshDetailDraft_ = meshDetailSaved_;
+    meshDetailMessage_.clear();
+    meshDetailEditActive_ = true;
+    RequestUiMode(UiMode::MeshDetail);
+}
+
+void TDGenPlayerApp::PreviewMeshDetail(int divisor) {
+    if (!MeshDetailControl::IsValidDivisor(divisor)) {
+        meshDetailMessage_ = "Invalid mesh detail level";
+    } else if (!unlitGeometryRenderSystem_->RebuildGeometry(
+                   *entityManager_, divisor)) {
+        meshDetailMessage_ = "Preview failed; previous mesh kept";
+    } else {
+        meshDetailDraft_.divisor = divisor;
+        meshDetailMessage_ = "Previewing " +
+            std::string(MeshDetailControl::DisplayName(divisor));
+    }
+    RequestUiMode(UiMode::MeshDetail);
+}
+
+void TDGenPlayerApp::SaveMeshDetail() {
+    const int divisor = meshDetailDraft_.divisor;
+    if (!MeshDetailControl::IsValidDivisor(divisor)) {
+        meshDetailMessage_ = "Save failed: invalid detail level";
+    } else if (!StoreMeshDetailDivisor(divisor)) {
+        meshDetailMessage_ = "Save failed: Android storage error";
+    } else {
+        meshDetailSaved_ = meshDetailDraft_;
+        meshDetailMessage_ = "Saved globally";
+    }
+    RequestUiMode(UiMode::MeshDetail);
+}
+
+void TDGenPlayerApp::CancelMeshDetailEdits() {
+    if (!meshDetailEditActive_) return;
+    if (meshDetailDraft_.divisor != meshDetailSaved_.divisor &&
+        !unlitGeometryRenderSystem_->RebuildGeometry(
+            *entityManager_, meshDetailSaved_.divisor)) {
+        LOGE("Failed to restore saved mesh detail");
+    }
+    meshDetailDraft_ = meshDetailSaved_;
+    meshDetailEditActive_ = false;
+    meshDetailMessage_.clear();
 }
 
 void TDGenPlayerApp::RefreshMeshScaleUi() {
@@ -1137,6 +1261,71 @@ bool TDGenPlayerApp::StoreColorMatchingSettings(
 #endif
 }
 
+void TDGenPlayerApp::LoadMeshDetailSettings() {
+#if defined(__ANDROID__)
+    const int stored = ReadMeshDetailDivisor();
+    meshDetailSaved_.divisor = MeshDetailControl::SanitizeDivisor(stored);
+    meshDetailDraft_ = meshDetailSaved_;
+    if (!MeshDetailControl::IsValidDivisor(stored)) {
+        LOGW(
+            "Invalid stored mesh detail divisor %d; using default %d",
+            stored,
+            meshDetailSaved_.divisor);
+    } else {
+        LOGI("Loaded global mesh detail divisor %d", meshDetailSaved_.divisor);
+    }
+#endif
+}
+
+int TDGenPlayerApp::ReadMeshDetailDivisor() {
+#if defined(__ANDROID__)
+    const xrJava* java = GetContext();
+    if (!java || !java->Env || !java->ActivityObject) {
+        return MeshDetailSettings{}.divisor;
+    }
+    JNIEnv* env = java->Env;
+    jclass activityClass = env->GetObjectClass(java->ActivityObject);
+    jmethodID method =
+        env->GetMethodID(activityClass, "loadMeshDetailDivisor", "()I");
+    const int divisor = method
+        ? env->CallIntMethod(java->ActivityObject, method)
+        : MeshDetailSettings{}.divisor;
+    env->DeleteLocalRef(activityClass);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return MeshDetailSettings{}.divisor;
+    }
+    return divisor;
+#else
+    return MeshDetailSettings{}.divisor;
+#endif
+}
+
+bool TDGenPlayerApp::StoreMeshDetailDivisor(int divisor) {
+#if defined(__ANDROID__)
+    if (!MeshDetailControl::IsValidDivisor(divisor)) return false;
+    const xrJava* java = GetContext();
+    if (!java || !java->Env || !java->ActivityObject) return false;
+    JNIEnv* env = java->Env;
+    jclass activityClass = env->GetObjectClass(java->ActivityObject);
+    jmethodID method =
+        env->GetMethodID(activityClass, "saveMeshDetailDivisor", "(I)Z");
+    const bool saved = method &&
+        env->CallBooleanMethod(java->ActivityObject, method, divisor) == JNI_TRUE;
+    env->DeleteLocalRef(activityClass);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        return false;
+    }
+    return saved;
+#else
+    (void)divisor;
+    return false;
+#endif
+}
+
 void TDGenPlayerApp::SelectDataset(const std::string& datasetId) {
     CancelColorMatchingEdits();
     auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
@@ -1153,10 +1342,10 @@ void TDGenPlayerApp::SelectDataset(const std::string& datasetId) {
 #endif
         auto& render = entityManager_->GetComponent<UnlitGeometryRenderComponent>(objectEntity_);
         render.maskVisibility_.Reset(loader.dataset.maskLabels);
-        unlitGeometryRenderSystem_->Init(*entityManager_);
+        unlitGeometryRenderSystem_->Init(*entityManager_, meshDetailSaved_.divisor);
         RequestUiMode(UiMode::Masks);
     } else {
-        unlitGeometryRenderSystem_->Init(*entityManager_);
+        unlitGeometryRenderSystem_->Init(*entityManager_, meshDetailSaved_.divisor);
         if (uiStatusLabel_) {
             uiStatusLabel_->SetText("Load failed: %s", loader.errorMessage.c_str());
         }

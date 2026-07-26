@@ -29,6 +29,9 @@ import java.util.List;
 
 public class MainNativeActivity extends android.app.NativeActivity {
     private static final String COLOR_SETTINGS_PREFERENCES = "color_matching_settings";
+    private static final String MESH_SETTINGS_PREFERENCES = "mesh_settings";
+    private static final String MESH_DETAIL_DIVISOR = "detail_divisor";
+    private static final int DEFAULT_MESH_DETAIL_DIVISOR = 2;
     private static final String SCENE_PERMISSION = "com.oculus.permission.USE_SCENE";
     private static final String CAMERA_PERMISSION = "horizonos.permission.HEADSET_CAMERA";
     private static final String ANDROID_CAMERA_PERMISSION = "android.permission.CAMERA";
@@ -100,6 +103,18 @@ public class MainNativeActivity extends android.app.NativeActivity {
         SharedPreferences preferences =
             getSharedPreferences(COLOR_SETTINGS_PREFERENCES, Context.MODE_PRIVATE);
         return preferences.edit().remove(datasetId).commit();
+    }
+
+    public int loadMeshDetailDivisor() {
+        return getSharedPreferences(MESH_SETTINGS_PREFERENCES, Context.MODE_PRIVATE)
+            .getInt(MESH_DETAIL_DIVISOR, DEFAULT_MESH_DETAIL_DIVISOR);
+    }
+
+    public boolean saveMeshDetailDivisor(int divisor) {
+        return getSharedPreferences(MESH_SETTINGS_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(MESH_DETAIL_DIVISOR, divisor)
+            .commit();
     }
 
     @Override

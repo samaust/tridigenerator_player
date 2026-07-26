@@ -21,6 +21,7 @@
 #include "../States/InteractionState.h"
 #include "../Components/ColorMatchingControl.h"
 #include "../Components/ColorMatchingSettings.h"
+#include "../Components/MeshDetailSettings.h"
 
 namespace OVRFW {
 class SimpleBeamRenderer;
@@ -36,7 +37,14 @@ public:
     virtual ~TDGenPlayerApp();
 
 private:
-    enum class UiMode { Datasets, Masks, ColorMatching, ColorMatchingSettings, MeshScale };
+    enum class UiMode {
+        Datasets,
+        Masks,
+        ColorMatching,
+        ColorMatchingSettings,
+        MeshScale,
+        MeshDetail
+    };
 
     std::unique_ptr<EntityManager> entityManager_;
 
@@ -63,6 +71,7 @@ private:
     UiMode currentUiMode_ = UiMode::Datasets;
     UiMode colorMatchingReturnMode_ = UiMode::Masks;
     UiMode meshScaleReturnMode_ = UiMode::Masks;
+    UiMode meshDetailReturnMode_ = UiMode::Masks;
     bool uiRebuildPending_ = false;
     bool colorMatchingUiSnapshotValid_ = false;
     ColorMatchingTier colorMatchingUiRequested_ = ColorMatchingTier::Spatial;
@@ -79,6 +88,10 @@ private:
     bool meshScaleLockUiValue_ = true;
     bool meshScaleUiLockedSnapshot_ = true;
     float meshScaleUiValueSnapshot_ = -1.0f;
+    MeshDetailSettings meshDetailSaved_;
+    MeshDetailSettings meshDetailDraft_;
+    std::string meshDetailMessage_;
+    bool meshDetailEditActive_ = false;
     bool uiVisible_ = true;
     bool uiAnchorInitialized_ = false;
     OVR::Posef uiAnchorPose_ = OVR::Posef::Identity();
@@ -100,6 +113,14 @@ private:
     void SetMeshScale(float scale);
     void StepMeshScale(int direction);
     void ResetMeshScale();
+    void BuildMeshDetailControls();
+    void OpenMeshDetailControls(UiMode returnMode);
+    void PreviewMeshDetail(int divisor);
+    void SaveMeshDetail();
+    void CancelMeshDetailEdits();
+    void LoadMeshDetailSettings();
+    int ReadMeshDetailDivisor();
+    bool StoreMeshDetailDivisor(int divisor);
     void BuildColorMatchingControls();
     void BuildColorMatchingSettingsControls();
     void OpenColorMatchingControls(UiMode returnMode);

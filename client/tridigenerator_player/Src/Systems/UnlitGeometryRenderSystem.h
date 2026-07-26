@@ -23,7 +23,8 @@ struct EnvironmentDepthState;
 
 class UnlitGeometryRenderSystem {
 public:
-    bool Init(EntityManager& ecs);
+    bool Init(EntityManager& ecs, int meshDetailDivisor = 2);
+    bool RebuildGeometry(EntityManager& ecs, int meshDetailDivisor);
     void Shutdown(EntityManager& ecs);
     void Update(EntityManager& ecs, const OVRFW::ovrApplFrameIn &in);
     bool TexturesCreated(UnlitGeometryRenderState &ugrS) const;
