@@ -340,6 +340,7 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
 // before calling SessionInit():
 bool TDGenPlayerApp::SessionInit()
 {
+    frameTimingStats_.Reset();
     // Initialize XRInputActions and create action spaces using XrApp helper functions
     //xrInput_.Init(GetInstance(), GetSession());
     //xrInput_.CreateActionSpaces(GetLocalSpace());
@@ -362,7 +363,11 @@ bool TDGenPlayerApp::SessionInit()
 void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
 {
     using clock = std::chrono::steady_clock;
-    double nowSeconds = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+    const auto now = clock::now();
+    double nowSeconds = std::chrono::duration<double>(now.time_since_epoch()).count();
+    if (frameTimingStats_.AddFrame(now)) {
+        RefreshDiagnosticOverlay();
+    }
 
     // if SkipInputHandling is True, we need to sync action sets ourselves
     // --- xrSyncAction
@@ -387,6 +392,7 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
         }
 #if defined(__ANDROID__)
         BuildPlaybackControls();
+        BuildDiagnosticOverlay();
 #endif
     }
     entityManager_->ForEach<InputComponent>([&](EntityID, InputComponent& input) {
@@ -486,6 +492,7 @@ void TDGenPlayerApp::Update(const OVRFW::ovrApplFrameIn &in)
             else if (nextMode == UiMode::ColorMatchingSettings) BuildColorMatchingSettingsControls();
             else if (nextMode == UiMode::MeshScale) BuildMeshScaleControls();
             else if (nextMode == UiMode::MeshDetail) BuildMeshDetailControls();
+            else if (nextMode == UiMode::Diagnostics) BuildDiagnosticsControls();
             else BuildDatasetPicker();
         }
     }
@@ -517,6 +524,9 @@ void TDGenPlayerApp::Render(const OVRFW::ovrApplFrameIn &in, OVRFW::ovrRendererO
     if (playbackUi_ && uiVisible_) {
         playbackUi_->Render(in, out);
     }
+    if (diagnosticUi_ && diagnosticOverlayVisible_) {
+        diagnosticUi_->Render(in, out);
+    }
     // Append the depth-tested pointer after the UI so it can compare against
     // panel depth and remain visible only for the ray segments in front.
     if (pointerRenderer_ && uiVisible_) {
@@ -528,6 +538,7 @@ void TDGenPlayerApp::SessionEnd()
 {
     StopHaptics();
     lastUpdateSeconds_ = 0.0;
+    frameTimingStats_.Reset();
     uiAnchorInitialized_ = false;
     entityManager_->ForEach<UnlitGeometryRenderComponent>(
         [](EntityID, UnlitGeometryRenderComponent& render) {
@@ -547,6 +558,7 @@ void TDGenPlayerApp::AppShutdown(const xrJava *context)
         pointerRenderer_.reset();
     }
     ShutdownPlaybackControls();
+    ShutdownDiagnosticOverlay();
     ShutdownUi();
     // Explicitly destroy the systems and entity manager.
     // This is good practice to control the shutdown order.
@@ -649,6 +661,55 @@ void TDGenPlayerApp::ShutdownPlaybackControls() {
     playbackButton_ = nullptr;
 }
 
+void TDGenPlayerApp::BuildDiagnosticOverlay() {
+#if defined(__ANDROID__)
+    ShutdownDiagnosticOverlay();
+    diagnosticUi_ = std::make_unique<OVRFW::TinyUI>();
+    if (!diagnosticUi_->Init(GetContext(), GetFileSys())) {
+        LOGE("Failed to initialize diagnostic overlay");
+        diagnosticUi_.reset();
+        return;
+    }
+    diagnosticUi_->SetPose(uiAnchorPose_);
+    diagnosticLabel_ = diagnosticUi_->AddLabel(
+        "FPS: --.-\nFrame: --.- ms", {0.82f, 0.43f, -1.48f}, {160.0f, 90.0f});
+    RefreshDiagnosticOverlay();
+#endif
+}
+
+void TDGenPlayerApp::ShutdownDiagnosticOverlay() {
+    if (diagnosticUi_) {
+        diagnosticUi_->Shutdown();
+        diagnosticUi_.reset();
+    }
+    diagnosticLabel_ = nullptr;
+}
+
+void TDGenPlayerApp::RefreshDiagnosticOverlay() {
+    if (!diagnosticLabel_ || !frameTimingStats_.HasPublishedSample()) return;
+    diagnosticLabel_->SetText(
+        "FPS: %.1f\nFrame: %.1f ms",
+        frameTimingStats_.Fps(),
+        frameTimingStats_.AverageFrameMilliseconds());
+}
+
+void TDGenPlayerApp::BuildDiagnosticsControls() {
+    if (!PrepareUi()) return;
+    currentUiMode_ = UiMode::Diagnostics;
+    ui_->AddLabel("Diagnostics", {0.0f, 0.42f, -1.5f}, {500.0f, 70.0f});
+    ui_->AddButton("Back", {0.0f, 0.30f, -1.5f}, {500.0f, 60.0f},
+        [this]() { RequestUiMode(diagnosticsReturnMode_); });
+    ui_->AddToggleButton(
+        "FPS / frame time: On", "FPS / frame time: Off",
+        &diagnosticOverlayVisible_, {0.0f, 0.18f, -1.5f}, {500.0f, 60.0f},
+        [this]() { RefreshDiagnosticOverlay(); });
+}
+
+void TDGenPlayerApp::OpenDiagnosticsControls(UiMode returnMode) {
+    diagnosticsReturnMode_ = returnMode;
+    RequestUiMode(UiMode::Diagnostics);
+}
+
 void TDGenPlayerApp::TogglePlayback() {
     if (!frameLoaderSystem_ || !entityManager_ || objectEntity_ == 0) return;
     auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
@@ -684,11 +745,13 @@ void TDGenPlayerApp::BuildDatasetPicker() {
         [this]() { OpenMeshScaleControls(UiMode::Datasets); });
     ui_->AddButton("Mesh detail", {0.0f, 0.13f, -1.5f}, {500.0f, 60.0f},
         [this]() { OpenMeshDetailControls(UiMode::Datasets); });
+    ui_->AddButton("Diagnostics", {0.0f, 0.04f, -1.5f}, {500.0f, 60.0f},
+        [this]() { OpenDiagnosticsControls(UiMode::Datasets); });
 #endif
     auto& loader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
     float y =
 #if defined(__ANDROID__)
-        0.02f;
+        -0.07f;
 #else
         0.11f;
 #endif
@@ -721,6 +784,8 @@ void TDGenPlayerApp::BuildMaskSelector() {
         [this]() { OpenMeshScaleControls(UiMode::Masks); });
     ui_->AddButton("Mesh detail", {0.0f, 0.07f, -1.5f}, {620.0f, 60.0f},
         [this]() { OpenMeshDetailControls(UiMode::Masks); });
+    ui_->AddButton("Diagnostics", {0.0f, -0.03f, -1.5f}, {620.0f, 60.0f},
+        [this]() { OpenDiagnosticsControls(UiMode::Masks); });
 #endif
 
     for (int id = 0; id < 256; ++id) {
@@ -729,7 +794,7 @@ void TDGenPlayerApp::BuildMaskSelector() {
     }
     float y =
 #if defined(__ANDROID__)
-        -0.04f;
+        -0.14f;
 #else
         0.06f;
 #endif

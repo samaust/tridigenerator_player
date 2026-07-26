@@ -1,5 +1,6 @@
 #include "LinuxOpenXrBackend.h"
 #include "LinuxStereo.h"
+#include "Data/FrameTimingStats.h"
 #include "Data/MaskVisibility.h"
 
 #include "Data/VipeDataset.h"
@@ -16,6 +17,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -487,6 +489,74 @@ private:
     bool visible_ = true;
 };
 
+class DiagnosticOverlay {
+public:
+    DiagnosticOverlay(Display* display, Window parent) : display_(display) {
+        const int screen = DefaultScreen(display_);
+        window_ = XCreateSimpleWindow(
+            display_, parent, 0, kMargin, kWidth, kHeight, 1,
+            WhitePixel(display_, screen), BlackPixel(display_, screen));
+        XSelectInput(display_, window_, ExposureMask | ButtonPressMask);
+        gc_ = XCreateGC(display_, window_, 0, nullptr);
+        XSetForeground(display_, gc_, WhitePixel(display_, screen));
+    }
+
+    ~DiagnosticOverlay() {
+        if (gc_) XFreeGC(display_, gc_);
+        if (window_) XDestroyWindow(display_, window_);
+    }
+
+    bool Owns(const XEvent& event) const { return event.xany.window == window_; }
+    void HandleEvent(const XEvent& event) {
+        if (event.type == Expose) Draw();
+    }
+
+    void Toggle() {
+        visible_ = !visible_;
+        if (visible_) {
+            XMapRaised(display_, window_);
+            Draw();
+        } else {
+            XUnmapWindow(display_, window_);
+        }
+    }
+
+    void ResizeForParent(int parentWidth) {
+        XMoveWindow(display_, window_,
+            std::max(kMargin, parentWidth - kWidth - kMargin), kMargin);
+    }
+
+    void Update(const FrameTimingStats& stats) {
+        if (!stats.HasPublishedSample()) return;
+        std::snprintf(fpsText_, sizeof(fpsText_), "FPS: %.1f", stats.Fps());
+        std::snprintf(frameText_, sizeof(frameText_), "Frame: %.1f ms",
+            stats.AverageFrameMilliseconds());
+        if (visible_) {
+            XClearWindow(display_, window_);
+            Draw();
+        }
+    }
+
+private:
+    void Draw() {
+        XDrawString(display_, window_, gc_, 12, 24, fpsText_,
+            static_cast<int>(std::char_traits<char>::length(fpsText_)));
+        XDrawString(display_, window_, gc_, 12, 49, frameText_,
+            static_cast<int>(std::char_traits<char>::length(frameText_)));
+        XFlush(display_);
+    }
+
+    static constexpr int kMargin = 12;
+    static constexpr int kWidth = 180;
+    static constexpr int kHeight = 64;
+    Display* display_ = nullptr;
+    Window window_ = 0;
+    GC gc_ = 0;
+    bool visible_ = false;
+    char fpsText_[32] = "FPS: --.-";
+    char frameText_[32] = "Frame: --.- ms";
+};
+
 bool IsAutoRepeatRelease(Display* display, const XEvent& event) {
     if (event.type != KeyRelease || XPending(display) == 0) return false;
     XEvent next{};
@@ -601,6 +671,7 @@ int Run(int argc, char** argv) {
     DesktopWindow window;
     MaskVisibility maskVisibility(dataset.maskLabels);
     MaskPanel maskPanel(window.DisplayHandle(), window.WindowHandle(), maskVisibility);
+    DiagnosticOverlay diagnosticOverlay(window.DisplayHandle(), window.WindowHandle());
     std::unique_ptr<LinuxOpenXrBackend> openXr;
     if (options.backend == "openxr") {
         openXr = std::make_unique<LinuxOpenXrBackend>();
@@ -666,9 +737,11 @@ int Run(int argc, char** argv) {
     bool spaceDown = false;
     bool centerDown = false;
     bool maskPanelDown = false;
+    bool diagnosticsDown = false;
     int windowWidth = kWindowWidth, windowHeight = kWindowHeight;
     int centerX = windowWidth / 2, centerY = windowHeight / 2;
     maskPanel.ResizeForParent(windowWidth, windowHeight);
+    diagnosticOverlay.ResizeForParent(windowWidth);
     camera.captured = !openXr;
     escapeReleased = static_cast<bool>(openXr);
     window.SetPointerCaptured(camera.captured, centerX, centerY);
@@ -677,6 +750,7 @@ int Run(int argc, char** argv) {
     auto nextVideoFrame = previous;
     const std::chrono::duration<double> videoPeriod(
         static_cast<double>(dataset.frameRateDenominator) / dataset.frameRateNumerator);
+    FrameTimingStats frameTimingStats;
 
     while (running) {
         if (openXr && openXr->ExitRequested()) running = false;
@@ -687,6 +761,13 @@ int Run(int argc, char** argv) {
                 running = false;
             } else if (maskPanel.Owns(event)) {
                 maskPanel.HandleEvent(event, !camera.captured);
+            } else if (diagnosticOverlay.Owns(event)) {
+                diagnosticOverlay.HandleEvent(event);
+                if (!openXr && event.type == ButtonPress && !camera.captured) {
+                    camera.captured = true;
+                    escapeReleased = false;
+                    window.SetPointerCaptured(true, centerX, centerY);
+                }
             } else if (event.type == ConfigureNotify) {
                 windowWidth = std::max(1, event.xconfigure.width);
                 windowHeight = std::max(1, event.xconfigure.height);
@@ -694,6 +775,7 @@ int Run(int argc, char** argv) {
                 centerX = windowWidth / 2;
                 centerY = windowHeight / 2;
                 maskPanel.ResizeForParent(windowWidth, windowHeight);
+                diagnosticOverlay.ResizeForParent(windowWidth);
                 if (camera.captured) {
                     XWarpPointer(window.DisplayHandle(), None, window.WindowHandle(),
                         0, 0, 0, 0, centerX, centerY);
@@ -760,12 +842,21 @@ int Run(int argc, char** argv) {
                         maskPanelDown = down;
                     }
                 }
+                if (symbol == XK_F3) {
+                    if (down && !diagnosticsDown) diagnosticOverlay.Toggle();
+                    if (down || !IsAutoRepeatRelease(window.DisplayHandle(), event)) {
+                        diagnosticsDown = down;
+                    }
+                }
                 if (key == 'w' || key == 'a' || key == 's' || key == 'd' || key == 'q' || key == 'e') {
                     camera.keys[static_cast<unsigned char>(key)] = down;
                 }
             }
         }
         const auto now = std::chrono::steady_clock::now();
+        if (frameTimingStats.AddFrame(now)) {
+            diagnosticOverlay.Update(frameTimingStats);
+        }
         const float delta = std::chrono::duration<float>(now - previous).count();
         previous = now;
         if (openXr) camera.UpdateOpenXr(std::min(delta, 0.1f));

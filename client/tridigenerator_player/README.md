@@ -338,6 +338,7 @@ The Android build assigns these controller and hand-tracking controls:
 | Edit mesh scale | Open `Mesh scale`, unlock scale, then select `−` or `+`; Reset remains available while locked. | Use the same screen with aim and pinch. |
 | Toggle UI visibility | Press X on the left controller. | Touch both mutually facing palms together in a prayer/clap pose; separate them before repeating the gesture. |
 | Pause or resume playback | Press A at any time, or select the centered `⏸`/`▶` control in the bottom bar while the UI is visible. | Aim at the bottom `⏸`/`▶` control and pinch while the UI is visible. |
+| Toggle performance diagnostics | Open `Diagnostics` and select `FPS / frame time: On/Off`. | Aim at the same controls and pinch. |
 | Select color-matching tier | Open `Color matching`, aim at an available Disabled, Global, or Spatial row, and press the index trigger. | Open `Color matching`, aim at an available tier, and pinch the index finger and thumb. |
 | Edit color-matching settings | Select `Edit settings`, then use the `-`, value, and `+` controls. Select Save on the overview to persist the preview. | Use the same controls with an aim pinch; leaving the overview without Save restores the prior values. |
 
@@ -364,6 +365,10 @@ video is playing and `▶` while paused; the icon describes the action that sele
 Pausing freezes the synchronized color, mask, depth, pose, and intrinsics frame while the OpenXR
 render loop and tracking continue. Pressing A works even when the UI and playback bar are hidden.
 A successful dataset change always starts the newly selected video playing.
+
+The `Diagnostics` menu enables a compact diagnostic overlay, which is off at startup and remains
+visible if the main UI is hidden. It reports application-loop FPS and average frame time over
+one-second sampling windows; these values measure frame cadence rather than GPU render duration.
 
 The color-matching screen is reachable from both the dataset and mask screens. Disabled is always
 available; Global and Spatial are non-interactive while their camera or environment-depth
@@ -481,7 +486,9 @@ the pointer; press Escape again to exit. Left click recaptures it.
 In OpenXR mode the runtime controls head orientation and eye poses; `W/A/S/D` and `Q/E` add a
 locomotion offset, Shift increases movement speed, and `C` clears the offset. Mouse-look remains
 exclusive to desktop mode. In both modes, Space pauses or resumes video playback without
-disabling camera movement.
+disabling camera movement. Press `F3` to show or hide an upper-right diagnostic overlay reporting
+application-loop FPS and average frame time over one-second sampling windows. In OpenXR mode this
+overlay appears in the mirror window, not in the headset.
 
 The mask visibility panel in the upper-left lists the manifest's mask IDs and labels. Every mask,
 including background ID 0, is visible when the player starts. Click a checkbox to show or hide one

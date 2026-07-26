@@ -22,6 +22,7 @@
 #include "../Components/ColorMatchingControl.h"
 #include "../Components/ColorMatchingSettings.h"
 #include "../Components/MeshDetailSettings.h"
+#include "../Data/FrameTimingStats.h"
 
 namespace OVRFW {
 class SimpleBeamRenderer;
@@ -43,7 +44,8 @@ private:
         ColorMatching,
         ColorMatchingSettings,
         MeshScale,
-        MeshDetail
+        MeshDetail,
+        Diagnostics
     };
 
     std::unique_ptr<EntityManager> entityManager_;
@@ -61,9 +63,11 @@ private:
     std::unique_ptr<UnlitGeometryRenderSystem> unlitGeometryRenderSystem_;
     std::unique_ptr<OVRFW::TinyUI> ui_;
     std::unique_ptr<OVRFW::TinyUI> playbackUi_;
+    std::unique_ptr<OVRFW::TinyUI> diagnosticUi_;
     std::unique_ptr<OVRFW::SimpleBeamRenderer> pointerRenderer_;
     OVRFW::VRMenuObject* uiStatusLabel_ = nullptr;
     OVRFW::VRMenuObject* playbackButton_ = nullptr;
+    OVRFW::VRMenuObject* diagnosticLabel_ = nullptr;
     OVRFW::VRMenuObject* meshScaleValueLabel_ = nullptr;
     OVRFW::VRMenuObject* meshScaleCurrentLabel_ = nullptr;
     std::array<bool, 256> maskToggleValues_{};
@@ -72,6 +76,7 @@ private:
     UiMode colorMatchingReturnMode_ = UiMode::Masks;
     UiMode meshScaleReturnMode_ = UiMode::Masks;
     UiMode meshDetailReturnMode_ = UiMode::Masks;
+    UiMode diagnosticsReturnMode_ = UiMode::Masks;
     bool uiRebuildPending_ = false;
     bool colorMatchingUiSnapshotValid_ = false;
     ColorMatchingTier colorMatchingUiRequested_ = ColorMatchingTier::Spatial;
@@ -93,9 +98,11 @@ private:
     std::string meshDetailMessage_;
     bool meshDetailEditActive_ = false;
     bool uiVisible_ = true;
+    bool diagnosticOverlayVisible_ = false;
     bool uiAnchorInitialized_ = false;
     OVR::Posef uiAnchorPose_ = OVR::Posef::Identity();
     double lastUpdateSeconds_ = 0.0;
+    FrameTimingStats frameTimingStats_;
     EntityID objectEntity_ = 0;
     XrAction hapticAction_ = XR_NULL_HANDLE;
 
@@ -103,6 +110,11 @@ private:
     bool PrepareUi();
     void BuildPlaybackControls();
     void ShutdownPlaybackControls();
+    void BuildDiagnosticOverlay();
+    void ShutdownDiagnosticOverlay();
+    void RefreshDiagnosticOverlay();
+    void BuildDiagnosticsControls();
+    void OpenDiagnosticsControls(UiMode returnMode);
     void TogglePlayback();
     void RefreshPlaybackControls();
     void BuildDatasetPicker();
