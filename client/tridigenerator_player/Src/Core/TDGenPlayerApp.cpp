@@ -337,12 +337,16 @@ bool TDGenPlayerApp::AppInit(const xrJava *context)
         GetFileSys(), nullptr, OVR::Vector4f(0.35f, 0.75f, 1.0f, 1.0f), 1.0f, true);
 
     auto& initialLoader = entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+    initialLoader.dynamicIndexCullingEnabled.store(
+        dynamicIndexCullingEnabled_, std::memory_order_release);
 #if defined(__ANDROID__)
     LoadColorMatchingSettingsForDataset();
 #endif
     if (!initialLoader.selectedDatasetId.empty() && initialLoader.errorMessage.empty()) {
         auto& render = entityManager_->GetComponent<UnlitGeometryRenderComponent>(objectEntity_);
         render.maskVisibility_.Reset(initialLoader.dataset.maskLabels);
+        initialLoader.maskVisibilityPublisher->Publish(
+            render.maskVisibility_.ShaderValues());
     }
 
     return true;
@@ -759,6 +763,12 @@ void TDGenPlayerApp::ShutdownPlaybackControls() {
 
 void TDGenPlayerApp::BuildDiagnosticOverlay() {
 #if defined(__ANDROID__)
+    // TinyUI uses 500 texels per metre. The widest always-present menu is
+    // playbackUi_ at 900 texels, centered at x=0, so its right edge is 0.90 m.
+    // A 500-texel diagnostic panel is 1.00 m wide. Centering it at 1.48 m puts
+    // its left edge at 0.98 m, leaving an exact 0.08 m horizontal gap.
+    constexpr float diagnosticCenterX = 1.48f;
+    constexpr float diagnosticWidthTexels = 520.0f;
     ShutdownDiagnosticOverlay();
     diagnosticUi_ = std::make_unique<OVRFW::TinyUI>();
     if (!diagnosticUi_->Init(GetContext(), GetFileSys())) {
@@ -770,21 +780,28 @@ void TDGenPlayerApp::BuildDiagnosticOverlay() {
     diagnosticLabel_ = diagnosticUi_->AddLabel(
         "Panel refresh rate: --.- Hz\n"
         "Application FPS: --.-\n"
-        "Missed frames (estimated, session): --\n"
-        "Frame interval p50/p95/p99: --/--/-- ms\n"
+        "Missed frames: --\n"
+        "Frame p50/p95/p99: --/--/-- ms\n"
         "Subsystem       CPU ms  GPU ms\n"
         "Env depth           --     N/A\n"
         "Camera capture      --     N/A\n"
         "Light estimate      --      --\n"
         "Depth resize        --     N/A\n"
+        "Geometry compact    --     N/A\n"
+        "Index upload        --     N/A\n"
         "Video decode        --     N/A\n"
         "Texture upload      --      --\n"
         "Rendering           --      --\n"
         "Other update        --     N/A\n"
-        "Camera path: --\n"
-        "cb/processed/superseded/drop: --/--/--/--\n"
-        "age/cb95/import95: --/--/-- ms  copied: --",
-        {1.02f, 0.18f, -1.48f}, {560.0f, 780.0f});
+        "Cells K/R/M: --/--/--  EBO: --",
+        {diagnosticCenterX, 0.24f, -1.48f},
+        {diagnosticWidthTexels, 850.0f});
+    diagnosticCameraLabel_ = diagnosticUi_->AddLabel(
+        "Camera: --\n"
+        "cb/proc/super/drop: --/--/--/--\n"
+        "age/cb95/import95: --/--/-- ms copy: --",
+        {diagnosticCenterX, -0.48f, -1.48f},
+        {diagnosticWidthTexels, 180.0f});
     RefreshDiagnosticOverlay();
 #endif
 }
@@ -795,10 +812,11 @@ void TDGenPlayerApp::ShutdownDiagnosticOverlay() {
         diagnosticUi_.reset();
     }
     diagnosticLabel_ = nullptr;
+    diagnosticCameraLabel_ = nullptr;
 }
 
 void TDGenPlayerApp::RefreshDiagnosticOverlay() {
-    if (!diagnosticLabel_) return;
+    if (!diagnosticLabel_ || !diagnosticCameraLabel_) return;
     const PerformanceTimingSnapshot snapshot =
         performanceTimingStats_->Snapshot();
     const bool gpuSupported = gpuTiming_ && gpuTiming_->IsSupported();
@@ -823,10 +841,23 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
         return metricText(subsystem, PerformanceDomain::Gpu, applicable);
     };
     CameraCaptureDiagnostics cameraDiagnostics{};
+    uint32_t retainedCells = 0;
+    uint32_t rejectedCells = 0;
+    uint32_t mixedCells = 0;
+    size_t compactIndexBytes = 0;
+    bool usingDynamicIndices = false;
     if (entityManager_) {
         entityManager_->ForEach<CameraLightEstimationState>(
             [&](EntityID, CameraLightEstimationState& state) {
                 cameraDiagnostics = state.captureDiagnostics;
+            });
+        entityManager_->ForEach<UnlitGeometryRenderState>(
+            [&](EntityID, UnlitGeometryRenderState& state) {
+                retainedCells = state.retainedCellCount_;
+                rejectedCells = state.rejectedCellCount_;
+                mixedCells = state.mixedCellCount_;
+                compactIndexBytes = state.compactIndexBytes_;
+                usingDynamicIndices = state.usingDynamicIndices_;
             });
     }
     const char* cameraPath =
@@ -849,19 +880,19 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
         text << "Application FPS: --.-\n";
     }
     if (frameTimingStats_.HasPanelRefreshRate()) {
-        text << "Missed frames (estimated, session): "
+        text << "Missed frames: "
              << frameTimingStats_.MissedFrameCount() << "\n";
     } else {
-        text << "Missed frames (estimated, session): --\n";
+        text << "Missed frames: --\n";
     }
     if (frameTimingStats_.HasPublishedSample()) {
         text << std::fixed << std::setprecision(2)
-             << "Frame interval p50/p95/p99: "
+             << "Frame p50/p95/p99: "
              << frameTimingStats_.P50FrameMilliseconds() << "/"
              << frameTimingStats_.P95FrameMilliseconds() << "/"
              << frameTimingStats_.P99FrameMilliseconds() << " ms\n";
     } else {
-        text << "Frame interval p50/p95/p99: --/--/-- ms\n";
+        text << "Frame p50/p95/p99: --/--/-- ms\n";
     }
     text << "Subsystem       CPU ms  GPU ms\n"
          << "Env depth       " << cpu(PerformanceSubsystem::EnvironmentDepth)
@@ -872,6 +903,10 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
          << "  " << gpu(PerformanceSubsystem::LightEstimation, true) << "\n"
          << "Depth resize    " << cpu(PerformanceSubsystem::DepthPreparation)
          << "  " << gpu(PerformanceSubsystem::DepthPreparation, false) << "\n"
+         << "Geometry compact " << cpu(PerformanceSubsystem::GeometryCompaction)
+         << "  " << gpu(PerformanceSubsystem::GeometryCompaction, false) << "\n"
+         << "Index upload     " << cpu(PerformanceSubsystem::IndexUpload)
+         << "  " << gpu(PerformanceSubsystem::IndexUpload, false) << "\n"
          << "Video decode    " << cpu(PerformanceSubsystem::VideoDecode)
          << "  " << gpu(PerformanceSubsystem::VideoDecode, false) << "\n"
          << "Texture upload  " << cpu(PerformanceSubsystem::TextureUpload)
@@ -880,8 +915,17 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
          << "  " << gpu(PerformanceSubsystem::Rendering, true) << "\n"
          << "Other update    " << cpu(PerformanceSubsystem::OtherUpdate)
          << "  " << gpu(PerformanceSubsystem::OtherUpdate, false) << "\n"
-         << "Camera path: " << cameraPath << "\n"
-         << "cb/processed/superseded/drop: "
+         << "Cells K/R/M: "
+         << retainedCells << "/" << rejectedCells << "/" << mixedCells
+         << "  EBO: "
+         << (usingDynamicIndices
+                ? std::to_string(compactIndexBytes / 1024) + " KiB"
+                : std::string("full"));
+    diagnosticLabel_->SetText(text.str().c_str());
+
+    std::ostringstream cameraText;
+    cameraText << "Camera: " << cameraPath << "\n"
+         << "cb/proc/super/drop: "
          << cameraDiagnostics.callbackCount << "/"
          << cameraDiagnostics.processedCount << "/"
          << cameraDiagnostics.supersededFrameCount << "/"
@@ -889,9 +933,9 @@ void TDGenPlayerApp::RefreshDiagnosticOverlay() {
          << std::fixed << std::setprecision(2)
          << "age/cb95/import95: " << cameraDiagnostics.latestFrameAgeMs << "/"
          << cameraDiagnostics.callbackP95Ms << "/"
-         << cameraDiagnostics.importP95Ms << " ms  copied: "
+         << cameraDiagnostics.importP95Ms << " ms copy: "
          << cameraDiagnostics.bytesCopied;
-    diagnosticLabel_->SetText(text.str().c_str());
+    diagnosticCameraLabel_->SetText(cameraText.str().c_str());
 }
 
 void TDGenPlayerApp::BuildDiagnosticsControls() {
@@ -904,6 +948,17 @@ void TDGenPlayerApp::BuildDiagnosticsControls() {
         "Performance timings: On", "Performance timings: Off",
         &diagnosticOverlayVisible_, {0.0f, 0.30f, -1.5f}, {500.0f, 50.0f},
         [this]() { RefreshDiagnosticOverlay(); });
+    ui_->AddToggleButton(
+        "Dynamic index culling: On", "Dynamic index culling: Off",
+        &dynamicIndexCullingEnabled_,
+        {0.0f, 0.23f, -1.5f}, {500.0f, 50.0f},
+        [this]() {
+            if (!entityManager_) return;
+            auto& loader =
+                entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+            loader.dynamicIndexCullingEnabled.store(
+                dynamicIndexCullingEnabled_, std::memory_order_release);
+        });
 
     std::ostringstream supported;
     supported << "Supported panel rates: ";
@@ -921,9 +976,9 @@ void TDGenPlayerApp::BuildDiagnosticsControls() {
         }
         supported << " Hz";
     }
-    ui_->AddLabel(supported.str(), {0.0f, 0.21f, -1.5f}, {720.0f, 45.0f});
+    ui_->AddLabel(supported.str(), {0.0f, 0.15f, -1.5f}, {720.0f, 45.0f});
     refreshRateStatusLabel_ = ui_->AddLabel(
-        "", {0.0f, 0.13f, -1.5f}, {720.0f, 45.0f});
+        "", {0.0f, 0.08f, -1.5f}, {720.0f, 45.0f});
 
     const auto addRateChoice = [&](float refreshRate, float x) {
         std::ostringstream label;
@@ -931,7 +986,7 @@ void TDGenPlayerApp::BuildDiagnosticsControls() {
         if (SupportsDisplayRefreshRate(refreshRate)) {
             ui_->AddButton(
                 label.str(),
-                {x, 0.04f, -1.5f},
+                {x, -0.01f, -1.5f},
                 {180.0f, 50.0f},
                 [this, refreshRate]() {
                     if (RequestDisplayRefreshRate(refreshRate, true)) {
@@ -943,13 +998,13 @@ void TDGenPlayerApp::BuildDiagnosticsControls() {
         } else {
             label << " (unsupported)";
             ui_->AddLabel(
-                label.str(), {x, 0.04f, -1.5f}, {240.0f, 50.0f});
+                label.str(), {x, -0.01f, -1.5f}, {240.0f, 50.0f});
         }
     };
     addRateChoice(72.0f, -0.27f);
     addRateChoice(90.0f, 0.27f);
     refreshRateMessageLabel_ = ui_->AddLabel(
-        "", {0.0f, -0.05f, -1.5f}, {720.0f, 45.0f});
+        "", {0.0f, -0.08f, -1.5f}, {720.0f, 45.0f});
     RefreshDisplayRefreshRateUi();
 }
 
@@ -1391,6 +1446,10 @@ void TDGenPlayerApp::BuildMaskSelector() {
             [this, id]() {
                 auto& component = entityManager_->GetComponent<UnlitGeometryRenderComponent>(objectEntity_);
                 component.maskVisibility_.SetVisible(id, maskToggleValues_[id]);
+                auto& loader =
+                    entityManager_->GetComponent<FrameLoaderComponent>(objectEntity_);
+                loader.maskVisibilityPublisher->Publish(
+                    component.maskVisibility_.ShaderValues());
             });
         y -= 0.10f;
     }
@@ -1991,6 +2050,10 @@ void TDGenPlayerApp::SelectDataset(const std::string& datasetId) {
 #endif
         auto& render = entityManager_->GetComponent<UnlitGeometryRenderComponent>(objectEntity_);
         render.maskVisibility_.Reset(loader.dataset.maskLabels);
+        loader.maskVisibilityPublisher->Publish(
+            render.maskVisibility_.ShaderValues());
+        loader.dynamicIndexCullingEnabled.store(
+            dynamicIndexCullingEnabled_, std::memory_order_release);
         unlitGeometryRenderSystem_->Init(*entityManager_, meshDetailSaved_.divisor);
         RequestUiMode(UiMode::Masks);
     } else {

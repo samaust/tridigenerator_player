@@ -12,6 +12,8 @@ enum class PerformanceSubsystem : std::size_t {
     CameraCapture,
     LightEstimation,
     DepthPreparation,
+    GeometryCompaction,
+    IndexUpload,
     VideoDecode,
     TextureUpload,
     Rendering,

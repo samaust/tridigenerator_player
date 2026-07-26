@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "DynamicCellCullingData.h"
+
 /**
  * Struct returned for each decoded frame.
  * All planes are tightly packed (row stride == width for each plane).
@@ -43,6 +45,7 @@ struct VideoFrame {
     bool preparedDepthBoundsValid = false;
     std::array<float, 3> preparedDepthBoundsMinimum{};
     std::array<float, 3> preparedDepthBoundsMaximum{};
+    DynamicCellCullingData dynamicCellCulling;
 
     int64_t ts_us = 0;
     bool yuvFullRange = false;

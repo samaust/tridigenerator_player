@@ -1,10 +1,12 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <string>
 #include <utility>
 
 #include "../Data/VipeDataset.h"
+#include "../Data/MaskVisibilitySnapshot.h"
 
 struct FrameLoaderComponent {
     std::string baseUrl;
@@ -25,6 +27,9 @@ struct FrameLoaderComponent {
     std::atomic<bool> looping{true};
     std::atomic<bool> writerRunning{false};
     std::atomic<int> meshDetailDivisor{2};
+    std::atomic<bool> dynamicIndexCullingEnabled{false};
+    std::shared_ptr<MaskVisibilityPublisher> maskVisibilityPublisher =
+        std::make_shared<MaskVisibilityPublisher>();
 
     // Default constructor
     FrameLoaderComponent() = default;
@@ -54,6 +59,12 @@ struct FrameLoaderComponent {
         looping.store(other.looping.load());
         writerRunning.store(other.writerRunning.load());
         meshDetailDivisor.store(other.meshDetailDivisor.load());
+        dynamicIndexCullingEnabled.store(
+            other.dynamicIndexCullingEnabled.load());
+        maskVisibilityPublisher = std::move(other.maskVisibilityPublisher);
+        if (!maskVisibilityPublisher) {
+            maskVisibilityPublisher = std::make_shared<MaskVisibilityPublisher>();
+        }
     }
 
     // Explicitly define the Move Assignment Operator
@@ -77,6 +88,13 @@ struct FrameLoaderComponent {
             looping.store(other.looping.load());
             writerRunning.store(other.writerRunning.load());
             meshDetailDivisor.store(other.meshDetailDivisor.load());
+            dynamicIndexCullingEnabled.store(
+                other.dynamicIndexCullingEnabled.load());
+            maskVisibilityPublisher = std::move(other.maskVisibilityPublisher);
+            if (!maskVisibilityPublisher) {
+                maskVisibilityPublisher =
+                    std::make_shared<MaskVisibilityPublisher>();
+            }
         }
         return *this;
     }
@@ -121,4 +139,10 @@ inline void swap(FrameLoaderComponent& a, FrameLoaderComponent& b) noexcept {
     int meshDetailB = b.meshDetailDivisor.load();
     a.meshDetailDivisor.store(meshDetailB);
     b.meshDetailDivisor.store(meshDetailA);
+
+    bool cullingA = a.dynamicIndexCullingEnabled.load();
+    bool cullingB = b.dynamicIndexCullingEnabled.load();
+    a.dynamicIndexCullingEnabled.store(cullingB);
+    b.dynamicIndexCullingEnabled.store(cullingA);
+    swap(a.maskVisibilityPublisher, b.maskVisibilityPublisher);
 }

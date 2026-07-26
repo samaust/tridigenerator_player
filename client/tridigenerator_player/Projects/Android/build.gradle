@@ -36,7 +36,7 @@ apply plugin: 'com.android.application'
 
 android {
   namespace "io.github.samaust.tridigenerator_player"
-  compileSdk 32
+  compileSdk 36
 
   java {
     toolchain {
@@ -47,7 +47,7 @@ android {
   defaultConfig {
     applicationId "io.github.samaust.tridigenerator_player"
     minSdk 26
-    targetSdk 32
+    targetSdk 33
     versionCode 1
     versionName "1.0"
 
@@ -84,6 +84,22 @@ android {
 
     release {
       debuggable false
+    }
+
+    // Installable profiling build: keep debug signing/Android Studio Run
+    // behavior, but optimize native code so Quest A/B tests do not measure
+    // the default -O0 CMake Debug loops. Inheriting from debug also avoids
+    // release-only Play Store lint checks for this local profiling variant.
+    benchmark {
+      initWith debug
+      debuggable true
+      signingConfig signingConfigs.debug
+      matchingFallbacks = ['debug']
+      externalNativeBuild {
+        cmake {
+          cppFlags '-O2 -g -DNDEBUG'
+        }
+      }
     }
   }
 

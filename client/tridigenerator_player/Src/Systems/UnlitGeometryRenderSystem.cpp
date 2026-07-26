@@ -58,6 +58,7 @@
 #include "../States/FrameLoaderState.h"
 #include "../Data/VipeDataset.h"
 #include "../Data/ColorReference.h"
+#include "../Data/DynamicIndexCulling.h"
 
 using OVR::Matrix4f;
 using OVR::Posef;
@@ -201,6 +202,21 @@ void RefreshGeometryPrograms(UnlitGeometryRenderState& state) {
     }
 }
 
+unsigned CreateImmutableIndexBuffer(
+        const std::vector<OVRFW::TriangleIndex>& indices) {
+    unsigned buffer = 0;
+    glGenBuffers(1, &buffer);
+    if (buffer == 0) return 0;
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffer);
+    glBufferData(
+        GL_ELEMENT_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(
+            indices.size() * sizeof(OVRFW::TriangleIndex)),
+        indices.data(),
+        GL_STATIC_DRAW);
+    return buffer;
+}
+
 } // namespace
 
 /**
@@ -336,6 +352,13 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs, int meshDetailDivisor) 
             gc.GpuState.blendEnable = OVRFW::ovrGpuState::BLEND_ENABLE;
             gc.GpuState.cullEnable = true;
         }
+        ugrS.fullIndexBuffer_ = CreateImmutableIndexBuffer(d.indices);
+        ugrS.fullIndexCount_ = static_cast<int>(d.indices.size());
+        if (ugrS.fullIndexBuffer_ == 0) {
+            LOGE("Failed to create immutable full-grid index buffer");
+        } else {
+            BindFullIndexBuffer(ugrS);
+        }
     });
     return true;
 }
@@ -378,6 +401,13 @@ bool UnlitGeometryRenderSystem::RebuildGeometry(
                     return;
                 }
             }
+            const unsigned fullIndexBuffer =
+                CreateImmutableIndexBuffer(descriptor.indices);
+            if (fullIndexBuffer == 0) {
+                LOGE("Failed to rebuild immutable full-grid index buffer");
+                for (auto& replacement : replacements) replacement.Free();
+                return;
+            }
             renderState.meshDetailDivisor_ = divisor;
             renderState.meshWidth_ = static_cast<uint32_t>(meshWidth);
             renderState.meshHeight_ = static_cast<uint32_t>(meshHeight);
@@ -385,6 +415,11 @@ bool UnlitGeometryRenderSystem::RebuildGeometry(
                 renderState.surfaceDefs_[surface].geo.Free();
                 renderState.surfaceDefs_[surface].geo = replacements[surface];
             }
+            glDeleteBuffers(1, &renderState.fullIndexBuffer_);
+            renderState.fullIndexBuffer_ = fullIndexBuffer;
+            renderState.fullIndexCount_ =
+                static_cast<int>(descriptor.indices.size());
+            BindFullIndexBuffer(renderState);
             loader.meshDetailDivisor.store(divisor, std::memory_order_release);
             LOGI(
                 "Rebuilt mesh detail %s: source=%dx%d mesh/depth=%dx%d vertices=%zu",
@@ -433,6 +468,11 @@ void UnlitGeometryRenderSystem::Shutdown(EntityManager& ecs) {
         ugrS.uploadPbos_.fill(0);
         ugrS.nextUploadPbo_ = 0;
         ugrS.pboFailureLogged_ = false;
+        glDeleteBuffers(1, &ugrS.fullIndexBuffer_);
+        ugrS.fullIndexBuffer_ = 0;
+        ugrS.fullIndexCount_ = 0;
+        ugrS.usingDynamicIndices_ = false;
+        ugrS.dynamicVisibilityVersion_ = 0;
         ugrS.ProgramLimited_ = {};
         ugrS.ProgramFullRange_ = {};
         ugrS.ProgramGlobalHardLimited_ = {};
@@ -572,7 +612,7 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
         if (flS.frameReady.load(std::memory_order_acquire)) {
             //LOGI("Update textures with new frame");
             // A new frame is available, so update textures and matrices.
-            const VideoFrame& frame = **flS.framePtr;
+            VideoFrame& frame = **flS.framePtr;
             if (frame.preparedDepthWidth == ugrS.meshWidth_ &&
                 frame.preparedDepthHeight == ugrS.meshHeight_ &&
                 PreparedDepthPixels(
@@ -597,6 +637,7 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
                     return;
                 }
                 UpdateTextures(ugrC, flS.framePtr, ugrS);
+                UpdateDynamicIndices(flC, frame, ugrS);
                 ugrS.depthTextureReady_ = true;
             } else {
                 LOGW(
@@ -610,6 +651,23 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
 
             // Consume the flag by setting it back to false.
             flS.frameReady.store(false, std::memory_order_relaxed);
+        }
+
+        if (ugrS.depthTextureReady_ && flS.framePtr != nullptr) {
+            const bool enabled = flC.dynamicIndexCullingEnabled.load(
+                std::memory_order_acquire);
+            const uint64_t visibilityVersion = flC.maskVisibilityPublisher
+                ? flC.maskVisibilityPublisher->Snapshot().version
+                : 0;
+            if (ugrS.usingDynamicIndices_ &&
+                (!enabled ||
+                 ugrS.dynamicVisibilityVersion_ != visibilityVersion)) {
+                // The frame pool may already be reusable after presentation,
+                // so do not rescan its CPU planes here. The immutable grid is
+                // exact with the shader discard and remains active until the
+                // next frame receives a fresh compact EBO.
+                BindFullIndexBuffer(ugrS);
+            }
         }
     });
 }
@@ -955,6 +1013,143 @@ void UnlitGeometryRenderSystem::UpdateTextures(
     if (staged) {
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
     }
+}
+
+void UnlitGeometryRenderSystem::BindFullIndexBuffer(
+        UnlitGeometryRenderState& renderState) {
+    if (renderState.fullIndexBuffer_ == 0) return;
+    for (int surface = 0; surface < 2; ++surface) {
+        auto& geometry = renderState.surfaceDefs_[surface].geo;
+        glBindVertexArray(geometry.vertexArrayObject);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, renderState.fullIndexBuffer_);
+        geometry.indexCount = renderState.fullIndexCount_;
+    }
+    glBindVertexArray(0);
+    renderState.usingDynamicIndices_ = false;
+    renderState.dynamicVisibilityVersion_ = 0;
+    renderState.retainedCellCount_ =
+        static_cast<uint32_t>(renderState.fullIndexCount_ / 6);
+    renderState.rejectedCellCount_ = 0;
+    renderState.mixedCellCount_ = 0;
+    renderState.compactIndexBytes_ = 0;
+}
+
+bool UnlitGeometryRenderSystem::UpdateDynamicIndices(
+        const FrameLoaderComponent& loader,
+        VideoFrame& frame,
+        UnlitGeometryRenderState& renderState) {
+    if (!loader.dynamicIndexCullingEnabled.load(std::memory_order_acquire)) {
+        if (renderState.usingDynamicIndices_) {
+            BindFullIndexBuffer(renderState);
+        }
+        return true;
+    }
+    if (!loader.maskVisibilityPublisher) {
+        BindFullIndexBuffer(renderState);
+        return false;
+    }
+
+    const MaskVisibilitySnapshot visibility =
+        loader.maskVisibilityPublisher->Snapshot();
+    const std::vector<uint16_t>* depth = PreparedDepthPixels(
+        frame, renderState.meshWidth_, renderState.meshHeight_);
+    if (depth == nullptr) {
+        BindFullIndexBuffer(renderState);
+        return false;
+    }
+    if (!frame.dynamicCellCulling.Matches(
+            renderState.meshWidth_,
+            renderState.meshHeight_,
+            visibility.version)) {
+        ScopedCpuTimer cullingTimer(
+            performanceTiming_.get(),
+            PerformanceSubsystem::GeometryCompaction);
+        if (!DynamicIndexCulling::Prepare(
+                frame.textureAlphaData,
+                frame.textureAlphaWidth,
+                frame.textureAlphaHeight,
+                *depth,
+                renderState.meshWidth_,
+                renderState.meshHeight_,
+                visibility,
+                frame.dynamicCellCulling)) {
+            BindFullIndexBuffer(renderState);
+            return false;
+        }
+    }
+
+    ScopedCpuTimer uploadTimer(
+        performanceTiming_.get(),
+        PerformanceSubsystem::IndexUpload);
+    const DynamicCellCullingData& culling = frame.dynamicCellCulling;
+    const size_t indexCount =
+        static_cast<size_t>(culling.retainedCellCount) * 6;
+    const size_t compactBytes =
+        indexCount * sizeof(OVRFW::TriangleIndex);
+    const size_t capacityBytes =
+        static_cast<size_t>(renderState.fullIndexCount_) *
+        sizeof(OVRFW::TriangleIndex);
+    auto& geometry =
+        renderState.surfaceDefs_[renderState.currentSurfaceSet_].geo;
+
+    glBindVertexArray(geometry.vertexArrayObject);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, geometry.indexBuffer);
+    glBufferData(
+        GL_ELEMENT_ARRAY_BUFFER,
+        static_cast<GLsizeiptr>(capacityBytes),
+        nullptr,
+        GL_STREAM_DRAW);
+
+    if (compactBytes > 0) {
+        auto* indices = static_cast<OVRFW::TriangleIndex*>(
+            glMapBufferRange(
+                GL_ELEMENT_ARRAY_BUFFER,
+                0,
+                static_cast<GLsizeiptr>(compactBytes),
+                GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_RANGE_BIT));
+        if (indices == nullptr) {
+            glBindVertexArray(0);
+            BindFullIndexBuffer(renderState);
+            return false;
+        }
+
+        size_t output = 0;
+        const uint32_t cellsWide = renderState.meshWidth_ - 1;
+        for (uint32_t y = 0; y + 1 < renderState.meshHeight_; ++y) {
+            for (uint32_t x = 0; x + 1 < renderState.meshWidth_; ++x) {
+                const size_t cell =
+                    static_cast<size_t>(y) * cellsWide + x;
+                if (culling.retainedCells[cell] == 0) continue;
+                const OVRFW::TriangleIndex topLeft =
+                    y * renderState.meshWidth_ + x;
+                const OVRFW::TriangleIndex topRight = topLeft + 1;
+                const OVRFW::TriangleIndex bottomLeft =
+                    topLeft + renderState.meshWidth_;
+                const OVRFW::TriangleIndex bottomRight = bottomLeft + 1;
+                indices[output++] = topLeft;
+                indices[output++] = topRight;
+                indices[output++] = bottomLeft;
+                indices[output++] = bottomLeft;
+                indices[output++] = topRight;
+                indices[output++] = bottomRight;
+            }
+        }
+        if (output != indexCount || glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER) != GL_TRUE) {
+            glBindVertexArray(0);
+            BindFullIndexBuffer(renderState);
+            return false;
+        }
+    }
+
+    geometry.indexCount = static_cast<int>(indexCount);
+    glBindVertexArray(0);
+    renderState.usingDynamicIndices_ = true;
+    renderState.dynamicVisibilityVersion_ = visibility.version;
+    renderState.retainedCellCount_ = culling.retainedCellCount;
+    renderState.rejectedCellCount_ = culling.rejectedCellCount;
+    renderState.mixedCellCount_ = culling.mixedCellCount;
+    renderState.compactIndexBytes_ = compactBytes;
+    return true;
 }
 
 /**

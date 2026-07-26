@@ -33,6 +33,7 @@
 #include "../Data/PlaybackControl.h"
 #include "../Components/MeshDetailSettings.h"
 #include "DepthFramePreparation.h"
+#include "../Data/DynamicIndexCulling.h"
 
 static constexpr int RING_SIZE = 8;
 static constexpr size_t MAX_AUDIO_SAMPLES = 48000 * 2 * 2;
@@ -100,6 +101,37 @@ static bool PrepareDecodedDepth(
     frame.preparedDepthBoundsMinimum = prepared.boundsMinimum;
     frame.preparedDepthBoundsMaximum = prepared.boundsMaximum;
     return true;
+}
+
+static bool PrepareDecodedCellCulling(
+        const FrameLoaderComponent& loader,
+        VideoFrame& frame) {
+    if (!loader.dynamicIndexCullingEnabled.load(std::memory_order_acquire)) {
+        frame.dynamicCellCulling = {};
+        return true;
+    }
+    const std::vector<uint16_t>* depth = nullptr;
+    if (frame.preparedDepthData.size() >=
+        static_cast<size_t>(frame.preparedDepthWidth) *
+            frame.preparedDepthHeight) {
+        depth = &frame.preparedDepthData;
+    } else if (frame.textureDepthWidth == frame.preparedDepthWidth &&
+               frame.textureDepthHeight == frame.preparedDepthHeight) {
+        depth = &frame.textureDepthData;
+    }
+    if (depth == nullptr || !loader.maskVisibilityPublisher) {
+        frame.dynamicCellCulling = {};
+        return false;
+    }
+    return DynamicIndexCulling::Prepare(
+        frame.textureAlphaData,
+        frame.textureAlphaWidth,
+        frame.textureAlphaHeight,
+        *depth,
+        frame.preparedDepthWidth,
+        frame.preparedDepthHeight,
+        loader.maskVisibilityPublisher->Snapshot(),
+        frame.dynamicCellCulling);
 }
 
 // ---------- writeBinary / writeString helpers for curl ----------
@@ -542,6 +574,16 @@ void FrameLoaderSystem::WriterLoop(FrameLoaderComponent& flC, FrameLoaderState& 
                     LOGW(
                         "Failed to prepare depth for decoded frame %d",
                         s.frame->frameIndex);
+                }
+                {
+                    ScopedCpuTimer cullingTimer(
+                        performanceTiming_.get(),
+                        PerformanceSubsystem::GeometryCompaction);
+                    if (!PrepareDecodedCellCulling(flC, *s.frame)) {
+                        LOGW(
+                            "Failed to prepare dynamic cell culling for frame %d",
+                            s.frame->frameIndex);
+                    }
                 }
 
                 std::vector<AudioPcmBlock> audio = demuxer.take_audio_blocks();

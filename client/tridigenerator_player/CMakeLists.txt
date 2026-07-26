@@ -102,6 +102,12 @@ if(UNIX AND NOT ANDROID)
         target_link_libraries(performance_timing_stats_tests PRIVATE pthread)
         add_test(NAME performance_timing_stats_tests
             COMMAND performance_timing_stats_tests)
+        add_executable(dynamic_index_culling_tests
+            Tests/DynamicIndexCullingTests.cpp)
+        target_include_directories(dynamic_index_culling_tests PRIVATE
+            Src ${CMAKE_CURRENT_LIST_DIR}/../dependencies/meta/SampleXrFramework/Src)
+        add_test(NAME dynamic_index_culling_tests
+            COMMAND dynamic_index_culling_tests)
     endif()
     install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION bin)
     return()

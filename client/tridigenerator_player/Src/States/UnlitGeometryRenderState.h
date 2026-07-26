@@ -27,6 +27,14 @@ struct UnlitGeometryRenderState {
     uint32_t meshWidth_ = 2;
     uint32_t meshHeight_ = 2;
     bool depthTextureReady_ = false;
+    unsigned fullIndexBuffer_ = 0;
+    int fullIndexCount_ = 0;
+    bool usingDynamicIndices_ = false;
+    uint64_t dynamicVisibilityVersion_ = 0;
+    uint32_t retainedCellCount_ = 0;
+    uint32_t rejectedCellCount_ = 0;
+    uint32_t mixedCellCount_ = 0;
+    size_t compactIndexBytes_ = 0;
 
     static constexpr size_t UploadPboCount = 3;
     std::array<unsigned, UploadPboCount> uploadPbos_{};

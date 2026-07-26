@@ -58,6 +58,11 @@ public:
             UnlitGeometryRenderComponent &ugrC,
             VideoFrame** framePtr,
             UnlitGeometryRenderState &ugrS);
+    bool UpdateDynamicIndices(
+            const FrameLoaderComponent& loader,
+            VideoFrame& frame,
+            UnlitGeometryRenderState& renderState);
+    void BindFullIndexBuffer(UnlitGeometryRenderState& renderState);
     void UpdateGl8Texture(
             OVRFW::GlTexture texture, GLenum format,
             const void* textureData,

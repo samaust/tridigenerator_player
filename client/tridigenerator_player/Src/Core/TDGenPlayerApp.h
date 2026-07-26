@@ -70,6 +70,7 @@ private:
     OVRFW::VRMenuObject* uiStatusLabel_ = nullptr;
     OVRFW::VRMenuObject* playbackButton_ = nullptr;
     OVRFW::VRMenuObject* diagnosticLabel_ = nullptr;
+    OVRFW::VRMenuObject* diagnosticCameraLabel_ = nullptr;
     OVRFW::VRMenuObject* refreshRateStatusLabel_ = nullptr;
     OVRFW::VRMenuObject* refreshRateMessageLabel_ = nullptr;
     OVRFW::VRMenuObject* meshScaleValueLabel_ = nullptr;
@@ -103,6 +104,7 @@ private:
     bool meshDetailEditActive_ = false;
     bool uiVisible_ = true;
     bool diagnosticOverlayVisible_ = false;
+    bool dynamicIndexCullingEnabled_ = false;
     bool uiAnchorInitialized_ = false;
     OVR::Posef uiAnchorPose_ = OVR::Posef::Identity();
     double lastUpdateSeconds_ = 0.0;
