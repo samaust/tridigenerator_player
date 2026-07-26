@@ -181,6 +181,26 @@ bool StageFrameTextureUpload(
     return true;
 }
 
+const OVRFW::GlProgram& ActiveGeometryProgram(
+        const UnlitGeometryRenderState& state) {
+    if (state.useGlobalHardVariant_) {
+        return state.useFullRangeYuv_ != 0
+            ? state.ProgramGlobalHardFullRange_
+            : state.ProgramGlobalHardLimited_;
+    }
+    return state.useFullRangeYuv_ != 0
+        ? state.ProgramFullRange_
+        : state.ProgramLimited_;
+}
+
+void RefreshGeometryPrograms(UnlitGeometryRenderState& state) {
+    for (int surface = 0; surface < 2; ++surface) {
+        auto& command = state.surfaceDefs_[surface].graphicsCommand;
+        command.Program = ActiveGeometryProgram(state);
+        command.BindUniformTextures();
+    }
+}
+
 } // namespace
 
 /**
@@ -262,6 +282,11 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs, int meshDetailDivisor) 
 
         std::string programDefsLimited;
         std::string programDefsFullRange = "#define YUV_FULL_RANGE 1\n";
+        std::string programDefsGlobalHard =
+            "#define GLOBAL_HARD_VARIANT 1\n";
+        std::string programDefsGlobalHardFullRange =
+            "#define YUV_FULL_RANGE 1\n"
+            "#define GLOBAL_HARD_VARIANT 1\n";
 
         ugrS.ProgramLimited_ = OVRFW::GlProgram::Build(
                 programDefsLimited.c_str(),
@@ -275,6 +300,22 @@ bool UnlitGeometryRenderSystem::Init(EntityManager& ecs, int meshDetailDivisor) 
                 programDefsFullRange.c_str(),
                 UnlitGeometryVertexShaderSrc,
                 programDefsFullRange.c_str(),
+                UnlitGeometryFragmentShaderSrc,
+                GeometryUniformParms,
+                sizeof(GeometryUniformParms) / sizeof(OVRFW::ovrProgramParm));
+
+        ugrS.ProgramGlobalHardLimited_ = OVRFW::GlProgram::Build(
+                programDefsGlobalHard.c_str(),
+                UnlitGeometryVertexShaderSrc,
+                programDefsGlobalHard.c_str(),
+                UnlitGeometryFragmentShaderSrc,
+                GeometryUniformParms,
+                sizeof(GeometryUniformParms) / sizeof(OVRFW::ovrProgramParm));
+
+        ugrS.ProgramGlobalHardFullRange_ = OVRFW::GlProgram::Build(
+                programDefsGlobalHardFullRange.c_str(),
+                UnlitGeometryVertexShaderSrc,
+                programDefsGlobalHardFullRange.c_str(),
                 UnlitGeometryFragmentShaderSrc,
                 GeometryUniformParms,
                 sizeof(GeometryUniformParms) / sizeof(OVRFW::ovrProgramParm));
@@ -383,6 +424,8 @@ void UnlitGeometryRenderSystem::Shutdown(EntityManager& ecs) {
         }
         OVRFW::GlProgram::Free(ugrS.ProgramLimited_);
         OVRFW::GlProgram::Free(ugrS.ProgramFullRange_);
+        OVRFW::GlProgram::Free(ugrS.ProgramGlobalHardLimited_);
+        OVRFW::GlProgram::Free(ugrS.ProgramGlobalHardFullRange_);
         OVRFW::FreeTexture(ugrS.datasetReferenceTexture_);
         glDeleteBuffers(
             static_cast<GLsizei>(ugrS.uploadPbos_.size()),
@@ -392,6 +435,8 @@ void UnlitGeometryRenderSystem::Shutdown(EntityManager& ecs) {
         ugrS.pboFailureLogged_ = false;
         ugrS.ProgramLimited_ = {};
         ugrS.ProgramFullRange_ = {};
+        ugrS.ProgramGlobalHardLimited_ = {};
+        ugrS.ProgramGlobalHardFullRange_ = {};
         ugrS.currentSurfaceSet_ = 0;
         ugrS.depthTextureReady_ = false;
     });
@@ -487,6 +532,13 @@ void UnlitGeometryRenderSystem::Update(EntityManager& ecs, const OVRFW::ovrApplF
             lightComponent->minTint, lightComponent->maxTint,
             lightComponent->minExposure, lightComponent->maxExposure) :
             OVR::Vector4f(1.0f, 1.0f, 1.0f, 1.0f);
+        const bool useGlobalHardVariant =
+            ugrC.softOcclusion_ == 0 &&
+            (!lightState || lightState->tier != LightEstimateTier::Spatial);
+        if (useGlobalHardVariant != ugrS.useGlobalHardVariant_) {
+            ugrS.useGlobalHardVariant_ = useGlobalHardVariant;
+            RefreshGeometryPrograms(ugrS);
+        }
         for (int surface=0; surface<2; ++surface) {
             auto& gc = ugrS.surfaceDefs_[surface].graphicsCommand;
             gc.UniformData[15].Data = &ugrS.lightParams_;
@@ -646,11 +698,7 @@ void UnlitGeometryRenderSystem::CreateTextures(
 
     // Choose shader program based on decoded color range.
     ugrS.useFullRangeYuv_ = (*framePtr)->yuvFullRange ? 1 : 0;
-    for (int i = 0; i < 2; ++i) {
-        OVRFW::ovrGraphicsCommand& gc = ugrS.surfaceDefs_[i].graphicsCommand;
-        gc.Program = (ugrS.useFullRangeYuv_ != 0) ? ugrS.ProgramFullRange_ : ugrS.ProgramLimited_;
-        gc.BindUniformTextures();
-    }
+    RefreshGeometryPrograms(ugrS);
 
     // Compute bytes per row
     const uint32_t tex_Y_bpr = (*framePtr)->textureYWidth * bytesPerPixel(ugrC.texture_internal_formats_[TEX_Y]);
@@ -842,11 +890,7 @@ void UnlitGeometryRenderSystem::UpdateTextures(
     const int desiredFullRange = (*framePtr)->yuvFullRange ? 1 : 0;
     if (desiredFullRange != ugrS.useFullRangeYuv_) {
         ugrS.useFullRangeYuv_ = desiredFullRange;
-        for (int i = 0; i < 2; ++i) {
-            OVRFW::ovrGraphicsCommand& gc = ugrS.surfaceDefs_[i].graphicsCommand;
-            gc.Program = (ugrS.useFullRangeYuv_ != 0) ? ugrS.ProgramFullRange_ : ugrS.ProgramLimited_;
-            gc.BindUniformTextures();
-        }
+        RefreshGeometryPrograms(ugrS);
     }
 
     // Swap the current surface set index to point to the other set.

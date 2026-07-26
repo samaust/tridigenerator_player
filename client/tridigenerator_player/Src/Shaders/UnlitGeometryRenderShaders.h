@@ -77,6 +77,9 @@ varying highp vec4 worldPosition;
 #ifndef YUV_FULL_RANGE
 #define YUV_FULL_RANGE 0
 #endif
+#ifndef GLOBAL_HARD_VARIANT
+#define GLOBAL_HARD_VARIANT 0
+#endif
 
 vec3 yuv_to_rgb(float y, float u, float v) {
     float d = u - 0.5;
@@ -134,6 +137,7 @@ void main()
 	    u_lightParams[2].w, u_lightParams[3].w);
 
 	vec4 estimatedLight = globalLight;
+#if !GLOBAL_HARD_VARIANT
 	if (gridMinimumAndTier.w >= 2.0) {
 	    highp vec3 gridUv =
 	        (worldPosition.xyz - gridMinimumAndTier.xyz) * inverseExtentAndBlend.xyz;
@@ -141,6 +145,7 @@ void main()
 	        estimatedLight = texture(u_lightField, gridUv);
 	    }
 	}
+#endif
 	highp float matchAmount =
 	    clamp(inverseExtentAndBlend.w * matchingParams.x, 0.0, 1.0);
 	highp vec4 datasetReference = texelFetch(u_datasetColorReference, ivec2(int(maskId), 0), 0);
@@ -197,6 +202,9 @@ void main()
     // If the virtual object is further away (occluded) output a transparent color so real scene content from PT layer is displayed.
 
     highp float occlusionFactor = 0.0;
+#if GLOBAL_HARD_VARIANT
+    occlusionFactor = step(depthViewEyeZ - u_occlusionParams.z, objectDepth);
+#else
     if (u_occlusionParams.x < 0.5 || u_occlusionParams.y <= 0.0) {
       occlusionFactor = step(depthViewEyeZ - u_occlusionParams.z, objectDepth);
     } else {
@@ -220,6 +228,7 @@ void main()
       }
       occlusionFactor = (validCount > 0.0) ? (occlusionSum / validCount) : 0.0;
     }
+#endif
 
     gl_FragColor.rgb = rgb;
     gl_FragColor.a = 1.0 - occlusionFactor;

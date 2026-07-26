@@ -36,7 +36,10 @@ struct UnlitGeometryRenderState {
     // Shader programs (limited-range and full-range YUV)
     OVRFW::GlProgram ProgramLimited_;
     OVRFW::GlProgram ProgramFullRange_;
+    OVRFW::GlProgram ProgramGlobalHardLimited_;
+    OVRFW::GlProgram ProgramGlobalHardFullRange_;
     int useFullRangeYuv_ = 0;
+    bool useGlobalHardVariant_ = false;
 
     OVR::Vector4f intrinsics_ = OVR::Vector4f(1.0f, 1.0f, 0.0f, 0.0f);
     OVR::Vector2f imageSize_ = OVR::Vector2f(1.0f, 1.0f);
