@@ -1384,8 +1384,9 @@ void TDGenPlayerApp::BuildDiagnosticsControls() {
                 label.str(), {x, -0.05f, -1.5f}, {240.0f, 50.0f});
         }
     };
-    addRateChoice(72.0f, -0.27f);
-    addRateChoice(90.0f, 0.27f);
+    addRateChoice(72.0f, -0.36f);
+    addRateChoice(90.0f, 0.0f);
+    addRateChoice(120.0f, 0.36f);
     refreshRateMessageLabel_ = ui_->AddLabel(
         "", {0.0f, -0.12f, -1.5f}, {720.0f, 45.0f});
     RefreshDisplayRefreshRateUi();
