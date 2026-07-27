@@ -236,6 +236,12 @@ void main()
     }
 #endif
 
+    // Alpha blending does not suppress depth writes. Discard fully occluded
+    // fragments so invisible geometry cannot hide UI rendered behind it.
+    if (occlusionFactor >= 1.0) {
+      discard;
+    }
+
     gl_FragColor.rgb = rgb;
     gl_FragColor.a = 1.0 - occlusionFactor;
 
